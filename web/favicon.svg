@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" fill="none">
+  <defs>
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="50%" stop-color="#2563eb" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </linearGradient>
+    <linearGradient id="zap-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#93c5fd" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#1e3a8a" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <!-- Background Shield/Rounded Container -->
+  <rect x="2" y="2" width="32" height="32" rx="9" fill="url(#bg-grad)" filter="url(#shadow)" />
+  <rect x="2" y="2" width="32" height="32" rx="9" stroke="rgba(255,255,255,0.2)" stroke-width="1" />
+  
+  <!-- Outer Check-in Ring / Verified Orbit -->
+  <path d="M 18 8 A 10 10 0 1 1 9.5 13.5" stroke="rgba(255,255,255,0.4)" stroke-width="2" stroke-linecap="round" />
+  
+  <!-- Modern Lightning / Pulse Core -->
+  <path d="M 19 8 L 13.5 17.5 L 18 17.5 L 17 26 L 23.5 16.5 L 19 16.5 Z" fill="url(#zap-grad)" />
+</svg>

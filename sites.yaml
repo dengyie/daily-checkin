@@ -1,0 +1,672 @@
+# sites.yaml — daily-checkin site catalog
+# Keys: signs / already map to SiteAdapter sign_selectors / already_selectors.
+
+sites:
+  - name: 'fengwind'
+    url: https://api-welfalre.fengwind.com/
+    kind: browser
+    signs:
+      - 'button[data-slot="button"]:has-text("签到")'
+      - 'button.bg-primary:has-text("签到")'
+      - 'button:not([role="tab"]):has-text("签到")'
+      - 'button:has-text("签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=已签到'
+  - name: '薄荷公益站'
+    url: https://up.x666.me/
+    kind: bohe
+    signs:
+      - 'button:has-text("开始转动")'
+      - 'button:has-text("转动")'
+      - 'text=开始转动'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+  - name: '小鸡毛'
+    url: https://game.ark717.com/
+    kind: arkengine
+    signs:
+      - 'button:has-text("签到")'
+      - '#checkinBtn'
+    already:
+      - 'text=今日已签到'
+      - 'text=已签到'
+      - 'text=签到成功'
+  - name: 'HotaruAPI'
+    url: https://free.lyclaude.site/console/personal
+    kind: newapi_profile
+  - name: 'ai.52ccl.cn'
+    url: https://52ccl.net/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  - name: 'muyuan'
+    url: https://muyuan.do/console/personal
+    kind: newapi_profile
+  - name: '42'
+    url: https://api.42w.shop/profile
+    kind: newapi_profile
+  - name: 'jiuitj'
+    url: https://jiuuij.de5.net/console/personal
+    kind: newapi_profile
+  - name: 'afsmc'
+    url: https://api.afsmc.cn/profile
+    kind: newapi_profile
+  # zmingu(New API 网关):9222 共享 profile 已用 Linux.do 账号登录,无 OAuth 重登,
+  # 走标准 newapi_profile 流程:进 /profile 点「立即签到」+ 确认门。
+  - name: 'zmingu'
+    url: https://api.zmingu.app/profile
+    kind: newapi_profile
+  # minimax(johntime New API 站):LinuxDo OAuth 登录(linuxdo_oauth=true,
+  # checkin_enabled=true,无 turnstile),走标准 newapi_profile 流程:
+  # /profile → 未登录自动 LinuxDo SSO(共享 9222 profile)→ 点「立即签到」。
+  - name: 'minimax'
+    url: https://minimax.johntime.top/profile
+    kind: newapi_profile
+  # luckyg(131518.xyz New API 站):LinuxDo OAuth 登录(linuxdo_oauth=true,
+  # checkin_enabled=true),签到接口挂 turnstile 人机验证(token 自动就绪后才点
+  # CTA,wait_turnstile_token 内置处理),走标准 newapi_profile 流程。
+  - name: 'luckyg'
+    url: https://luckyg.131518.xyz/profile
+    kind: newapi_profile
+  - name: '林夕'
+    url: https://k40.shengqainbang.cn/check-in
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到")'
+      - 'button:has-text("今日签到")'
+  - name: '百倍'
+    url: https://sub.100xlabs.space/check-in
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到")'
+      - 'button:has-text("今日签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=今日已签'
+      - 'text=签到成功'
+    use_native_click: true
+  - name: 'huaibao'
+    url: https://ai.huaibao.top/console/personal
+    kind: newapi_profile
+  - name: '猫'
+    url: https://maoyulin.xyz/console/personal
+    kind: newapi_profile
+  - name: '魔方'
+    url: https://www.mofas.one/console/personal
+    kind: newapi_profile
+  - name: 'glm5.2 公益站'
+    url: https://grajsh3017-newapi.hf.space/profile
+    kind: newapi_profile
+  - name: '魔芋'
+    url: https://www.moyu.cn/console/personal
+    kind: newapi_profile
+  - name: 'windhub'
+    url: https://windhub.cc/console/personal
+    kind: browser
+    signs:
+      - 'button:has-text("签到"):not([disabled])'
+      - 'button.semi-button-primary:has-text("签到")'
+      - 'button:has-text("立即签到")'
+    already:
+      - 'button:has-text("今日已签到")'
+      - 'text=今日已签到'
+      - 'text="今日已签到"'
+  - name: 'mistral公益站'
+    url: https://translate.gzcrtw.com/console/personal
+    kind: newapi_profile
+  - name: 'neb公益站'
+    url: https://ai.9q.hk/profile
+    kind: newapi_profile
+  - name: 'huan'
+    url: https://ai.huan666.de/console/personal
+    kind: newapi_profile
+  - name: 'ciallo'
+    url: https://ioll.pp.ua/profile
+    kind: newapi_profile
+  - name: '咕嘎咕嘎生图站'
+    url: https://ai.xmiaom.com/profile
+    kind: newapi_profile
+  - name: '午夜'
+    url: https://api.lyjxka.top/profile
+    kind: newapi_profile
+  - name: 'abrdns'
+    url: https://checkin.new-api.abrdns.com/checkin
+    kind: browser
+    signs:
+      - 'button:has-text("签到领取奖励")'
+      - 'button:has-text("签到")'
+      - 'a:has-text("进入签到")'
+      - 'button:has-text("进入签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text="今日已签到"'
+      - 'text=签到成功'
+    prefer_catalog_url: true
+  - name: 'cross'
+    url: https://newapi-checkin.keungliang.dpdns.org/
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到")'
+      - 'button:has-text("使用 Linux Do 登录")'
+  - name: 'guxiaomo'
+    url: https://api.guxiaomo.site/wallet
+    kind: browser
+    prefer_catalog_url: true
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到")'
+    # 「每日仅可签到一次」是站点常驻说明文案,未签到页也有,绝不能当已签(2026-09-02
+    # 实测:未签页有可点「立即签到」+静态说明,当月累计 $0;只有「今日已签到/签到成功」
+    # 才算已签,否则假 ALREADY 跳过真实签到)。
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+  # yeelo(img.yeelo.fun):登录后落在 /admin/user-info,页面有可点的「今日签到」
+  # 按钮,已签后文案变「今天已签到，明天再来领取」。「已签到 N 天」是本月统计,
+  # 不是当日已签。dedicated adapter 让 CTA/确认态精确命中。
+  - name: 'yeelo'
+    url: https://img.yeelo.fun/admin/user-info
+    kind: browser
+    prefer_catalog_url: true
+    signs:
+      - 'button:has-text("今日签到")'
+      - 'button:has-text("签到")'
+    already:
+      - 'text=今天已签到'
+      - 'text=签到成功'
+      - 'text=今日已签到'
+  # columbina(newapi.columbina.eu.org):New API 系,密码框 input[name=password]
+  # type=text,凭据登录后 /profile 显示「每日签到 已签到 今天 +$X」→ 登录即签到。
+  - name: 'columbina'
+    url: https://newapi.columbina.eu.org/profile
+    kind: browser
+    prefer_catalog_url: true
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到")'
+      - 'button:has-text("今日签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=已签到'
+      - 'text=今天已签到'
+  # gemai(api.gemai.cc, 哈基米API站):New API 系账密登录站,真登录卡在 /sign-in
+  # (/login 直接 404),账号 input[name=username]+密码 input[name=password]
+  # type=password,含 legal 条款 checkbox。绑定真账密走 _ensure_account_logged_in
+  # (login_url override 到 /sign-in),登录后 /profile 判定签到态。
+  - name: 'gemai'
+    url: https://api.gemai.cc/profile
+    kind: browser
+    prefer_catalog_url: true
+    login_url: https://api.gemai.cc/sign-in
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到")'
+      - 'button:has-text("今日签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=已签到'
+      - 'text=今天已签到'
+  # helpcoder(helpcoder.cc, 帮帮程序员):New API 系(页脚「设计与开发由 New API」),
+  # 纯账密登录站,登录卡在 /login(「用户名或邮箱/密码/继续」,无 OAuth)。绑定真账密
+  # 走 _ensure_account_logged_in(默认派生 /login 即可)。登录后 /console/personal 判定签到态。
+  - name: 'helpcoder'
+    url: https://helpcoder.cc/console/personal
+    kind: browser
+    prefer_catalog_url: true
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到")'
+      - 'button:has-text("今日签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=已签到'
+      - 'text=今天已签到'
+  # hcnsec(api.hcnsec.cn, 新疆幻城网安科技公益大模型API网关):New API 系
+  # (真实登录后落 /dashboard/overview,非 /console/personal——该路径 SPA 404
+  # shell「糟糕 页面未找到」)。纯账密登录站,登录卡在 /sign-in(/login 404),
+  # username/password + legal-consent 条款 checkbox(不勾则登录 submit disabled,
+  # 且只能 JS click 原生 checkbox 才能解除——label.click 不触发 React 状态)。
+  # 绑定真账密走 _ensure_account_logged_in + login_url override 到 /sign-in。
+  - name: 'hcnsec'
+    url: https://api.hcnsec.cn/dashboard/overview
+    kind: browser
+    prefer_catalog_url: true
+    login_url: https://api.hcnsec.cn/sign-in
+    # 无签到按钮(登录后 dashboard 无 CTA),后端 POST /api/user/checkin 消费签到,
+    # 需带 localStorage uid 的自定义身份头。改走 signin_api(uid header 版)。
+    signin_api: /api/user/checkin
+    signin_api_uid_header: true
+    signs:
+      - 'button:has-text("签到")'
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("今日签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=已签到'
+      - 'text=今天已签到'
+  - name: 'DGB公益站'
+    url: https://freeapi.dgbmc.top/console/personal
+    kind: newapi_profile
+  - name: 'chengmo'
+    url: https://api.chengmo.cc.cd/profile
+    kind: newapi_profile
+  - name: 'rugao'
+    url: https://new-api.rugao.me/profile
+    kind: newapi_profile
+  - name: '图片公益站'
+    url: https://wisart.kuaileshifu.com/#/me
+    kind: browser
+    signs:
+      - 'button:has-text("签到")'
+      - 'text=签到'
+      - 'button:has-text("立即签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text="今日已签"'
+  - name: 'ANG'
+    url: https://oai.angforever.top/profile
+    kind: newapi_profile
+  - name: '福星'
+    url: https://www.fuxingapi.com/console/personal
+    kind: newapi_profile
+  - name: 'v-api'
+    url: https://v-api.de5.net/profile
+    kind: newapi_profile
+  - name: 'hlool'
+    url: https://api.hlool.top/profile
+    kind: newapi_profile
+  - name: '7r'
+    url: https://penis.7r.fit/console/personal
+    kind: newapi_profile
+  - name: '简直了'
+    url: https://jianzhile.vip/console/personal
+    kind: newapi_profile
+  - name: '无名'
+    url: https://welfare.0xpsyche.me/profile
+    kind: newapi_profile
+  - name: '子非鱼'
+    url: https://ai.112102.xyz/profile
+    kind: newapi_profile
+  - name: '7倍'
+    url: https://7x.hk/profile
+    kind: newapi_profile
+  - name: 'yoct'
+    url: https://yoct.cn/profile
+    kind: newapi_profile
+    signs:
+      - 'button:has-text("立即签到")'
+      - '[role="button"]:has-text("立即签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+  - name: 'anyrouter'
+    url: https://anyrouter.top/console
+    kind: browser
+    signs:
+      - 'button:has-text("签到")'
+      - 'button:has-text("Check in")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=Checked in today'
+      - 'text=already checked in'
+    signin_api: /api/user/sign_in
+  # agentrouter.org:签到须先登出再重新登录才触发。双账号(GitHub + Linux.do OAuth)
+  # 由专属 agentrouter_checkin 流程处理,不挂账密凭据(登录态在 staging Chrome profile)。
+  - name: 'agentrouter'
+    url: https://agentrouter.org/
+    kind: agentrouter
+    enabled: true
+    provider: agentrouter
+    signs:
+      - 'button:has-text("签到")'
+      - 'button:has-text("今日签到")'
+      - 'button:has-text("立即签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+      - 'text=已经签到'
+  # tabitoken.com(TaBiAI / New API 系):同 agentrouter,登录即触发额度,无签到按钮/文字。
+  # 单账号(仅 GitHub OAuth),由专属 tabitoken_checkin 流程处理(清 session cookie
+  # 再 GitHub 登录);不挂账密凭据(登录态在 staging Chrome profile)。
+  - name: 'tabitoken'
+    url: https://tabitoken.com/
+    kind: tabitoken
+    enabled: true
+    provider: tabitoken
+    signs:
+      - 'button:has-text("签到")'
+      - 'button:has-text("今日签到")'
+      - 'button:has-text("立即签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+      - 'text=已经签到'
+  # justwoker(api.justwoker.icu, JustDoWork):New API 系,签到机制=GitHub OAuth
+  # 登录即触发额度,无签到按钮/确认文字。单账号(仅 GitHub OAuth),登录态在 staging
+  # Chrome profile。专属 justwoker_checkin 流程(清 session → /sign-in → GitHub OAuth
+  # 回跳即签到 OK)按 kind 分发。
+  - name: 'justwoker'
+    url: https://api.justwoker.icu/
+    kind: justwoker
+    enabled: true
+    provider: justwoker
+    signs:
+      - 'button:has-text("使用 GitHub 继续")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+  # gorouter.app(GoRouter, New API 系):GitHub OAuth 登录即签到,无签到按钮。
+  # 单账号,专属 gorouter_checkin 流程按 kind 分发。
+  - name: 'gorouter'
+    url: https://gorouter.app/
+    kind: gorouter
+    enabled: true
+    provider: gorouter
+    signs:
+      - 'button:has-text("使用 GitHub 继续")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+  # mzlone.top(AIMZ / New API 系):GitHub OAuth 登录 + 正常 newapi 签到两步。
+  # 登录不算签,登录后 /profile 有真「每日签到/立即签到」区。专属 mzlone_checkin
+  # 流程按 kind 分发。
+  - name: 'mzlone'
+    url: https://mzlone.top/profile
+    kind: mzlone
+    enabled: true
+    provider: mzlone
+    prefer_catalog_url: true
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("每日签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+      - 'text=已签到'
+    # 「每日仅可签到一次」是站点常驻说明文案,未签到页也有,绝不能当已签(同 guxiaomo).
+  - name: '小喵喵'
+    url: https://cngov.cc.cd/custom/7920deaddf8828b7
+    kind: newapi_profile
+  - name: '快跑'
+    url: https://kuaipao.ai/console/personal
+    kind: newapi_profile
+  # Cloud Studio(腾讯云)个人中心「完成任务送机时」任务卡:已登录用户在
+  # 每日签到行右侧点「领取奖励」领取 +2 机时。领取中按钮临时变「领取中」(disabled),
+  # 完成后按钮消失、变纯文本「已签到」→ already 判据。页内另有「绑定腾讯云账号
+  # +20 已绑定」文案,绝不能当已签判据(常驻文案,非签到反馈)。
+  - name: 'cloudstudio'
+    url: https://cloudstudio.net/user-center
+    kind: browser
+    signs:
+      - 'button:has-text("领取奖励")'
+    already:
+      - 'text=已签到'
+  - name: 'CHY'
+    url: https://chybenzun.top/profile
+    kind: newapi_profile
+  - name: 'chybenzun VPN'
+    url: https://dy.chybenzun.top/
+    kind: browser
+    signs:
+      - 'button:has-text("签到")'
+      - 'button:has-text("Check-in")'
+  - name: 'nodeseek'
+    url: https://www.nodeseek.com/board
+    kind: browser
+    signs:
+      - 'button:has-text("试试手气")'
+      - '[role="button"]:has-text("试试手气")'
+    already:
+      - 'text=今日签到获得'
+      - 'text=今日已签到'
+      - 'text=今日已签'
+  - name: 'lucky0625 fuli'
+    url: https://fuli.lucky0625.qzz.io/
+    kind: browser
+    signs:
+      - 'button:has-text("摘一片四叶草")'
+      - 'button:has-text("摘一片四叶草 · 签到")'
+    already:
+      - 'text=今天的叶子已经摘过啦'
+      - 'button:has-text("今天的叶子已经摘过啦")'
+      - 'text=每日签到 · 今日已签到'
+      - 'text=今日已签到'
+      - 'text=今日已签'
+  - name: 'mulink'
+    url: https://demo.dev2.mulink.top/wallet
+    kind: browser
+    prefer_cta_before_auth: true
+    signs:
+      - 'button:has-text("立即打卡")'
+      - 'button:has-text("打卡")'
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到")'
+    already:
+      - 'text=今日已打卡'
+      - 'text=今天已打卡'
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+      - 'button:has-text("今日已打卡")'
+      - 'button:has-text("已打卡")'
+      - 'button:has-text("已签到")'
+  - name: 'wxiai'
+    url: https://api.wxiai.com/workspace
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+      - '[role="button"]:has-text("立即签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+    ready_rounds: 30
+    prefer_cta_before_auth: true
+    use_native_click: true
+    use_overlay_zapper: false
+  - name: 'llmpm'
+    url: https://api.llm.pm/checkin
+    kind: browser
+    prefer_cta_before_auth: true
+    signs:
+      - 'button:has-text("立即签到")'
+      - '[role="button"]:has-text("立即签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+      - 'button:has-text("已签到")'
+      - 'button:has-text("今日已签到")'
+    ready_rounds: 30
+  - name: '47'
+    url: https://47.47-gpt.com/47/checkin/
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+      - '[role="button"]:has-text("立即签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=今日签到已完成'
+      - 'text=签到成功'
+    ready_rounds: 25
+    prefer_catalog_url: true
+  - name: 'mlgb7'
+    url: https://image.mlgb7.com/account
+    kind: browser
+    prefer_catalog_url: true
+    signs:
+      - 'button:has-text("今日签到")'
+      - 'button:has-text("签到")'
+      - 'button:has-text("立即签到")'
+    already:
+      - 'text=已签到'
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+  - name: '604020'
+    url: https://search.604020.xyz/
+    kind: browser
+    feature_unavailable_reason: 'loaded Searchix dashboard has no check-in feature'
+  - name: 'ddcat'
+    url: https://ddcat.pronhubcn.com/wallet
+    kind: browser
+    signs:
+      - 'button:has-text("签到 +0.5")'
+      - 'button:has-text("签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=已签到'
+      - 'text=签到成功'
+      - 'button:has-text("已签到")'
+    use_native_click: true
+  - name: 'pipiwangcom'
+    url: https://img.pipiwangcom.com/
+    kind: browser
+    # LinuxDO-OAuth 站：登录态失效时必须走 LinuxDO SSO，不能用 prefer_cta_before_auth
+    # 提前命中恒常存在的顶栏「签到 +10」按钮而跳过登录（会话过期即 auth_required）。
+    signs:
+      - 'button:has-text("签到")'
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("今日签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+      - 'button:has-text("已签到")'
+  - name: 'pigeonw'
+    url: https://sub2.pigeonw.com/dashboard
+    kind: browser
+    prefer_cta_before_auth: true
+    use_overlay_zapper: true
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("今日签到")'
+      - 'button:has-text("签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+      - 'button:has-text("已签到")'
+      - 'button:has-text("今日已签到")'
+  - name: '老魔'
+    url: https://api.2020111.xyz/profile
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到领取奖励")'
+      - 'button:has-text("今日签到")'
+      - 'button:has-text("签到"):not(:has-text("每日签到"))'
+      - 'button:has-text("签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'button:has-text("已签到")'
+      - 'button:has-text("今日已签到")'
+  - name: 'arkengine'
+    url: https://game.arkengine.me/activities/checkin
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("今日签到")'
+      - 'button:has-text("签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=已签到'
+      - 'text=签到成功'
+      - 'button:has-text("已签到")'
+  - name: 'arkengine 大转盘'
+    url: https://game.arkengine.me/activities/wheel
+    kind: browser
+    signs:
+      - 'button:has-text("转一次")'
+      - 'button:has-text("次机会")'
+    already:
+      - 'text=今日次数已用完'
+      - 'text=0次机会'
+      - 'button:has-text("0次机会")'
+      - 'text=明日再来'
+      - 'text=保底进度'
+  # ultrarouter.org(Ultra Router · 艺の公益站):New API 克隆。
+  # 2026-09 GitHub OAuth 被站方移除(/sign-in 只剩「使用 LinuxDo 继续」, 所以改为
+  # 单账号 LinuxDo -> yourhandle 签到)。专属 ultrarouter_checkin 流程按 kind 分发。
+  # 登出只清本域 session cookie(P0 红线,见运维手册「P0:共享 9222 profile 的
+  # Cookie 全清禁令」)。
+  - name: 'ultrarouter'
+    url: https://ultrarouter.org/keys
+    kind: ultrarouter
+    enabled: true
+    prefer_catalog_url: true
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到领取奖励")'
+      - 'button:has-text("今日签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+      - 'button:has-text("已签到")'
+      - 'button:has-text("今日已签到")'
+  # zero.cat(ZeroCat):QuantumNous 模板站,LinuxDo OAuth 登录(共享 9222
+  # profile 的 Linux.do 会话),走标准 maybe_sso_if_needed → try_linuxdo_sso
+  # 流程。签到页 /checkin,按钮 「立即签到 」(Check in now),成功回执
+  # 「签到成功！获得…」,已签状态「已签到 / Checked in」。
+  - name: 'zerocat'
+    url: https://zero.cat/checkin
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("Check in now")'
+      - 'button:has-text("签到")'
+    already:
+      - 'text=签到成功'
+      - 'text=已签到'
+      - 'button:has-text("已签到")'
+      - 'text=Checked in'
+      - 'button:has-text("Checked in")'
+  # fluxionai.space(Fluxion AI / 流元AI):Sub2API 系福利站(非 New API),
+  # LinuxDo OAuth 登录(共享 9222 profile 的 Linux.do 会话),走标准
+  # maybe_sso_if_needed → try_linuxdo_sso 流程。福利中心 /welfare,签到按钮
+  # 「立即签到」,成功回执「签到成功(连续第 N 天)」/ toast「签到成功」,已签
+  # 状态按钮变「今日已签到」(disabled)。时区 UTC+8。需先有 API 调用(本站已满足)。
+  - name: 'fluxion'
+    url: https://fluxionai.space/welfare
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+    already:
+      - 'button:has-text("今日已签到")'
+      - 'text=今日已签到'
+      - 'text=签到成功'
+  # nexavlinks.com(NexaVlinks 聚合 / New API 系 AI 聚合站):两个账号,
+  # ① Linux.do OAuth 账号(USERNAME,复用 9222 共享 profile 的 linux.do 会话),
+  # ② 邮箱+密码账号(your_primary_email@example.com)。签到页 /check-in,签到按钮「立即签到」,
+  # 已签状态按钮变「今日已签到」(disabled),挂 Cloudflare Turnstile(runner 内置
+  # wait_turnstile_token 会等 token 就绪后才点 CTA)。双账号轮换登出只点站内
+  # 「退出登录」(清 NEXA 域 localStorage),P0 红线守。
+  - name: 'nexavlinks'
+    url: https://www.nexavlinks.com/check-in
+    kind: nexa
+    signs:
+      - 'button:has-text("立即签到")'
+    already:
+      - 'button:has-text("今日已签到")'
+      - 'text=今日已签到'
+      - 'text=签到成功'

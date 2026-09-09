@@ -1,0 +1,906 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Daily Check-in · 自动签到与监控中枢</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- ====================================================================
+         1. Left Collapsible Sidebar (New-API Style Navigation)
+         ==================================================================== -->
+    <aside class="app-sidebar" id="app-sidebar">
+      <div>
+        <div class="sidebar-header">
+          <div class="brand-wrap">
+            <div class="brand-logo-icon">
+              <img src="/favicon.svg" alt="Logo" class="brand-logo-img">
+            </div>
+            <div class="brand-info">
+              <div class="brand-title">Daily Check-in</div>
+              <div class="brand-badge">Hub · v2.5</div>
+            </div>
+          </div>
+          <button class="sidebar-toggle-btn" id="sidebar-toggle-btn" title="折叠/展开侧边栏">
+            <ui-icon name="arrow-left-right" size="14"></ui-icon>
+          </button>
+        </div>
+
+        <nav class="sidebar-nav">
+          <div class="nav-group-title">MONITORING</div>
+          <button class="nav-item is-active" data-view="overview">
+            <div class="nav-item-content">
+              <span class="nav-icon"><ui-icon name="chart-bar" size="16"></ui-icon></span>
+              <span class="nav-label">控制台总览</span>
+            </div>
+          </button>
+          <button class="nav-item" data-view="batch-config">
+            <div class="nav-item-content">
+              <span class="nav-icon"><ui-icon name="clock" size="16"></ui-icon></span>
+              <span class="nav-label">批次调度与全局配置</span>
+            </div>
+          </button>
+          <button class="nav-item" data-view="tasks">
+            <div class="nav-item-content">
+              <span class="nav-icon"><ui-icon name="clipboard-list" size="16"></ui-icon></span>
+              <span class="nav-label">自动签到站点</span>
+            </div>
+            <span class="nav-counter" id="sidebar-pending-badge">0</span>
+          </button>
+          <button class="nav-item" data-view="manual">
+            <div class="nav-item-content">
+              <span class="nav-icon"><ui-icon name="user-check" size="16"></ui-icon></span>
+              <span class="nav-label">人工手动签到</span>
+            </div>
+            <span class="nav-counter is-warn" id="sidebar-manual-badge">0</span>
+          </button>
+          <button class="nav-item" data-view="history">
+            <div class="nav-item-content">
+              <span class="nav-icon"><ui-icon name="trending-up" size="16"></ui-icon></span>
+              <span class="nav-label">历史趋势与证据</span>
+            </div>
+            <span class="nav-counter" id="sidebar-runs-badge">0</span>
+          </button>
+
+          <div class="nav-group-title">ORCHESTRATION</div>
+          <button class="nav-item" data-view="queue">
+            <div class="nav-item-content">
+              <span class="nav-icon"><ui-icon name="settings" size="16"></ui-icon></span>
+              <span class="nav-label">异步作业队列</span>
+            </div>
+            <span class="nav-counter" id="sidebar-jobs-badge">0</span>
+          </button>
+          <button class="nav-item" data-view="health">
+            <div class="nav-item-content">
+              <span class="nav-icon"><ui-icon name="shield" size="16"></ui-icon></span>
+              <span class="nav-label">熔断与健康诊断</span>
+            </div>
+            <span class="nav-counter" id="sidebar-health-badge">0</span>
+          </button>
+          <div class="nav-group-title">MANAGEMENT</div>
+          <button class="nav-item" data-view="site-manage">
+            <div class="nav-item-content">
+              <span class="nav-icon"><ui-icon name="plus" size="16"></ui-icon></span>
+              <span class="nav-label">新增签到任务站</span>
+            </div>
+          </button>
+          <button class="nav-item" data-view="credentials">
+            <div class="nav-item-content">
+              <span class="nav-icon"><ui-icon name="key" size="16"></ui-icon></span>
+              <span class="nav-label">Keychain 凭据箱</span>
+            </div>
+          </button>
+          <button class="nav-item" data-view="settings">
+            <div class="nav-item-content">
+              <span class="nav-icon"><ui-icon name="tool" size="16"></ui-icon></span>
+              <span class="nav-label">系统环境与运行状态</span>
+            </div>
+          </button>
+        </nav>
+      </div>
+
+      <div class="sidebar-footer">
+        <theme-toggle storage-key="daily-checkin-theme"></theme-toggle>
+      </div>
+    </aside>
+
+    <!-- ====================================================================
+         2. Main Workspace & Viewports
+         ==================================================================== -->
+    <div class="app-main">
+      <!-- Top Navigation & Action Header -->
+      <header class="app-topbar">
+        <div class="breadcrumb-trail">
+          <span class="bc-root">Hub</span>
+          <span class="bc-sep">/</span>
+          <span class="bc-current" id="page-title">控制台总览</span>
+        </div>
+        <div class="topbar-actions">
+          <status-indicator id="server-status" status="connecting" label="API 连接中"></status-indicator>
+          <button id="global-run-all-btn" class="btn primary sm"><ui-icon name="play" size="13"></ui-icon> 执行全部待办</button>
+          <button id="global-refresh-btn" class="btn sm"><ui-icon name="refresh" size="13"></ui-icon> 刷新</button>
+        </div>
+      </header>
+
+      <!-- Scrollable Main Viewport -->
+      <div class="content-viewport">
+
+        <!-- ================================================================
+             View 1: 控制台总览 (Overview Dashboard - 纯总体信息，无单站磁贴)
+             ================================================================ -->
+        <div class="view-pane is-active" id="pane-overview">
+          <!-- Top KPI Widgets -->
+          <div class="kpi-row">
+            <div class="kpi-card">
+              <div class="kpi-icon-box ok"><ui-icon name="check-circle" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="kpi-done">0</div>
+                <div class="kpi-info-label">今日已打卡</div>
+              </div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon-box pending"><ui-icon name="clock" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="kpi-pending">0</div>
+                <div class="kpi-info-label">今日待执行</div>
+              </div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon-box fail"><ui-icon name="circle-x" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="kpi-failed">0</div>
+                <div class="kpi-info-label">执行失败 / 异常</div>
+              </div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon-box purple"><ui-icon name="shield-check" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="kpi-rate">0%</div>
+                <div class="kpi-info-label">今日综合完成率</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Overview Summary Grid (双列总体概览) -->
+          <div class="overview-dual-grid">
+            <!-- 运行健康与调度通道 -->
+            <div class="content-card">
+              <div class="content-card-head">
+                <div class="card-title">
+                  <span><ui-icon name="activity" size="16"></ui-icon> 今日监控与执行概览 (Execution Summary)</span>
+                </div>
+                <button class="btn sm primary" id="jump-to-tasks-btn">进入站点矩阵 <ui-icon name="arrow-right" size="13"></ui-icon></button>
+              </div>
+              <div class="tile-info-grid tile-info-col2 mt-xs">
+                <div>
+                  <div class="tile-prop-label">今日纳入站点总数</div>
+                  <div class="tile-prop-val text-lg" id="overview-total-tasks">0</div>
+                </div>
+                <div>
+                  <div class="tile-prop-label">Keychain 凭据绑定</div>
+                  <div class="tile-prop-val text-lg" id="overview-creds-count">0</div>
+                </div>
+                <div>
+                  <div class="tile-prop-label">当前排队作业 (Jobs)</div>
+                  <div class="tile-prop-val text-lg" id="overview-jobs-count">0</div>
+                </div>
+                <div>
+                  <div class="tile-prop-label">确定性熔断站点</div>
+                  <div class="tile-prop-val text-lg text-danger" id="overview-health-count">0</div>
+                </div>
+              </div>
+              <div class="action-bar-row mt-sm">
+                <button class="btn sm" id="overview-jump-health-btn"><ui-icon name="shield" size="13"></ui-icon> 检查熔断站点</button>
+              </div>
+            </div>
+
+            <!-- 近期成功率趋势小图 -->
+            <div class="content-card">
+              <div class="content-card-head">
+                <div class="card-title">
+                  <span><ui-icon name="trending-up" size="16"></ui-icon> 近期打卡完成率走势 (Recent Trend)</span>
+                </div>
+                <button class="btn sm" id="jump-to-trend-btn">查看历史曲线 <ui-icon name="arrow-right" size="13"></ui-icon></button>
+              </div>
+              <div class="chart-box-wrap" id="overview-trend-chart">
+                <div class="empty-cell">加载趋势图表中...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Recent Runs Preview -->
+          <div class="content-card">
+            <div class="content-card-head">
+              <div class="card-title">
+                <span><ui-icon name="history" size="16"></ui-icon> 最近批次执行概览 (Recent Batches)</span>
+              </div>
+              <button class="btn sm" id="jump-to-history-btn">查看全部历史批次 <ui-icon name="arrow-right" size="13"></ui-icon></button>
+            </div>
+            <div class="table-responsive">
+              <table class="modern-table">
+                <thead>
+                  <tr>
+                    <th>批次 ID</th>
+                    <th>触发源</th>
+                    <th>开始时间</th>
+                    <th>退出码</th>
+                    <th>成功率</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="overview-runs-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- ================================================================
+             View 2: 注册站点管理与总览 (Registered Sites Overview - 平铺展开 + 侧边栏浮层详情)
+             ================================================================ -->
+        <div class="view-pane" id="pane-tasks">
+          <!-- 顶部搜索与筛选控制栏（直接平铺，无外部包裹容器） -->
+          <div class="tasks-toolbar-bar">
+            <div class="tasks-title-box">
+              <h2 class="tasks-page-title"><ui-icon name="clipboard-list" size="18"></ui-icon> 注册站点管理与总览 (Registered Sites)</h2>
+              <span class="group-badge-counter" id="tasks-header-count">0 / 0</span>
+            </div>
+            <div class="tasks-actions-bar">
+              <button class="btn sm primary" id="tasks-add-site-quick-btn"><ui-icon name="plus" size="13"></ui-icon> 新增站点</button>
+              <div class="sort-select-wrap">
+                <span class="sort-icon-fixed"><ui-icon name="arrows-sort" size="14"></ui-icon></span>
+                <select id="tasks-sort-select" class="sort-field-select" title="选择站点排序规则">
+                  <option value="import_desc">导入时间 (从新到旧)</option>
+                  <option value="import_asc">导入时间 (从旧到新)</option>
+                  <option value="alpha_asc">首字母 (A → Z / 拼音升序)</option>
+                  <option value="alpha_desc">首字母 (Z → A / 拼音降序)</option>
+                  <option value="status">运行状态 (待办/失败优先)</option>
+                  <option value="health">健康度 (熔断/异常置顶)</option>
+                </select>
+              </div>
+              <div class="search-field-wrap">
+                <span class="search-icon-fixed"><ui-icon name="search" size="14"></ui-icon></span>
+                <input id="tasks-search-input" class="search-field-input" type="search" placeholder="搜索站点名称 / URL / Provider 渠道 / Tag 类别...">
+              </div>
+            </div>
+          </div>
+
+          <!-- Tag 筛选 Chips（直接平铺） -->
+          <div class="tasks-chips-wrap">
+            <prompt-chips id="tasks-filter-chips" suggestions='["全部", "待办", "已完成", "失败", "熔断"]' active="全部"></prompt-chips>
+          </div>
+
+          <!-- 站点卡片全平铺网格容器 -->
+          <div id="tasks-tiles-container" class="tiles-spread-container"></div>
+        </div>
+
+        <!-- ================================================================
+             View 2.5: 人工手动签到专区 (Manual Check-in & Security Quarantine)
+             ================================================================ -->
+        <div class="view-pane" id="pane-manual">
+          <!-- Manual View Hero Card -->
+          <div class="content-card mb-md">
+            <div class="content-card-head">
+              <div>
+                <div class="card-title">
+                  <span><ui-icon name="user-check" size="18"></ui-icon> 人工签到与风控隔离区 (Manual Check-in Workspace)</span>
+                </div>
+                <p class="tile-prop-label mt-xs">
+                  此区域集中管理需要人工验证码 (Turnstile/Geetest)、2FA 或独立风控会话的站点。<strong>此类站点已自动从每日 08:10 自动化批次中排除</strong>，您可在此一键打开站点完成打卡并标记完成。
+                </p>
+              </div>
+              <div class="action-bar-row">
+                <button class="btn primary sm" id="manual-open-all-pending-btn"><ui-icon name="external-link" size="13"></ui-icon> 批量打开所有待办站点</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Manual View KPI Summary -->
+          <div class="kpi-row">
+            <div class="kpi-card">
+              <div class="kpi-icon-box purple"><ui-icon name="target" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="manual-kpi-total">0</div>
+                <div class="kpi-info-label">人工站点总数</div>
+              </div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon-box pending"><ui-icon name="clock" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="manual-kpi-pending">0</div>
+                <div class="kpi-info-label">今日待人工打卡</div>
+              </div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon-box ok"><ui-icon name="check-circle" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="manual-kpi-done">0</div>
+                <div class="kpi-info-label">今日已完成</div>
+              </div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon-box ok"><ui-icon name="shield-check" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="manual-kpi-rate">0%</div>
+                <div class="kpi-info-label">人工签到完成率</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 顶部搜索与筛选控制栏（统一 Toolbar 架构） -->
+          <div class="tasks-toolbar-bar">
+            <div class="tasks-title-box">
+              <h2 class="tasks-page-title"><ui-icon name="user" size="18"></ui-icon> 人工签到与风控隔离区 (Manual Check-in)</h2>
+              <span class="group-badge-counter" id="manual-header-count">0 / 0</span>
+            </div>
+            <div class="tasks-actions-bar">
+              <div class="sort-select-wrap">
+                <span class="sort-icon-fixed"><ui-icon name="arrows-sort" size="14"></ui-icon></span>
+                <select id="manual-filter-select" class="sort-field-select" title="选择人工签到状态筛选">
+                  <option value="all" selected>全部人工站点 (All)</option>
+                  <option value="pending">仅待办 (Pending)</option>
+                  <option value="done">已完成 (Done)</option>
+                </select>
+              </div>
+              <div class="search-field-wrap">
+                <span class="search-icon-fixed"><ui-icon name="search" size="14"></ui-icon></span>
+                <input id="manual-search-input" class="search-field-input" type="search" placeholder="搜索人工站点名称 / URL / Tag 标签...">
+              </div>
+            </div>
+          </div>
+
+          <!-- Tag 筛选 Chips（Awesome UI Kit PromptChips 组件） -->
+          <div class="tasks-chips-wrap">
+            <prompt-chips id="manual-filter-chips" suggestions='["全部", "待办", "已完成"]' active="全部"></prompt-chips>
+          </div>
+
+          <!-- Manual Site Tiles Container -->
+          <div id="manual-tiles-container" class="tiles-spread-container"></div>
+        </div>
+
+        <!-- ================================================================
+             View 3: 历史趋势与证据 (History & Trend Analytics)
+             ================================================================ -->
+        <div class="view-pane" id="pane-history">
+          <!-- 历史核心指标 KPI -->
+          <div class="kpi-row">
+            <div class="kpi-card">
+              <div class="kpi-icon-box purple"><ui-icon name="trending-up" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="history-kpi-avg-rate">0%</div>
+                <div class="kpi-info-label">历史平均成功率</div>
+              </div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon-box ok"><ui-icon name="chart-bar" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="history-kpi-total-runs">0</div>
+                <div class="kpi-info-label">记录批次总数</div>
+              </div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon-box pending"><ui-icon name="calendar" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="history-kpi-days-count">0 天</div>
+                <div class="kpi-info-label">监测历史跨度</div>
+              </div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-icon-box ok"><ui-icon name="target" size="22"></ui-icon></div>
+              <div>
+                <div class="kpi-info-val" id="history-kpi-total-success">0</div>
+                <div class="kpi-info-label">累计成功打卡站次</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 每日签到成功率趋势曲线 (Daily Trend Chart) -->
+          <div class="content-card mb-md">
+            <div class="content-card-head">
+              <div class="card-title">
+                <span><ui-icon name="trending-up" size="16"></ui-icon> 每日打卡成功率趋势曲线 (Daily Success Rate Trend)</span>
+              </div>
+              <span class="tile-prop-label">最近 14 天完整历史记录</span>
+            </div>
+            <div class="chart-large-container" id="history-curve-chart">
+              <div class="empty-cell">加载历史趋势数据...</div>
+            </div>
+          </div>
+
+          <!-- 每日数据统计对比明细表 (Daily Breakdown Table) -->
+          <div class="content-card mb-md">
+            <div class="content-card-head">
+              <div class="card-title">
+                <span><ui-icon name="calendar" size="16"></ui-icon> 每日签到数据明细汇总 (Daily Historical Records)</span>
+              </div>
+            </div>
+            <div class="table-responsive">
+              <table class="modern-table">
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>纳入总站数</th>
+                    <th>成功打卡</th>
+                    <th>失败 / 异常</th>
+                    <th>待办</th>
+                    <th>当日完成率</th>
+                  </tr>
+                </thead>
+                <tbody id="history-daily-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- 历史批次执行与证据流水 (Batches Inspection) -->
+          <div class="content-card">
+            <div class="content-card-head">
+              <div class="card-title">
+                <span><ui-icon name="history" size="16"></ui-icon> 历史运行批次与证据流水 (Execution Batches)</span>
+              </div>
+            </div>
+            <div id="history-batches-container"></div>
+          </div>
+        </div>
+
+        <!-- ================================================================
+             View 4: 异步作业队列 (Async Job Queue)
+             ================================================================ -->
+        <div class="view-pane" id="pane-queue">
+          <div class="content-card">
+            <div class="content-card-head">
+              <div class="card-title">
+                <span><ui-icon name="settings" size="16"></ui-icon> 异步执行作业队列 (Job Executor)</span>
+              </div>
+            </div>
+            <div class="table-responsive">
+              <table class="modern-table">
+                <thead>
+                  <tr>
+                    <th>Job ID</th>
+                    <th>类型</th>
+                    <th>创建时间</th>
+                    <th>状态</th>
+                    <th>Exit Code</th>
+                    <th>执行消息</th>
+                  </tr>
+                </thead>
+                <tbody id="jobs-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- ================================================================
+             View 5: 熔断与健康诊断 (Circuit Breakers & Health - 直接平铺)
+             ================================================================ -->
+        <div class="view-pane" id="pane-health">
+          <div class="tasks-toolbar-bar">
+            <div class="tasks-title-box">
+              <h2 class="tasks-page-title"><ui-icon name="shield-alert" size="18"></ui-icon> 熔断抑制与健康诊断 (Circuit Breakers)</h2>
+            </div>
+          </div>
+          <div class="health-desc-box mb-sm">
+            当站点发生确定性不可恢复错误（如账号注销、域名下线、Turnstile 死锁）时，系统自动对该站点实施熔断抑制，避免重复无效轮询消耗算力。
+          </div>
+          <div id="health-tiles-container" class="tiles-spread-container"></div>
+        </div>
+
+        <!-- ================================================================
+             View 6: 新增签到任务站与站点配置 (Site Management & Registration)
+             ================================================================ -->
+        <div class="view-pane" id="pane-site-manage">
+          <div class="tasks-toolbar-bar">
+            <div class="tasks-title-box">
+              <h2 class="tasks-page-title"><ui-icon name="plus" size="18"></ui-icon> 新增签到任务站点 (Add Check-in Site)</h2>
+            </div>
+          </div>
+
+          <div class="form-grid-col2">
+            <div class="content-card">
+              <div class="card-title mb-sm"><ui-icon name="clipboard-list" size="16"></ui-icon> 注册与配置站点参数</div>
+              <form id="new-site-manage-form">
+                <div class="form-group-item">
+                  <label for="new-site-name">站点唯一标识 / 名称 (Site Name) *</label>
+                  <input id="new-site-name" name="name" placeholder="例如: my-new-site 或 站点中文名" required>
+                  <span class="text-muted text-xs">唯一站点名，不能包含逗号或保留前缀</span>
+                </div>
+
+                <div class="form-group-item">
+                  <label for="new-site-url">站点签到入口 URL (Target URL) *</label>
+                  <input id="new-site-url" name="url" type="url" placeholder="https://example.com/checkin" required>
+                </div>
+
+                <div class="form-grid-inline">
+                  <div class="form-group-item">
+                    <label for="new-site-checkin-mode">签到执行模式 (Check-in Mode) *</label>
+                    <select id="new-site-checkin-mode" name="checkin_mode">
+                      <option value="auto">自动签到 (08:10 批次自动运行)</option>
+                      <option value="manual">人工手动签到 (强验证/2FA/专区打卡)</option>
+                    </select>
+                  </div>
+                  <div class="form-group-item">
+                    <label for="new-site-provider">调度器 / Provider 类型 *</label>
+                    <select id="new-site-provider" name="provider">
+                      <option value="legacy_browser">legacy_browser (通用 Headless 浏览器)</option>
+                      <option value="new_api">new_api (New API 格式站点)</option>
+                      <option value="one_api">one_api (One API 格式站点)</option>
+                      <option value="custom">custom (专用适配脚本)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="form-group-item">
+                  <label>标签 Tags (已有多选选择与快速添加)</label>
+                  <div class="tags-picker-group">
+                    <div class="tags-chips-cloud" id="new-site-tags-checkboxes">
+                      <!-- 动态由现有站点提取的 Tag Checkbox 渲染 -->
+                    </div>
+                    <div class="tags-custom-add-row">
+                      <input id="new-site-custom-tag-input" placeholder="输入自定义新标签 (按回车或点添加)...">
+                      <button type="button" class="btn sm" id="new-site-add-tag-btn"><ui-icon name="plus" size="12"></ui-icon> 添加标签</button>
+                    </div>
+                  </div>
+                  <!-- 隐藏 input 保持 form 原生提交兼容性 -->
+                  <input type="hidden" id="new-site-tags" name="tags" value="">
+                </div>
+
+                <div class="action-bar-row mt-md">
+                  <button type="submit" class="btn primary"><ui-icon name="plus" size="13"></ui-icon> 立即保存并加入今日待办</button>
+                  <button type="reset" class="btn"><ui-icon name="refresh" size="13"></ui-icon> 重置表单</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="content-card">
+              <div class="card-title mb-sm"><ui-icon name="info-circle" size="16"></ui-icon> 站点配置说明指南</div>
+              <div class="tile-info-grid tile-info-col1">
+                <div>
+                  <div class="tile-prop-label">自动签到 (Auto Mode)</div>
+                  <div class="tile-prop-val wrap-text text-xs text-muted">每日 08:10 定时守护任务会自动调度无头 Chrome 实例接入该站点，寻找签到按钮并完成证据截屏与上报。</div>
+                </div>
+                <div>
+                  <div class="tile-prop-label">人工手动签到 (Manual Mode)</div>
+                  <div class="tile-prop-val wrap-text text-xs text-muted">适用于有强人机验证码（如 hCaptcha/极验）、2FA 二步验证或频繁封禁自动化脚本的站点。定时任务会自动跳过，由您在「人工手动签到」专区一键打开网页并打卡。</div>
+                </div>
+                <div>
+                  <div class="tile-prop-label">Keychain 凭据绑定</div>
+                  <div class="tile-prop-val wrap-text text-xs text-muted">如果站点需要特定的 Session Cookie、Token 或账号密码，可前往「Keychain 凭据箱」添加，密钥将加密存储在 macOS 系统 Keychain。</div>
+                </div>
+                <div>
+                  <div class="tile-prop-label">任务持久化存储</div>
+                  <div class="tile-prop-val wrap-text text-xs text-muted">新注册的站点会自动写入系统权威数据库（system.db）并实时呈现在控制台与站点矩阵中，无需外部手动同步。</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ================================================================
+             View 7: Keychain 凭据保险箱 (Credentials Vault)
+             ================================================================ -->
+        <div class="view-pane" id="pane-credentials">
+          <div class="content-card mb-md">
+            <div class="card-title mb-sm"><ui-icon name="plus" size="16"></ui-icon> 添加/更新站点凭据到 Keychain</div>
+            <form id="credential-form">
+              <div class="form-grid-inline">
+                <div class="form-group-item">
+                  <label for="cred-site">站点名称 *</label>
+                  <input id="cred-site" name="site" placeholder="例如: any-site" required>
+                </div>
+                <div class="form-group-item">
+                  <label for="cred-kind">凭据类型 *</label>
+                  <select id="cred-kind" name="kind">
+                    <option value="token">Token 令牌</option>
+                    <option value="cookie">Cookie 字符串</option>
+                    <option value="password">Password 账号密码组合</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-group-item is-hidden" id="cred-account-row">
+                <label for="cred-account">账号 / 用户名 / 邮箱 *</label>
+                <input id="cred-account" name="account" placeholder="输入站点登录账号/用户名/邮箱...">
+              </div>
+              <div class="form-group-item">
+                <label for="cred-secret" id="cred-secret-label">秘密值 (macOS Keychain 加密存储，前端永不回显) *</label>
+                <input id="cred-secret" name="secret" type="password" autocomplete="off" placeholder="输入 Token / Cookie / 密码..." required>
+              </div>
+              <div class="form-group-item">
+                <label for="cred-label">备注标签 (可选)</label>
+                <input id="cred-label" name="label" placeholder="如: 主账号 / session_id">
+              </div>
+              <button type="submit" class="btn primary block">保存到 macOS Keychain</button>
+            </form>
+          </div>
+
+          <div class="content-card">
+            <div class="content-card-head">
+              <div class="card-title">
+                <span><ui-icon name="lock" size="16"></ui-icon> 已配置的 Keychain 凭据引用 (Credentials Store)</span>
+              </div>
+            </div>
+            <div class="table-responsive">
+              <table class="modern-table">
+                <thead>
+                  <tr>
+                    <th>站点名称</th>
+                    <th>凭据类型</th>
+                    <th>备注标签</th>
+                    <th>Keychain 引用 ID</th>
+                    <th>更新时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="credentials-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- ================================================================
+             View 9: 每日签到总批次与全局调度配置 (Batch Schedule & Execution Config)
+             ================================================================ -->
+        <div class="view-pane" id="pane-batch-config">
+          <form id="batch-config-form">
+            <div class="form-grid-col2">
+              <!-- 1. 核心定时与整批预算 -->
+              <div class="content-card">
+                <div class="card-title mb-sm"><ui-icon name="clock" size="16"></ui-icon> 核心调度规则与批次总预算</div>
+                <div class="form-group-item">
+                  <label for="cfg-schedule-cron-time">每日自动触发时间 (Schedule Time)</label>
+                  <input type="text" id="cfg-schedule-cron-time" name="schedule_cron_time" placeholder="08:10" value="08:10" required>
+                  <small class="tile-prop-label mt-xs d-block">
+                    系统每天全量自动化批次触发时间（24小时制 HH:MM），由 LaunchAgent 托管执行。
+                  </small>
+                </div>
+                <div class="form-group-item">
+                  <label for="cfg-batch-timeout-s">全批次总超时上限 (Batch Timeout · 秒)</label>
+                  <input type="number" id="cfg-batch-timeout-s" name="batch_timeout_s" placeholder="2400" min="60" max="7200" value="2400" required>
+                  <small class="tile-prop-label mt-xs d-block">
+                    整批所有站点执行的总时间预算（默认 2400 秒 / 40 分钟），超时将强制熔断并记录审计流水。
+                  </small>
+                </div>
+                <div class="form-group-item">
+                  <label for="cfg-site-timeout-s">单站执行超时 (Site Timeout · 秒)</label>
+                  <input type="number" id="cfg-site-timeout-s" name="site_timeout_s" placeholder="60" min="10" max="300" value="60" required>
+                  <small class="tile-prop-label mt-xs d-block">
+                    单个站点页面加载、元素扫描及确认的硬上限，防止单个卡死站点阻塞整批。
+                  </small>
+                </div>
+              </div>
+
+              <!-- 2. 交互等待与重试风控 -->
+              <div class="content-card">
+                <div class="card-title mb-sm"><ui-icon name="shield" size="16"></ui-icon> 验证码与重试风控阈值</div>
+                <div class="form-group-item">
+                  <label for="cfg-sso-timeout-s">OAuth SSO 认证授权超时 (SSO Timeout · 秒)</label>
+                  <input type="number" id="cfg-sso-timeout-s" name="sso_timeout_s" placeholder="30" min="10" max="120" value="30" required>
+                  <small class="tile-prop-label mt-xs d-block">
+                    Linux.do / GitHub OAuth 单点登录回跳与授权确认的最大等待时长。
+                  </small>
+                </div>
+                <div class="form-group-item">
+                  <label for="cfg-cf-wait-s">Cloudflare / Turnstile 盾等待 (CF Wait · 秒)</label>
+                  <input type="number" id="cfg-cf-wait-s" name="cf_wait_s" placeholder="30" min="5" max="120" value="30" required>
+                  <small class="tile-prop-label mt-xs d-block">
+                    页面出现 Turnstile 人机验证挑战时的自动就绪与等待窗口。
+                  </small>
+                </div>
+                <div class="form-group-item">
+                  <label for="cfg-connect-retries">CDP 连接失败重试次数 (Connect Retries)</label>
+                  <input type="number" id="cfg-connect-retries" name="connect_retries" placeholder="2" min="0" max="5" value="2" required>
+                  <small class="tile-prop-label mt-xs d-block">
+                    附着 Chrome 9222 调试端口出现瞬时抖动时的重试次数。
+                  </small>
+                </div>
+              </div>
+
+              <!-- 3. Telegram 战报推送偏好 -->
+              <div class="content-card">
+                <div class="card-title mb-sm"><ui-icon name="send" size="16"></ui-icon> Telegram 日报推送渠道与偏好</div>
+                <div class="form-group-item">
+                  <label for="cfg-tg-notify-enabled">每日战报总开关 (Notification Switch)</label>
+                  <select id="cfg-tg-notify-enabled" name="tg_notify_enabled">
+                    <option value="true">开启 TG 日报推送 (每天批次完成后发送)</option>
+                    <option value="false">关闭 TG 推送</option>
+                  </select>
+                </div>
+                <div class="form-group-item">
+                  <label for="cfg-tg-notify-policy">推送触发策略 (Notify Policy)</label>
+                  <select id="cfg-tg-notify-policy" name="tg_notify_policy">
+                    <option value="all">全量推送（无论全成功还是有失败均发送）</option>
+                    <option value="fail_only">仅当存在失败站点时报警（全成功保持静默）</option>
+                  </select>
+                </div>
+                <div class="form-group-item">
+                  <label for="cfg-tg-bot-token">TG Bot Token (来自 @BotFather)</label>
+                  <input type="password" id="cfg-tg-bot-token" name="tg_bot_token" placeholder="8634555764:AAE5..." autocomplete="off">
+                </div>
+                <div class="form-group-item">
+                  <label for="cfg-tg-chat-id">接收目标 Chat ID (用户/频道 ID)</label>
+                  <input type="text" id="cfg-tg-chat-id" name="tg_chat_id" placeholder="例如: 7888011089">
+                </div>
+                <div class="action-bar-row mt-sm">
+                  <button type="button" class="btn sm" id="cfg-test-tg-btn"><ui-icon name="send" size="13"></ui-icon> 发送测试消息</button>
+                </div>
+              </div>
+
+              <!-- 4. 运行时持久化与控制策略 -->
+              <div class="content-card">
+                <div class="card-title mb-sm"><ui-icon name="database" size="16"></ui-icon> 动态持久化架构说明</div>
+                <div class="tile-info-grid tile-info-col1">
+                  <div>
+                    <div class="tile-prop-label">配置存储权威 (Single Source of Truth)</div>
+                    <div class="tile-prop-val font-mono">SQLite system.db → system_config 表</div>
+                  </div>
+                  <div>
+                    <div class="tile-prop-label">环境变量优先级策略</div>
+                    <div class="tile-prop-val text-xs text-muted wrap-text">
+                      当前面板配置保存在 SQLite 权威表中，每日批次与 Web 端将优先读取此处动态配置。未配置项自动回退至本地 <code>env.sh</code> 默认值。
+                    </div>
+                  </div>
+                  <div>
+                    <div class="tile-prop-label">防打扰契约 (Anti-Spam Contract)</div>
+                    <div class="tile-prop-val text-xs text-muted wrap-text">
+                      Telegram 战报严格锁定为「每日 08:10 全量批次（Full Cron Batch）」完成后触发，Web 端单站测试或局域重跑绝不触发推送打扰。
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="action-bar-row mt-lg">
+              <button type="submit" class="btn primary" id="cfg-save-all-btn"><ui-icon name="check" size="14"></ui-icon> 保存并应用总批次配置</button>
+              <button type="button" class="btn" id="cfg-reset-btn"><ui-icon name="refresh" size="14"></ui-icon> 重新读取最新配置</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- ================================================================
+             View 8: 系统环境与运行状态 (Runtime Settings)
+             ================================================================ -->
+        <div class="view-pane" id="pane-settings">
+          <div class="form-grid-col2">
+            <div class="content-card">
+              <div class="card-title mb-sm"><ui-icon name="activity" size="16"></ui-icon> 后台守护进程与环境状态</div>
+              <div class="tile-info-grid tile-info-col1">
+                <div>
+                  <div class="tile-prop-label">API 服务端口</div>
+                  <div class="tile-prop-val">127.0.0.1:8765 (Active)</div>
+                </div>
+                <div>
+                  <div class="tile-prop-label">前端控制台端口</div>
+                  <div class="tile-prop-val">127.0.0.1:8766 (Active)</div>
+                </div>
+                <div>
+                  <div class="tile-prop-label">CDP 调试端口</div>
+                  <div class="tile-prop-val">127.0.0.1:9222 (Headed Profile)</div>
+                </div>
+                <div>
+                  <div class="tile-prop-label">调度定时</div>
+                  <div class="tile-prop-val">每天 08:10 (LaunchAgent com.mango.daily-checkin)</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="content-card">
+              <div class="card-title mb-sm"><ui-icon name="database" size="16"></ui-icon> 独立权威数据库架构</div>
+              <p class="tile-prop-label mb-sm">
+                系统全量自管运行：基于 SQLite 权威数据中心（<code>system.db</code>），任务生成、状态流转、历史批次与凭据密钥均由系统闭环持久化。
+              </p>
+              <div class="tile-info-grid tile-info-col1">
+                <div>
+                  <div class="tile-prop-label">数据库路径 (SQLite Authority)</div>
+                  <div class="tile-prop-val font-mono">~/daily-checkin-staging/data/system.db</div>
+                </div>
+                <div>
+                  <div class="tile-prop-label">凭据密钥存储</div>
+                  <div class="tile-prop-val font-mono">macOS Keychain / Secure Credential Store</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ====================================================================
+       Slide-over Site Detail Drawer (站点细致化右侧浮层详情页)
+       ==================================================================== -->
+  <aside class="evidence-drawer" id="site-drawer-panel" aria-label="站点详情面板">
+    <div class="drawer-header">
+      <div class="drawer-site-header-wrap">
+        <div class="drawer-site-avatar-box" id="site-drawer-avatar"></div>
+        <div class="drawer-title-group">
+          <div class="drawer-site-title-row">
+            <div class="drawer-title" id="site-drawer-title">站点名称</div>
+            <span class="tile-category-tag" id="site-drawer-category">Category</span>
+            <span class="tile-status-pill is-ok" id="site-drawer-status-pill">
+              <span class="tile-pulse-dot"></span>
+              <span id="site-drawer-status-text">已打卡</span>
+            </span>
+          </div>
+          <div class="drawer-subtitle font-mono" id="site-drawer-url">https://example.com</div>
+        </div>
+      </div>
+      <button class="drawer-close-btn" id="site-drawer-close-btn" title="关闭详情"><ui-icon name="x" size="16"></ui-icon></button>
+    </div>
+
+    <!-- Site Drawer Tab Navigation -->
+    <div class="drawer-tabs-bar">
+      <button class="drawer-tab-btn is-active" data-site-tab="config"><ui-icon name="globe" size="14"></ui-icon> 站点资料与配置</button>
+      <button class="drawer-tab-btn" data-site-tab="credentials"><ui-icon name="key" size="14"></ui-icon> Keychain 凭据</button>
+      <button class="drawer-tab-btn" data-site-tab="health"><ui-icon name="shield" size="14"></ui-icon> 健康度与诊断</button>
+      <button class="drawer-tab-btn" data-site-tab="history"><ui-icon name="history" size="14"></ui-icon> 历史签到流水</button>
+    </div>
+
+    <!-- Site Drawer Tab Body -->
+    <div class="drawer-body">
+      <div class="drawer-tab-pane is-active" id="site-pane-config"></div>
+      <div class="drawer-tab-pane" id="site-pane-credentials"></div>
+      <div class="drawer-tab-pane" id="site-pane-health"></div>
+      <div class="drawer-tab-pane" id="site-pane-history"></div>
+    </div>
+
+    <!-- Site Drawer Sticky Action Footer -->
+    <div class="drawer-footer-bar" id="site-drawer-footer"></div>
+  </aside>
+
+  <!-- ====================================================================
+       Slide-over 4-Tab Evidence Drawer (KnowledgeDrawer Architecture)
+       ==================================================================== -->
+  <div class="drawer-backdrop" id="drawer-backdrop"></div>
+  <aside class="evidence-drawer" id="drawer-panel" aria-label="执行证据面板">
+    <div class="drawer-header">
+      <div class="drawer-title-group">
+        <div class="drawer-title" id="drawer-title">执行证据详情</div>
+        <div class="drawer-subtitle" id="drawer-subtitle">CDP 自动化执行上下文与验证快照</div>
+      </div>
+      <button class="drawer-close-btn" id="drawer-close-btn" title="关闭抽屉"><ui-icon name="x" size="16"></ui-icon></button>
+    </div>
+
+    <!-- 4-Tab Navigation Bar -->
+    <div class="drawer-tabs-bar">
+      <button class="drawer-tab-btn is-active" data-drawer-tab="actions"><ui-icon name="activity" size="14"></ui-icon> 动作流水</button>
+      <button class="drawer-tab-btn" data-drawer-tab="confirmation"><ui-icon name="check-circle" size="14"></ui-icon> 结果确认</button>
+      <button class="drawer-tab-btn" data-drawer-tab="attribution"><ui-icon name="chart-bar" size="14"></ui-icon> 耗时与归因</button>
+      <button class="drawer-tab-btn" data-drawer-tab="json"><ui-icon name="file-text" size="14"></ui-icon> 原始 JSON</button>
+    </div>
+
+    <!-- Tab Panels Container -->
+    <div class="drawer-body">
+      <div class="drawer-tab-pane is-active" id="pane-tab-actions"></div>
+      <div class="drawer-tab-pane" id="pane-tab-confirmation"></div>
+      <div class="drawer-tab-pane" id="pane-tab-attribution"></div>
+      <div class="drawer-tab-pane" id="pane-tab-json"></div>
+    </div>
+  </aside>
+
+  <!-- ====================================================================
+       Global Authentication Token Gate Overlay
+       ==================================================================== -->
+  <div class="token-gate-overlay" id="token-gate-overlay">
+    <div class="token-gate-card">
+      <div class="token-gate-brand">
+        <div class="brand-logo-icon"><ui-icon name="zap" size="24"></ui-icon></div>
+        <div class="token-gate-title">Daily Check-in Hub</div>
+        <div class="token-gate-subtitle">请输入访问密码或 Bearer Token 解锁控制台</div>
+      </div>
+
+      <div class="token-input-wrap">
+        <input type="password" id="token-input" class="token-input" placeholder="输入访问密码..." autocomplete="off">
+        <button id="token-submit-btn" class="btn primary">解锁控制台</button>
+      </div>
+      <div id="token-error" class="token-error"></div>
+    </div>
+  </div>
+
+  <!-- Global Message Toast -->
+  <div id="message-toast" class="message-toast"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

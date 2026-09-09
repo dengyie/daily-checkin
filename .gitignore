@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+*.db
+*.db-shm
+*.db-wal
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local runtime / logs
+*.log
+.playwright-mcp/
+*.png
+*.jpg
+!docs/assets/
+!docs/assets/*.png
+runtime/
+
+# Secrets
+*.pem
+credentials*
+probe_live.py
+probe_deep.py
+live_verify_wh_ab.py
+.probe_live.json
+__pycache__/
+*.pyc
+.probe_*.json
+.probe_7x.json
+probe_*.py
+live_verify_*.py

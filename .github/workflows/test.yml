@@ -1,0 +1,68 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-14
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Python
+        run: |
+          python -m py_compile \
+            stealth_checkin_runner.py \
+            scripts/daily-checkin-cron.py \
+            checkin_core/*.py \
+            checkin_core/providers/*.py \
+            tests/*.py
+
+      - name: Run legacy regression suite
+        run: python test_stealth_checkin_m1.py
+
+      - name: Run system and provider suite
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Validate frontend and shell entry
+        run: |
+          node --check web/app.js
+          bash -n scripts/daily-checkin-cdp.sh
+          bash -n scripts/linux-smoke.sh
+          git diff --check
+
+  linux-smoke:
+    # Linux portability gate: credential backend + supervisor + WAL/flock on a
+    # non-macOS host. Never runs real sites or launches a browser.
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run Linux portability smoke
+        run: bash scripts/linux-smoke.sh
+      - name: Run credential backend unit tests on Linux
+        run: python -m unittest tests.test_system_store_web.FileCredentialsTests tests.test_system_store_web.CredentialStoreFactoryTests -v
