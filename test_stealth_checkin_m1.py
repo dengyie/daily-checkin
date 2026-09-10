@@ -3968,6 +3968,57 @@ class TestMulinkClaimSelector(unittest.TestCase):
         self.assertIn('"本周期" not in txt', src)
         self.assertIn('"额度池" not in txt', src)
 
+class TestIsAbntSite(unittest.TestCase):
+    """abnt.it(Aether API)尊属适配的站点判定与接线。
+
+    该站是标准 New API 实例,但 LinuxDO OAuth 回跳落在 /sign-in(gate page 停住),
+    真实登录态却在另一个带会话的 /profile tab,通用 newapi_profile 流程因此误判
+    not logged in → auth_required。登录适配器 abnt_checkin 接管 „„/sign-in → SSO 后
+    定位带登录态 /profile → 再点签到。
+    """
+
+    def setUp(self):
+        self.m = load_mod()
+
+    def test_is_abnt_site_positive_negative(self):
+        m = self.m
+        self.assertTrue(m.is_abnt_site("https://api.abnt.it/profile"))
+        self.assertTrue(m.is_abnt_site("https://api.abnt.it/sign-in"))
+        self.assertTrue(m.is_abnt_site("https://abnt.it/"))
+        self.assertFalse(m.is_abnt_site("https://demo.dev2.mulink.top/wallet"))
+        self.assertFalse(m.is_abnt_site("https://example.com/"))
+
+    def test_resolve_abnt_kind_is_dedicated(self):
+        m = self.m
+        a = m.resolve_site("abnt", "https://api.abnt.it/profile")
+        self.assertIsNotNone(a)
+        self.assertEqual(a.kind, "abnt")
+
+    def test_yaml_registers_abnt_dispatch_kind(self):
+        m = self.m
+        # sites.yaml 条目存在且 kind=abnt
+        from stealth_checkin_runner import SITE_ADAPTERS
+        found = [a for a in SITE_ADAPTERS if getattr(a, "name", "") == "abnt"]
+        self.assertTrue(found, "abnt 条目应在 sites.yaml 解析的 SITE_ADAPTERS 中")
+        self.assertEqual(found[0].kind, "abnt")
+
+    def test_legacy_dispatch_contains_abnt_branch(self):
+        src = TARGET.read_text(encoding="utf-8")
+        self.assertIn('is_abnt_site(site_url)', src)
+        self.assertIn('return await abnt_checkin(page, adapter, browser=browser)', src)
+
+    def test_yaml_registers_abnt_adapter(self):
+        """sites.yaml 注册的 abnt 条目可被 _adapter_from_yaml_entry 解析并透传 kind=abnt。"""
+        import yaml
+        self.assertTrue(os.path.exists("sites.yaml"))
+        with open("sites.yaml", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "abnt"), None)
+        self.assertIsNotNone(entry)
+        from stealth_checkin_runner import _adapter_from_yaml_entry
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "abnt")
+
 
 if __name__ == "__main__":
 

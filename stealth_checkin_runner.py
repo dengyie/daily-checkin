@@ -429,7 +429,7 @@ TERMS_CLICK_SELECTORS = [
 ]
 
 Status = Literal["OK", "ALREADY", "FAIL"]
-AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa"]
+AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt"]
 
 
 @dataclass
@@ -1232,6 +1232,16 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             already=list(already) if already is not None else None,
             ready_rounds=rr,
             prefer_catalog_url=bool(entry.get("prefer_catalog_url", False)),
+        )
+    if kind == "abnt":
+        # api.abnt.it(Aether API)尊属 abnt_checkin 流程:kind 必须透传,否则落 browser
+        # 默认而走不到尊属适配(且结果里 adapter=abnt 而非 browser)。
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else None,
+            already=list(already) if already is not None else None,
+            ready_rounds=rr,
+            kind="abnt",
         )
     # browser (default)
     return _B(
@@ -5814,6 +5824,186 @@ async def _ultrarouter_goto_profile(page, adapter) -> bool:
         return False
 
 
+# ===========================================================================
+# abnt.it(Aether API / api.abnt.it)——LinuxDo OAuth New API 站(abnt_checkin)
+#
+# 接入(2026-09-11):`/api/status` 实测标准 New API 实例——`checkin_enabled=true`、
+# `linuxdo_oauth=true`(唯一 OAuth)、`github_oauth=false`、无 turnstile。
+#
+# 为什么不能走通用 newapi_profile 流程:该 fork 的 LinuxDO OAuth 点「允许」后,
+# 回跳经常落在 `/sign-in?redirect=...`(一个仍展示登录表单的页),而真实登录态
+# 却落在另一个带会话的 `/profile` tab。通用流程的 gate page 停在 `/sign-in` 判
+# 不出已登录 → 报 `auth_required(not logged in)`,二次 SSO 也失败。
+# 专用适配:SSO 后显式定位到带真实登录态的 /profile tab(同 ultrarouter 的
+# 「回跳落新 tab」处理范式),再走标准 New API 签到。P0 cookie 红线守(绝不全清)。
+# ===========================================================================
+
+ABNT_SIGNIN_URL = "https://api.abnt.it/sign-in"
+ABNT_PROFILE_URL = "https://api.abnt.it/profile"
+ABNT_OAUTH_RETURN_S = 2.5
+# 登录态已落到 /profile 后,标准 New API 签到用默认 NEWAPI 选定器包即可。
+ABNT_SIGN_SELECTORS = NEWAPI_SIGN_SELECTORS
+ABNT_ALREADY_SELECTORS = NEWAPI_ALREADY_SELECTORS
+ABNT_DONE_INDICATORS = ("今日已签到", "签到成功", "今天已签", "已签到")
+
+
+def is_abnt_site(site_url: str) -> bool:
+    """判断是否为 api.abnt.it 的签到 URL。"""
+    u = (site_url or "").lower()
+    return "abnt.it" in u
+
+
+async def _abnt_close_stale_tabs(page, browser=None):
+    """关掉历史残留的 abnt 回跳/登录 tab, 免干扰本轮 SSO target 选取。"""
+    if browser is None:
+        return
+    keep = {id(page)}
+    for ctx in browser.contexts:
+        for tp in list(ctx.pages):
+            if id(tp) in keep:
+                continue
+            try:
+                tu = (tp.url or "").lower()
+            except Exception:
+                continue
+            if "abnt.it" in tu:
+                try:
+                    await tp.close()
+                except Exception:
+                    pass
+
+
+async def _abnt_find_authed_profile_tab(page, browser=None):
+    """找到带真实登录态(非登录页)的 abnt /profile tab, 修 OAuth 回跳落错 tab。"""
+    if browser is None:
+        return None
+    for ctx in browser.contexts:
+        for tp in list(ctx.pages):
+            try:
+                tu = (tp.url or "").lower()
+            except Exception:
+                continue
+            if "abnt.it" not in tu:
+                continue
+            if any(s in tu for s in ("/sign-in", "/signin", "/login", "/oauth/", "/verification")):
+                continue
+            try:
+                await _abnt_goto_profile(tp)
+            except Exception:
+                continue
+            try:
+                txt = await page_text(tp, 600)
+            except Exception:
+                txt = ""
+            if not looks_logged_out(txt):
+                return tp
+    return None
+
+
+async def _abnt_goto_profile(page):
+    try:
+        await page.goto(ABNT_PROFILE_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception:
+        pass
+    try:
+        await wait_text_ready(page, 24, 10)
+    except Exception:
+        pass
+
+
+async def _abnt_sign_current(page, adapter) -> CheckinResult:
+    """在已登录的 abnt /profile 上执行标准 New API 签到(点立即签到+确认)。"""
+    kind = adapter.kind or "abnt"
+    try:
+        text0 = await page_text(page, 4000)
+    except Exception:
+        text0 = ""
+    has_done = any(ind in text0 for ind in ABNT_DONE_INDICATORS)
+    if has_done:
+        return confirmed_done_result("abnt already checked in on /profile", adapter="abnt")
+
+    btn = await click_first_visible(page, ABNT_SIGN_SELECTORS, timeout_each=1500)
+    if not btn:
+        _, btn2 = await wait_for_any_visible(page, ABNT_SIGN_SELECTORS, 4.0)
+        if btn2:
+            try:
+                await page.click(btn2, timeout=2000)
+                btn = btn2
+            except Exception:
+                pass
+    if not btn:
+        return fail_result("no_button", adapter="abnt", stage="confirm")
+
+    await asyncio.sleep(2.5)
+    try:
+        after = await page_text(page, 4000)
+    except Exception:
+        after = ""
+    confirmed = any(ind in after for ind in ABNT_DONE_INDICATORS) or (
+        "立即签到" not in after and is_valid_checkin_confirm(after)
+    )
+    if not confirmed:
+        for _ in range(3):
+            await asyncio.sleep(1.2)
+            try:
+                after = await page_text(page, 4000)
+            except Exception:
+                after = ""
+            if any(ind in after for ind in ABNT_DONE_INDICATORS) or (
+                "立即签到" not in after and is_valid_checkin_confirm(after)
+            ):
+                confirmed = True
+                break
+    if not confirmed:
+        return fail_result(
+            "no_confirm", detail=f"clicked {btn} but no done text", adapter="abnt", stage="confirm",
+        )
+    return confirmed_done_result(
+        f"abnt check-in clicked ({btn}) confirm=yes", adapter="abnt",
+        action=ActionEvidence(kind="dom_click", target=btn, attempted_at=datetime.now().isoformat(timespec="seconds")),
+    )
+
+
+async def abnt_checkin(page, adapter, browser=None) -> CheckinResult:
+    """api.abnt.it LinuxDo New API 签到:SSO 后按带登录态 /profile 再点签到。"""
+    kind = adapter.kind or "abnt"
+    print(f"  abnt flow: {adapter.name}", flush=True)
+
+    await _abnt_close_stale_tabs(page, browser)
+
+    try:
+        await page.goto(ABNT_SIGNIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception:
+        pass
+    try:
+        await wait_text_ready(page, 30, max(adapter.ready_rounds, 10))
+    except Exception:
+        pass
+
+    cf = await wait_out_cloudflare(page, CF_WAIT_S)
+    if cf:
+        return fail_result("cloudflare", adapter=kind)
+    await dismiss_obstructing_dialogs(page)
+
+    status = await try_linuxdo_sso(page, origin_host="api.abnt.it", browser=browser)
+    if status != "OK":
+        return result_from_sso_failure(status, kind)
+
+    await asyncio.sleep(ABNT_OAUTH_RETURN_S)
+    tgt = await _abnt_find_authed_profile_tab(page, browser)
+    if tgt is None:
+        await _abnt_goto_profile(page)
+        try:
+            txt = await page_text(page, 600)
+        except Exception:
+            txt = ""
+        if looks_logged_out(txt):
+            return fail_result("auth_required", detail="abnt not logged in after SSO", adapter=kind)
+        tgt = page
+
+    await _abnt_goto_profile(tgt)
+    return await _abnt_sign_current(tgt or page, adapter)
+
 # ---------------------------------------------------------------------------
 # nexavlinks.com(NexaVlinks 聚合 / New API 系 AI 聚合站)—— 双账号签到:
 #   账号1 = LinuxDo OAuth(USERNAME,复用 9222 共享 profile 的 linux.do 会话);
@@ -7297,6 +7487,8 @@ async def legacy_checkin_on_page(
             return await nexa_checkin(page, adapter, browser=browser)
         if kind == "mulink" or is_mulink_site(site_url):
             return await mulink_checkin(page, adapter, browser=browser)
+        if kind == "abnt" or is_abnt_site(site_url):
+            return await abnt_checkin(page, adapter, browser=browser)
         # fengwind 专属窗口守卫(业务根因,2026-09-07):读服务端 /api/checkin/status 的
         # next_reset_at。今日新周期未开时页面残留昨日「已签到」,通用 already 会误判
         # ALREADY 并把 daily_tasks 标 done,使 cron 跳过真实可签时段。本轮守卫只作用于

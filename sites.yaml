@@ -71,12 +71,13 @@ sites:
   - name: 'luckyg'
     url: https://luckyg.131518.xyz/profile
     kind: newapi_profile
-  # abnt(api.abnt.it New API 站):LinuxDo OAuth 登录(linuxdo_oauth=true,
-  # checkin_enabled=true,无 turnstile),走标准 newapi_profile 流程:
-  # /profile → 未登录自动 LinuxDo SSO(共享 9222 profile)→ 点「立即签到」+ 确认门。
+  # abnt(api.abnt.it New API 站):LinuxDo OAuth 登录(linuxdo_oauth2=true,
+  # checkin_enabled=true,无 turnstile),走尊属 abnt_checkin:
+  # /sign-in → LinuxDo SSO(OAuth 回跳落新 tab,适配器接管带登录态 /profile)
+  # → 点「立即签到」+ 确认门。
   - name: 'abnt'
     url: https://api.abnt.it/profile
-    kind: newapi_profile
+    kind: abnt
   - name: '林夕'
     url: https://k40.shengqainbang.cn/check-in
     kind: browser
