@@ -27,7 +27,7 @@ import sys
 import time
 import urllib.request
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -6635,40 +6635,69 @@ def _parse_utc_iso(s: str) -> datetime | None:
 
 
 def fengwind_status_guard(status: dict | None, now: datetime | None = None) -> CheckinResult | None:
-    """fengwind 服务端权威窗口守卫(业务根因修复,2026-09-07)。
+    """fengwind 服务端权威窗口守卫(业务根因修复,2026-09-07,2026-09-10加固)。
 
     背景:2026-09-06 run177 在北京 06:03(早于当日周期)跑 fengwind,页面残留
     上一周期「已签到」disabled,通用 already 判据误判 ALREADY 并把 daily_tasks
     标 done,导致 08:10 cron 跳过真实可签时段(用户只得手动领取)。
 
-    根因:页面 DOM 的「已签到」只代表"当前服务端业务周期"已签;服务端周期按
-    next_reset_at(UTC 0 点=北京 08:00)切新 biz_date。在北京 00:00~08:00 之间
+    根因:服务端周期按 UTC 0 点(北京 08:00)切新 biz_date。在北京 00:00~08:00 之间
     (UTC 未到 0 点),biz_date 仍是昨天,页面残留昨日已签——DOM 判据不可信。
+    而旧守卫直接用 now >= next_reset_at 判断,但服务端在 08:00 进入新周期后
+    next_reset_at 会自动推移到明天(09-11 00:00Z),导致 08:00 后的正常 cron
+    永远满足 now < next_reset_at 从而被误判为 window_not_open 误拦。
 
-    修复:不再猜本地时间窗口,直接以服务端 /api/checkin/status 的 next_reset_at
-    为准:now(UTC) 早于 next_reset_at → 今日新周期未开,页面残留不可作 ALREADY
-    判据 → 返回 keep_pending(FAIL+keep_pending,写回 pending 供后续批次重跑);
-    now(UTC) >= next_reset_at → 新周期已开,放行(None)交给通用已签/签到判定。
-    status 缺失或字段不可解析 → 保守放行(None),宁可不拦也不误伤(API 故障时
-    让通用流程决定,避免整站被永久 pending)。
-
-    now: 测试用显式时间(aware UTC);默认 datetime.now(timezone.utc)。
+    修复:
+    1. 若 status 明示 can_check_in=True 且未签,直接放行(新周期已开且可签)。
+    2. 若有 biz_date,以北京时间对比本地日期:若 biz_date < local_today(北京 00:00~08:00),
+       说明今日新周期未开,返回 keep_pending("window_not_open");若 biz_date >= local_today,放行。
+    3. 若只有 next_reset_at,以北京时间对比:若 next_reset 的北京日期仍在今天,且当前北京时间
+       早于该重置点,说明今日 08:00 重置点未到,返回 keep_pending("window_not_open");
+       若 next_reset 已经推移到未来日期或当前已过重置点,放行。
+    4. status 缺失或不可解析 -> 保守放行 None。
     """
-    nra = (status or {}).get("next_reset_at")
-    reset = _parse_utc_iso(nra)
-    if reset is None:
+    if not status or not isinstance(status, dict):
         return None
-    now = now if now is not None else datetime.now(timezone.utc)
-    if now >= reset:
-        return None  # 今日周期已开,页面已是新周期,通用判据可信
-    return pending_result(
-        "window_not_open",
-        detail=(
-            f"fengwind 今日新周期未开:服务端 next_reset_at={nra}(UTC) 未到,"
-            "页面残留昨日周期「已签到」不可作当日 ALREADY 判据;"
-            "保持 pending 供周期开启后批次重跑"
-        ),
-    )
+
+    # 1. 权威可签字段优先
+    if status.get("can_check_in") is True and not status.get("checked_in_today"):
+        return None
+
+    now_utc = now if now is not None else datetime.now(timezone.utc)
+    beijing_tz = timezone(timedelta(hours=8))
+    now_bj = now_utc.astimezone(beijing_tz)
+    local_today = now_bj.strftime("%Y-%m-%d")
+
+    # 2. biz_date 业务日判定
+    biz_date = status.get("biz_date")
+    if biz_date and isinstance(biz_date, str):
+        if biz_date < local_today:
+            nra = status.get("next_reset_at", "")
+            return pending_result(
+                "window_not_open",
+                detail=(
+                    f"fengwind 今日新周期未开:服务端 biz_date={biz_date} < 本地日期 {local_today} (next_reset_at={nra}),"
+                    "页面残留昨日周期「已签到」不可作当日 ALREADY 判据;保持 pending 供周期开启后批次重跑"
+                ),
+            )
+        return None
+
+    # 3. next_reset_at 兜底判定
+    nra = status.get("next_reset_at")
+    reset_utc = _parse_utc_iso(nra)
+    if reset_utc is not None:
+        reset_bj = reset_utc.astimezone(beijing_tz)
+        if reset_bj.strftime("%Y-%m-%d") == local_today and now_bj < reset_bj:
+            return pending_result(
+                "window_not_open",
+                detail=(
+                    f"fengwind 今日新周期未开:服务端下一次重置时间 {reset_bj.strftime('%Y-%m-%d %H:%M:%S')} (CST) 未到 (当前 {now_bj.strftime('%H:%M:%S')}),"
+                    "页面残留昨日周期「已签到」不可作当日 ALREADY 判据;保持 pending 供周期开启后批次重跑"
+                ),
+            )
+        return None
+
+    return None
 
 
 async def _fengwind_fetch_status(page, site_url: str) -> dict | None:

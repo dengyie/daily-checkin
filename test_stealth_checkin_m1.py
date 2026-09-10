@@ -3871,6 +3871,40 @@ class TestFengwindWindowGuard(unittest.TestCase):
         self.assertIsNone(m.fengwind_status_guard(status, now=at_reset))
         self.assertIsNone(m.fengwind_status_guard(status, now=after_reset))
 
+    def test_guard_passes_when_can_checkin_and_next_reset_tomorrow(self):
+        """生产实测场景(2026-09-10 08:15 CST):新周期已开,服务端 next_reset_at 已推移到明天,can_check_in=True 必须放行不被误拦。"""
+        m = self.m
+        from datetime import datetime, timezone
+
+        status = {
+            "enabled": True,
+            "biz_date": "2026-09-10",
+            "next_reset_at": "2026-09-11T00:00:00Z",
+            "checked_in_today": False,
+            "can_check_in": True,
+        }
+        now = datetime(2026, 9, 10, 0, 15, 0, tzinfo=timezone.utc)  # 北京 08:15
+        self.assertIsNone(m.fengwind_status_guard(status, now=now))
+
+    def test_guard_returns_pending_when_biz_date_behind(self):
+        """北京 00:00~08:00 间服务端 biz_date 仍为昨日,不可判 ALREADY,必须返回 keep_pending。"""
+        m = self.m
+        from datetime import datetime, timezone
+
+        status = {
+            "enabled": True,
+            "biz_date": "2026-09-09",
+            "next_reset_at": "2026-09-10T00:00:00Z",
+            "checked_in_today": True,
+            "can_check_in": False,
+        }
+        now = datetime(2026, 9, 9, 22, 0, 0, tzinfo=timezone.utc)  # 北京 09-10 06:00
+        res = m.fengwind_status_guard(status, now=now)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "window_not_open")
+        self.assertTrue(res.keep_pending)
+
     def test_guard_passthrough_when_status_missing(self):
         """status 缺失/next_reset_at 缺失/不可解析 → 保守放行 None,绝不永久 pending。"""
         m = self.m
