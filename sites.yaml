@@ -715,7 +715,6 @@ sites:
     kind: browser
     signs:
       - 'button:has-text("立即签到")'
-      - 'button:has-text("签到")'
     already:
       - 'text=今日已签到'
       - 'text=签到成功'
