@@ -4015,6 +4015,178 @@ class TestIsAbntSite(unittest.TestCase):
         self.assertEqual(a.kind, "abnt")
 
 
+class TestRelayForLoanCycle(unittest.TestCase):
+    """relayfor.xyz(RelayFor / 词元贷借贷站)—— 2026-09-11 接入。
+
+    该站是「词元贷」借贷站,不是普通每日签到:第 1 天点「确认借款」领额度,后续
+    每天点「今日签到还款」还贷,4 周期结清。每日运行按 DOM 自判:可借则点借,
+    否则有还则点还,两按钮均 disabled / 已还清 → ALREADY。复用 9222 共享登录态
+    (不配账密)。
+
+    P0 红线:relayfor 专属流程只点站内借款/还款按钮,绝不调用 clear_cookies /
+    clear_localStorage / clear_all(全清 9222 其它域)。
+    """
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+        import asyncio as _aio
+        self.asyncio = _aio
+
+    def _adapter(self):
+        return self.m.SiteAdapter(
+            name="relayfor",
+            url="https://relayfor.xyz/console/#benefits",
+            kind="relayfor",
+            sign_selectors=['button:has-text("确认借款")', 'button:has-text("今日签到还款")'],
+            already_selectors=["text=已还清", "text=今日已处理"],
+            ready_rounds=10,
+        )
+
+    def test_is_relayfor_site_positive_negative(self):
+        f = self.m.is_relayfor_site
+        self.assertTrue(f("https://relayfor.xyz/console/#benefits"))
+        self.assertTrue(f("https://relayfor.xyz/"))
+        self.assertTrue(f("relayfor.xyz"))
+        self.assertFalse(f("https://mzlone.top/"))
+        self.assertFalse(f(""))
+        self.assertFalse(f("https://example.com/"))
+
+    def test_kind_in_literal(self):
+        self.assertIn("relayfor", self.m.AdapterKind.__args__)
+
+    def test_resolve_relayfor_kind_is_dedicated(self):
+        m = self.m
+        a = m.resolve_site("relayfor", "https://relayfor.xyz/console/#benefits")
+        self.assertIsNotNone(a)
+        self.assertEqual(a.kind, "relayfor")
+        self.assertTrue(a.url.startswith("https://relayfor.xyz"))
+
+    def test_yaml_registers_relayfor_entry(self):
+        """sites.yaml 的 relayfor 条目解析后 kind=relayfor 且带借/还签名。"""
+        import yaml
+        self.assertTrue(os.path.exists("sites.yaml"))
+        with open("sites.yaml", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "relayfor"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 relayfor 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "relayfor")
+        joined = " ".join(a.sign_selectors)
+        self.assertIn("确认借款", joined)
+        self.assertIn("今日签到还款", joined)
+
+    def test_dispatch_contains_relayfor_branch(self):
+        src = TARGET.read_text(encoding="utf-8")
+        self.assertIn('is_relayfor_site(site_url)', src)
+        self.assertIn('return await relayfor_checkin(page, adapter, browser=browser)', src)
+
+    def test_p0_no_clear_cookies_in_relayfor_path(self):
+        """relayfor 专属流程不得存在 clear_cookies / clear_localstorage / 全清调用."""
+        import inspect
+        src = inspect.getsource(self.m.relayfor_checkin)
+        src += inspect.getsource(self.m._relayfor_available_button)
+        src += inspect.getsource(self.m._relayfor_done_state)
+        lower = src.lower()
+        self.assertNotIn("clear_cookies", lower)
+        self.assertNotIn("clear_localstorage", lower)
+        self.assertNotIn("clear_all", lower)
+
+    def _run_handler(self, fake_locators_by, page_text="", adapter=None):
+        """Run relayfor_checkin against a controllable FakePage.
+
+        fake_locators_by: dict mapping selector-substring -> {"is_visible": bool, "disabled": bool}.
+        A FakeLocator matches when the selector contains that substring. Clicks are recorded.
+        page_text: string returned by page_text() (used for done-state + post-click confirm).
+        Returns (res, clicks).
+        """
+        m = self.m
+        async def fake_wait(*a, **k):
+            return True
+        async def fake_cf(*a, **k):
+            return None
+        async def fake_dis(*a, **k):
+            return None
+
+        clicks = []
+        state = {"text": page_text}
+
+        class FakeLocator:
+            def __init__(self, sel):
+                self.sel = sel
+                self.cfg = None
+                for sub, c in fake_locators_by.items():
+                    if sub in sel:
+                        self.cfg = c
+                        break
+            @property
+            def first(self):
+                return self
+            async def is_visible(self, timeout=0):
+                return bool(self.cfg is not None and self.cfg.get("is_visible"))
+            async def is_disabled(self):
+                return bool(self.cfg is not None and self.cfg.get("disabled"))
+            async def click(self, **kw):
+                clicks.append(self.sel)
+
+        class FakePage:
+            async def goto(self, url, **kw):
+                return ""
+            async def evaluate(self, expr):
+                return ""
+            def locator(self, sel):
+                return FakeLocator(sel)
+
+        async def fake_page_text(page, n=2000):
+            return state["text"]
+
+        page = FakePage()
+        with mock.patch.object(m, "wait_text_ready", fake_wait), \
+             mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
+             mock.patch.object(m, "dismiss_obstructing_dialogs", fake_dis), \
+             mock.patch.object(m, "page_text", fake_page_text):
+            res = self.asyncio.run(m.relayfor_checkin(page, adapter or self._adapter(), browser=None))
+        return res, clicks
+
+    def test_borrow_day_clicks_confirm_loan(self):
+        """确认借款可用 → 优先点确认借款并落账 → OK(借款)."""
+        fake_locators_by = {
+            'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+            'button:has-text("今日签到还款")': {"is_visible": True, "disabled": True},
+        }
+        res, clicks = self._run_handler(fake_locators_by, page_text='当前待还 $1.00\n今日签到还款\n本笔签到记录')
+        self.assertEqual(res.status, "OK")
+        self.assertIn("借款", res.detail)
+        self.assertTrue(any("确认借款" in c for c in clicks), "今日应点击 确认借款")
+        self.assertIsNotNone(res.action)
+        self.assertNotEqual(res.action.kind, "none")
+
+    def test_repay_day_clicks_repay_when_borrow_unavailable(self):
+        """确认借款不可用、今日签到还款可用 → 点还款 → OK."""
+        res, clicks = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": False},
+                'button:has-text("今日签到还款")': {"is_visible": True, "disabled": False},
+            },
+            page_text='已还清\n还款成功',
+        )
+        self.assertEqual(res.status, "OK")
+        self.assertIn("还款", res.detail)
+        self.assertTrue(any("今日签到还款" in c for c in clicks), "今日应点击 今日签到还款")
+
+    def test_already_processed_both_buttons_unavailable(self):
+        """两按钮均不可见且已还清 → ALREADY 已处理态,不点击."""
+        res, clicks = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": False},
+                'button:has-text("今日签到还款")': {"is_visible": False},
+            },
+            page_text='已还清',
+        )
+        self.assertEqual(res.status, "ALREADY")
+        self.assertFalse(clicks, "已处理态不应点击任何按钮")
+
+
 if __name__ == "__main__":
 
     py_compile.compile(str(TARGET), doraise=True)

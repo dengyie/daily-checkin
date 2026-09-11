@@ -429,7 +429,7 @@ TERMS_CLICK_SELECTORS = [
 ]
 
 Status = Literal["OK", "ALREADY", "FAIL"]
-AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt"]
+AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor"]
 
 
 @dataclass
@@ -1242,6 +1242,16 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             already=list(already) if already is not None else None,
             ready_rounds=rr,
             kind="abnt",
+        )
+    if kind == "relayfor":
+        # relayfor.xyz(词元贷)尊属 relayfor_checkin 流程:自动借/还全周期(kind=relayfor
+        # 透传,否则落 browser 默认走不到借/还双态决策)。
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else None,
+            already=list(already) if already is not None else None,
+            ready_rounds=rr,
+            kind="relayfor",
         )
     # browser (default)
     return _B(
@@ -6005,6 +6015,162 @@ async def abnt_checkin(page, adapter, browser=None) -> CheckinResult:
     return await _abnt_sign_current(tgt or page, adapter)
 
 # ---------------------------------------------------------------------------
+# relayfor.xyz(RelayFor / 词元贷借贷站)—— 2026-09-11 接入。
+# 站点 `https://relayfor.xyz/console/#benefits`「我的福利 / 公益福利 · 词元贷」不是
+# 普通每日签到,而是一个 4 天借贷周期:第 1 天点「确认借款」领额度,之后每天点
+# 「今日签到还款」还贷,第 4 次结清,溢出额度累增下一笔借款上限。已登录态复用
+# 9222 共享 profile(不配账号密码)。每日运行按 DOM 自判:
+#   - 「确认借款」可见且可用 → 点它借额度 → OK;
+#   - 否则「今日签到还款」可见且可用 → 点它还款 → OK;
+#   - 两按钮均 disabled / 已还清 / 无可借 → ALREADY(今日已处理)。
+# P0 红线:只点站内特定借款/还款按钮,绝不调用 clear_cookies/_clear_newapi_session
+# 全清 9222 其它域。实测点击无弹窗、无二次确认,直接生效(余额 +$1.00)。
+# ---------------------------------------------------------------------------
+
+RELAYFOR_URL = "https://relayfor.xyz/console/#benefits"
+RELAYFOR_BORROW_SELECTORS = [
+    'button:has-text("确认借款")',
+    'button:has-text("确认借贷")',
+    'button:has-text("立即借款")',
+]
+RELAYFOR_REPAY_SELECTORS = [
+    'button:has-text("今日签到还款")',
+    'button:has-text("今日还款")',
+    'button:has-text("签到还款")',
+]
+# 已处理 / 完结态:按钮禁用(disabled)或页面出现这些文案。
+RELAYFOR_DONE_INDICATORS = ("已还清", "今日已处理", "已提完", "已签到", "签到成功")
+
+
+def is_relayfor_site(site_url: str) -> bool:
+    """relayfor.xyz 专属站判定."""
+    u = (site_url or "").lower()
+    return "relayfor.xyz" in u
+
+
+async def _relayfor_available_button(page, selectors: list[str]) -> str | None:
+    """返回第一个「可见且可用(非 disabled)」按钮的 selector;都不满足返回 None."""
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if not await loc.is_visible(timeout=600):
+                continue
+            if await loc.is_disabled():
+                continue
+            return sel
+        except Exception:
+            continue
+    return None
+
+
+async def _relayfor_done_state(page) -> str:
+    """页面是否呈现"已处理"态;命中返回信号串,否则 ''."""
+    try:
+        text = await page_text(page, 1500)
+    except Exception:
+        text = ""
+    for tok in RELAYFOR_DONE_INDICATORS:
+        if tok in text:
+            return f"text:{tok}"
+    return ""
+
+
+async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
+    """relayfor.xyz 词元贷每日自动借/还:按 DOM 自判借/还/已处理。复用登录态,不配账密。"""
+    kind = adapter.kind or "relayfor"
+    print(f"  relayfor flow: {adapter.name}", flush=True)
+
+    try:
+        await page.goto(RELAYFOR_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception:
+        pass
+    try:
+        await wait_text_ready(page, 30, max(adapter.ready_rounds, 10))
+    except Exception:
+        pass
+
+    cf = await wait_out_cloudflare(page, CF_WAIT_S)
+    if cf:
+        return fail_result("cloudflare", adapter=kind)
+    await dismiss_obstructing_dialogs(page)
+
+    # SPA 渲染借/还按钮有一定时延:轮询等待任一动作按钮或已处理态出现,避免
+    # 决策时按钮尚未挂载而误判「无可借/无待还」。最多等 SIGN_WAIT_S 秒。
+    deadline = time.monotonic() + SIGN_WAIT_S
+    while True:
+        done = await _relayfor_done_state(page)
+        borrow = await _relayfor_available_button(page, RELAYFOR_BORROW_SELECTORS)
+        repay = await _relayfor_available_button(page, RELAYFOR_REPAY_SELECTORS)
+        if borrow or repay or done:
+            break
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(0.5)
+
+    # 决策:优先借款,否则还款。
+    action_sel = borrow or repay
+    if action_sel is None:
+        if done:
+            return ok_result(
+                "ALREADY",
+                adapter=kind,
+                detail=f"relayfor 今日已处理 ({done})",
+                action=ActionEvidence(kind="none"),
+                confirmation=dom_confirmation(done, done_state=True),
+                pre_state="DONE",
+                post_state="DONE",
+                transition="NONE",
+                attribution="precheck",
+            )
+        return ok_result(
+            "ALREADY",
+            detail="relayfor 无可借/无待还(词元贷已处理)",
+            adapter=kind,
+            confirmation=dom_confirmation("词元贷已处理", done_state=True),
+            pre_state="DONE",
+            post_state="DONE",
+            transition="NONE",
+            attribution="precheck",
+        )
+    which = "借款" if borrow else "还款"
+    action = ActionEvidence(
+        kind="native_click" if adapter.use_native_click else "dom_click",
+        target=action_sel,
+        attempted_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    try:
+        await page.locator(action_sel).first.click(timeout=5000, force=True)
+    except Exception as exc:
+        return fail_result("no_click", detail=f"relayfor 点击{which}失败: {exc}", adapter=kind, action=action)
+
+    # 等结果落账:借 → 待还出现;还 → 已还清出现。
+    await asyncio.sleep(2.5)
+    after = await page_text(page, 1500)
+    repay_expected = "今日签到还款" in after or "待还" in after
+    if which == "还款":
+        repay_expected = ("已还" in after and "待还" not in after) or "还清" in after
+    if repay_expected:
+        return ok_result(
+            "OK",
+            adapter=kind,
+            detail=f"relayfor {which}成功",
+            action=action,
+            confirmation=dom_confirmation(f"{which}成功", done_state=True),
+            pre_state="PENDING",
+            post_state="DONE",
+            transition="PENDING_TO_DONE",
+            attribution="runner",
+        )
+    return ok_result(
+        "OK",
+        adapter=kind,
+        detail=f"relayfor {which}已触发",
+        action=action,
+        attribution="runner",
+    )
+
+
+# ---------------------------------------------------------------------------
 # nexavlinks.com(NexaVlinks 聚合 / New API 系 AI 聚合站)—— 2026-09-11 拆分单账号:
 #   ① nexavlinks-linuxdo  = LinuxDo OAuth(复用 9222 共享 profile 的 linux.do 会话);
 #   ② nexavlinks-email    = 邮箱+密码(账号密码从 accounts 文件按站名读取)。
@@ -7511,6 +7677,8 @@ async def legacy_checkin_on_page(
             return await mulink_checkin(page, adapter, browser=browser)
         if kind == "abnt" or is_abnt_site(site_url):
             return await abnt_checkin(page, adapter, browser=browser)
+        if kind == "relayfor" or is_relayfor_site(site_url):
+            return await relayfor_checkin(page, adapter, browser=browser)
         # fengwind 专属窗口守卫(业务根因,2026-09-07):读服务端 /api/checkin/status 的
         # next_reset_at。今日新周期未开时页面残留昨日「已签到」,通用 already 会误判
         # ALREADY 并把 daily_tasks 标 done,使 cron 跳过真实可签时段。本轮守卫只作用于

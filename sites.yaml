@@ -689,3 +689,16 @@ sites:
       - 'button:has-text("今日已签到")'
       - 'text=今日已签到'
       - 'text=签到成功'
+  # relayfor.xyz(RelayFor 词元贷借贷站)—— 2026-09-11 接入。自动借/还全周期:
+  # 第 1 天点「确认借款」领额度,之后每天点「今日签到还款」还贷,4 周期结清。
+  # 复用 9222 共享 profile 登录态(不配账密),无 clear_cookies(P0)。
+  - name: 'relayfor'
+    url: https://relayfor.xyz/console/#benefits
+    kind: relayfor
+    signs:
+      - 'button:has-text("确认借款")'
+      - 'button:has-text("今日签到还款")'
+    already:
+      - 'text=已还清'
+      - 'text=今日已处理'
+      - 'text=已提完'
