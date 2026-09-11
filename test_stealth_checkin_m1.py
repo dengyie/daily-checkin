@@ -4092,12 +4092,16 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertNotIn("clear_localstorage", lower)
         self.assertNotIn("clear_all", lower)
 
-    def _run_handler(self, fake_locators_by, page_text="", adapter=None):
+    def _run_handler(self, fake_locators_by, page_text="", page_text_after=None, click_error=None, adapter=None):
         """Run relayfor_checkin against a controllable FakePage.
 
         fake_locators_by: dict mapping selector-substring -> {"is_visible": bool, "disabled": bool}.
         A FakeLocator matches when the selector contains that substring. Clicks are recorded.
-        page_text: string returned by page_text() (used for done-state + post-click confirm).
+        page_text: body text returned by page_text() before the action click.
+        page_text_after: body text returned after the action click (to simulate the landed state);
+          when None the text stays constant. This lets tests exercise the before/after delta
+          confirmation in _relayfor_confirm_after.
+        click_error: optional exception to raise from the click, to exercise the no_click path.
         Returns (res, clicks).
         """
         m = self.m
@@ -4122,12 +4126,16 @@ class TestRelayForLoanCycle(unittest.TestCase):
             @property
             def first(self):
                 return self
-            async def is_visible(self, timeout=0):
+            async def is_visible(self, timeout=800):
                 return bool(self.cfg is not None and self.cfg.get("is_visible"))
             async def is_disabled(self):
                 return bool(self.cfg is not None and self.cfg.get("disabled"))
             async def click(self, **kw):
+                if click_error is not None:
+                    raise click_error
                 clicks.append(self.sel)
+                if page_text_after is not None:
+                    state["text"] = page_text_after
 
         class FakePage:
             async def goto(self, url, **kw):
@@ -4149,12 +4157,16 @@ class TestRelayForLoanCycle(unittest.TestCase):
         return res, clicks
 
     def test_borrow_day_clicks_confirm_loan(self):
-        """确认借款可用 → 优先点确认借款并落账 → OK(借款)."""
+        """确认借款可用 → 优先点确认借款并落账(待还金额出现)→ OK(借款)."""
         fake_locators_by = {
             'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
             'button:has-text("今日签到还款")': {"is_visible": True, "disabled": True},
         }
-        res, clicks = self._run_handler(fake_locators_by, page_text='当前待还 $1.00\n今日签到还款\n本笔签到记录')
+        res, clicks = self._run_handler(
+            fake_locators_by,
+            page_text='已还清\n可再借',
+            page_text_after='当前待还 $1.00\n今日签到还款',
+        )
         self.assertEqual(res.status, "OK")
         self.assertIn("借款", res.detail)
         self.assertTrue(any("确认借款" in c for c in clicks), "今日应点击 确认借款")
@@ -4162,17 +4174,44 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertNotEqual(res.action.kind, "none")
 
     def test_repay_day_clicks_repay_when_borrow_unavailable(self):
-        """确认借款不可用、今日签到还款可用 → 点还款 → OK."""
+        """确认借款不可用、今日签到还款可用 → 点还款,落账为已还清 → OK."""
         res, clicks = self._run_handler(
             {
                 'button:has-text("确认借款")': {"is_visible": False},
                 'button:has-text("今日签到还款")': {"is_visible": True, "disabled": False},
             },
-            page_text='已还清\n还款成功',
+            page_text='当前待还 $1.00\n今日签到还款',
+            page_text_after='已还清\n还款成功',
         )
         self.assertEqual(res.status, "OK")
         self.assertIn("还款", res.detail)
         self.assertTrue(any("今日签到还款" in c for c in clicks), "今日应点击 今日签到还款")
+
+    def test_click_no_landed_confirm_returns_fail(self):
+        """点击借/还后页面文案无变化(未落账)→ FAIL no_confirm,不是 OK 假阳性."""
+        res, clicks = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+                'button:has-text("今日签到还款")': {"is_visible": True, "disabled": True},
+            },
+            page_text='已还清',  # after 未提供 → 点击后文案不变
+        )
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_confirm")
+        self.assertTrue(any("确认借款" in c for c in clicks), "仍应尝试点击 确认借款")
+
+    def test_no_click_thrown_exception_is_fail_not_misclassified(self):
+        """点击抛异常 → FAIL no_click,不可被误判为 ALREADY/OK."""
+        res, clicks = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+            },
+            page_text='已还清',
+            page_text_after='已还清',
+            click_error=RuntimeError("boom"),
+        )
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_click")
 
     def test_already_processed_both_buttons_unavailable(self):
         """两按钮均不可见且已还清 → ALREADY 已处理态,不点击."""

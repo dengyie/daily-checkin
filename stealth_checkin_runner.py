@@ -6049,7 +6049,13 @@ def is_relayfor_site(site_url: str) -> bool:
 
 
 async def _relayfor_available_button(page, selectors: list[str]) -> str | None:
-    """返回第一个「可见且可用(非 disabled)」按钮的 selector;都不满足返回 None."""
+    """返回第一个「可见且可用(非 disabled)」按钮的 selector;都不满足返回 None.
+
+    selector「不存在且超时」是正常跳过(返回 None → 走已处理分支);但**意外的
+    DOM/locator 异常**(选择器抛错、导航失败等)不能静默吞掉,否则 DOM 漂移会被
+    误判成「无可借/无待还」。首个意外异常只打印一次,便于运维定位。
+    """
+    logged_error = False
     for sel in selectors:
         try:
             loc = page.locator(sel).first
@@ -6058,13 +6064,22 @@ async def _relayfor_available_button(page, selectors: list[str]) -> str | None:
             if await loc.is_disabled():
                 continue
             return sel
-        except Exception:
+        except Exception as e:
+            if not logged_error:
+                err = str(e or e.__class__.__name__)
+                print(f"  ! relayfor avail_button({sel}): {err[:120]}", flush=True)
+                logged_error = True
             continue
     return None
 
 
 async def _relayfor_done_state(page) -> str:
-    """页面是否呈现"已处理"态;命中返回信号串,否则 ''."""
+    """页面是否呈现"已处理"态;命中返回信号串,否则 ''.
+
+    该信号**只**在借/还两按钮都不可用时才会让 handler 走 ALREADY(见轮询后决策);
+    所以即便页面别处出现「已签到/签到成功」等泛文案,只要真正可借/可还的按钮在,
+    就不会误判已处理。保留 DOM 级文案扫描即够,不需放进计数。
+    """
     try:
         text = await page_text(page, 1500)
     except Exception:
@@ -6073,6 +6088,34 @@ async def _relayfor_done_state(page) -> str:
         if tok in text:
             return f"text:{tok}"
     return ""
+
+
+async def _try_page_text(page, n: int = 1500) -> str:
+    """page_text 的容错封装:失败返回 ''(确认逻辑里用,避免一次读失败中断重试)."""
+    try:
+        return await page_text(page, n)
+    except Exception:
+        return ""
+
+
+def _relayfor_confirm_after(which: str, before: str, after: str) -> bool:
+    """判断点击借/还后是否真的落账(前后对比,避免页面既有文案假阳性)。"""
+    before = before or ""
+    after = after or ""
+    if which == "还款":
+        # 还款确认:页面上「待还」消失,或出现「已还/还清/还款成功」。
+        if "还清" in after or "还款成功" in after:
+            return True
+        if "待还" not in after and "待还" in before:
+            return True
+        return False
+    # 借款确认:出现「待还」或「今日签到还款」,且点击前就存在(避免既有文案)。
+    if ("待还" in after and "待还" not in before) or (
+        "今日签到还款" in after and "今日签到还款" not in before
+    ):
+        return True
+    # 保底:点击前后待还金额数字变化(如 已还清 → 待还 $1.00)。
+    return bool(after != before and "待还" in after and ("待还" not in before or "$" in after))
 
 
 async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
@@ -6094,21 +6137,25 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
         return fail_result("cloudflare", adapter=kind)
     await dismiss_obstructing_dialogs(page)
 
-    # SPA 渲染借/还按钮有一定时延:轮询等待任一动作按钮或已处理态出现,避免
-    # 决策时按钮尚未挂载而误判「无可借/无待还」。最多等 SIGN_WAIT_S 秒。
+    # SPA 渲染借/还按钮有一定时延:轮询等待任一动作按钮挂载,不要被「已还清/已签到」等
+    # 既有文案(它们既可能是借款前状态,也可能是已处理态)提前 break——否则借款日第 1 轮
+    # 就可能把尚未渲染出来的「确认借款」当成不存在而误判 ALREADY。因此动作按钮优先,
+    # done 只是 deadline 到来后仍无动作按钮时的兜底(见下)。
     deadline = time.monotonic() + SIGN_WAIT_S
+    action_sel = None
+    done = ""
     while True:
-        done = await _relayfor_done_state(page)
         borrow = await _relayfor_available_button(page, RELAYFOR_BORROW_SELECTORS)
         repay = await _relayfor_available_button(page, RELAYFOR_REPAY_SELECTORS)
-        if borrow or repay or done:
+        if borrow or repay:
+            action_sel = borrow or repay
             break
+        done = await _relayfor_done_state(page)
         if time.monotonic() >= deadline:
             break
         await asyncio.sleep(0.5)
 
-    # 决策:优先借款,否则还款。
-    action_sel = borrow or repay
+    # 决策:动作按钮优先(借款 > 还款),都不可见才回退到 done(已处理态)兜底。
     if action_sel is None:
         if done:
             return ok_result(
@@ -6132,40 +6179,49 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
             transition="NONE",
             attribution="precheck",
         )
-    which = "借款" if borrow else "还款"
+    is_borrow = any(bs in action_sel for bs in RELAYFOR_BORROW_SELECTORS)
+    which = "借款" if is_borrow else "还款"
     action = ActionEvidence(
         kind="native_click" if adapter.use_native_click else "dom_click",
         target=action_sel,
         attempted_at=datetime.now().isoformat(timespec="seconds"),
     )
+    # 点击前快照:用于借/还确认做「前后对比」,避免把页面本就存在的待还/还款
+    # 文案当成点击成功的证据(见 P2b)。
+    before = await page_text(page, 1500)
+
     try:
         await page.locator(action_sel).first.click(timeout=5000, force=True)
     except Exception as exc:
         return fail_result("no_click", detail=f"relayfor 点击{which}失败: {exc}", adapter=kind, action=action)
 
-    # 等结果落账:借 → 待还出现;还 → 已还清出现。
-    await asyncio.sleep(2.5)
-    after = await page_text(page, 1500)
-    repay_expected = "今日签到还款" in after or "待还" in after
-    if which == "还款":
-        repay_expected = ("已还" in after and "待还" not in after) or "还清" in after
-    if repay_expected:
-        return ok_result(
-            "OK",
+    # 等结果落账:借 → 待还金额出现/变化;还 → 已还/还清/待还消失。用「前后对比」
+    # + 有界重试(最多 4s)拿确认,拿不到才判 no_confirm(对齐 abnt 的确认门)。
+    deadline = time.monotonic() + 4.0
+    confirmed = False
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.8)
+        after = await _try_page_text(page, 1500)
+        if _relayfor_confirm_after(which, before, after):
+            confirmed = True
+            break
+    if not confirmed:
+        return fail_result(
+            "no_confirm",
+            detail=f"relayfor 点击{which}后未见落账变化",
             adapter=kind,
-            detail=f"relayfor {which}成功",
             action=action,
-            confirmation=dom_confirmation(f"{which}成功", done_state=True),
-            pre_state="PENDING",
-            post_state="DONE",
-            transition="PENDING_TO_DONE",
-            attribution="runner",
         )
+
     return ok_result(
         "OK",
         adapter=kind,
-        detail=f"relayfor {which}已触发",
+        detail=f"relayfor {which}成功",
         action=action,
+        confirmation=dom_confirmation(f"{which}成功", done_state=True),
+        pre_state="PENDING",
+        post_state="DONE",
+        transition="PENDING_TO_DONE",
         attribution="runner",
     )
 
