@@ -3710,6 +3710,21 @@ class TestSitesYaml(unittest.TestCase):
         yaml_loaded = self.m.load_sites_from_yaml()
         self.assertGreaterEqual(len(yaml_loaded), 69)
 
+    def test_yaml_registers_hiyo_entry(self):
+        """sites.yaml 的 hiyo 条目解析为 kind=browser,且带立即签到/今日已签到签名。"""
+        import yaml
+        self.assertTrue(os.path.exists("sites.yaml"))
+        with open("sites.yaml", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "hiyo"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 hiyo 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://free.hiyo.top/dashboard")
+        joined = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined)
+        self.assertTrue(a.already_selectors)
 
     def test_fengwind_and_mulink_features(self):
         # 1. fengwind site resolution

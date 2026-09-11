@@ -702,3 +702,21 @@ sites:
       - 'text=已还清'
       - 'text=今日已处理'
       - 'text=已提完'
+  # hiyo(free.hiyo.top, Hiyo Free / Codex订阅站)—— 2026-09-12 接入。New API 克隆站,
+  # LinuxDo OAuth 登录(复用 9222 共享 profile 的 mango 会话)。签到在 **/dashboard**
+  # 的「每日签到」卡片,奖励 $5.00–$10.00 随机:未签显示「立即签到」按钮,点后确认
+  # 文本变「今日已签到, 明日刷新后可再次签到」+「今日已签到」。kind=browser。
+  # 注意:未登录新会话会被重定向 /login?redirect=/dashboard 并弹「條款更新通知」弹窗,
+  # 其「同意並繼續」前 Linux.do 登入按钮 disabled(需先同意条款再 SSO,runner 通用
+  # CTA/SSO 前会 dismiss,但条款弹窗按钮不匹配 dismiss 关闭列表,故登录失效场景可能
+  # 需额外处理——见运维手册)。
+  - name: 'hiyo'
+    url: https://free.hiyo.top/dashboard
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'button:has-text("今日已签到")'
