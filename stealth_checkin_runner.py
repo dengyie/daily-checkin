@@ -1213,9 +1213,9 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             kind="ultrarouter",
         )
     if kind == "nexa":
-        # nexavlinks.com:New API 系双账号(LinuxDO + 邮箱密码)。专属 nexa_checkin
-        # 流程按 kind 分发,kind 必须透传否则落到 browser 默认。登出只点站内「退出
-        # 登录」(清 NEXA 域 localStorage),P0 红线全程守(见运维手册打卡 new 记录)。
+        # nexavlinks.com:New API 系聚合站。kind 透传以免落 browser 默认;实际流程
+        # 由任务名分发(见图 nexa_linuxdo_checkin / nexa_email_checkin,2026-09-11
+        # 拆分单账号)。登出只点站内「退出登录」(清 NEXA 域 localStorage),P0 红线。
         return _B(
             name, url,
             signs=list(signs) if signs is not None else None,
@@ -6005,14 +6005,14 @@ async def abnt_checkin(page, adapter, browser=None) -> CheckinResult:
     return await _abnt_sign_current(tgt or page, adapter)
 
 # ---------------------------------------------------------------------------
-# nexavlinks.com(NexaVlinks 聚合 / New API 系 AI 聚合站)—— 双账号签到:
-#   账号1 = LinuxDo OAuth(USERNAME,复用 9222 共享 profile 的 linux.do 会话);
-#   账号2 = 邮箱+密码(your_primary_email@example.com)。
+# nexavlinks.com(NexaVlinks 聚合 / New API 系 AI 聚合站)—— 2026-09-11 拆分单账号:
+#   ① nexavlinks-linuxdo  = LinuxDo OAuth(复用 9222 共享 profile 的 linux.do 会话);
+#   ② nexavlinks-email    = 邮箱+密码(账号密码从 accounts 文件按站名读取)。
 # 签到机制:登录后需在 /check-in 点「立即签到」才落账(非登录即签)。登录态存
 # **localStorage**(auth_token / auth_user / refresh_token),不是 cookie——所以
-# 切账号不能用 _clear_newapi_session(那是清 cookie),必须走站内「退出登录」
+# 切账号/登出不能用 _clear_newapi_session(那是清 cookie),必须走站内「退出登录」
 # (用户下拉菜单),它只清 NEXA 域 localStorage,绝不动 9222 其它域(P0 红线)。
-# 2026-09-10 接入:终端状态停在 account_name(用户已确认)。
+# 每个任务:先登出 → 单账号登录 → /check-in 签到,不再双账号聚合轮换。
 # ---------------------------------------------------------------------------
 
 NEXA_SITE_URL = "https://www.nexavlinks.com/"
@@ -6020,13 +6020,13 @@ NEXA_LOGIN_URL = "https://www.nexavlinks.com/login"
 NEXA_CHECKIN_URL = "https://www.nexavlinks.com/check-in"
 # OAuth 回跳后等待站点渲染/结算的静默时长(秒)。
 NEXA_OAUTH_RETURN_S = 2.5
-# 账号2(邮箱+密码)—— 2026-09-10 用户确认内置 provider 常量(方案 A,同 agentrouter
-# 双账号角色内置先例;密码非生产敏感项,用户明示可用)。
-NEXA_EMAIL_ACCOUNT = "your_primary_email@example.com"
-NEXA_EMAIL_PASSWORD = "12345678"
-# 账号1(LinuxDO)登录后 NEXA 内绑定的用户邮箱(用于账号判定,本地 localStorage)。
-NEXA_LINUXDO_EMAIL = "your_secondary_email@example.com"
-NEXA_LINUXDO_USERNAME = "USERNAME"
+# 密码不落代码(P0):nexavlinks 拆成两个独立签到任务,真实账号来自 accounts
+# 文件(DAILY_CHECKIN_ACCOUNTS_FILE / staging data/accounts.md,已被 .gitignore
+# 隔离),按 site 名读取:
+#   - nexavlinks-email   → 下一行(账号邮箱)/再下一行(密码),登录+签到用。
+#   - nexavlinks-linuxdo → 第1行是 Linux 绑定到 NEXA 的邮箱(只用于登录后校验),
+#                          密码字段不用(吃一个占位值即可,如 '12345678')。
+# 每个任务先登出(点站内「退出登录」,只清 NEXA 域 localStorage,P0 红线)。
 
 # 已登录态右上角用户下拉按钮(含用户名 + User)。
 NEXA_USER_MENU_SELECTORS = [
@@ -6064,6 +6064,12 @@ def is_nexa_name(name: str) -> bool:
     """按站点任务名判定(DB/sites.yaml name 可能是 'nexavlinks' 或带后缀)."""
     n = (name or "").strip().lower()
     return n.startswith("nexa")
+
+
+def is_nexa_email_name(name: str) -> bool:
+    """拆分子流程:名字含 email/mail/邮箱 → 邮箱+密码单账号任务."""
+    n = (name or "").strip().lower()
+    return is_nexa_name(n) and any(tok in n for tok in ("email", "mail", "邮箱"))
 
 
 async def _nexa_current_email(page) -> str:
@@ -6244,14 +6250,27 @@ async def _nexa_signin_current(page, adapter) -> CheckinResult:
 
 
 async def _nexa_email_gate(page, adapter) -> str:
-    """NEXA 邮箱+密码账号(account_name)登入。
+    """NEXA 邮箱+密码账号登入(单账号任务,site name 含 email)。
 
-    前置:调用方已保证落到未登录登录卡。填邮箱/密码 → 等 Turnstile token
-    就绪 → 点「登录」→ 等 auth_user.email 切到 account_name → 返回 'OK'。
+    前置:调用方已保证落到未登录登录卡。账号密码从 accounts 文件按
+    adapter.name 读取(如 'nexavlinks-email'),不用硬编码占位符。填邮箱/密码 →
+    等 Turnstile token 就绪 → 点「登录」→ 等 auth_user.email 切到该账号 → 'OK'。
     失败返回原因字符串。"""
+    cred = get_account_credential(adapter.name)
+    if not cred:
+        return "NO_CREDENTIAL"
+    account, password = cred
+    expect_email = account.strip()
+    # 前置由调用方保证已登出;这里显式导航到登录卡,确保停在登录表单(仿
+    # _nexa_linuxdo_gate 的 goto,避免登出后页面停在 /check-in 残留态填错位)。
     try:
-        acct_sel = await fill_first_visible(page, ACCOUNT_FIELD_SELECTORS, NEXA_EMAIL_ACCOUNT)
-        pw_sel = await fill_first_visible(page, PASSWORD_FIELD_SELECTORS, NEXA_EMAIL_PASSWORD)
+        await page.goto(NEXA_LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception:
+        pass
+    await wait_text_ready(page, 30, max(getattr(adapter, "ready_rounds", 15), 10))
+    try:
+        acct_sel = await fill_first_visible(page, ACCOUNT_FIELD_SELECTORS, account)
+        pw_sel = await fill_first_visible(page, PASSWORD_FIELD_SELECTORS, password)
     except Exception:
         return "FILL_FAIL"
     if acct_sel is None or pw_sel is None:
@@ -6261,7 +6280,9 @@ async def _nexa_email_gate(page, adapter) -> str:
     except Exception:
         pass
     # NEXA 登录表单挂 Cloudflare Turnstile,点登录前先等 token 就绪(luckyg 先例)。
-    await wait_turnstile_token(page, TURNSTILE_TOKEN_WAIT_S)
+    # 实测 09-11:等满 TURNSTILE_TOKEN_WAIT_S 期间页面会自刷新/结算,token 常仍为空
+    # "clicking anyway",立刻点反而能登录成功(手动实证)。故仅做一次短等待后即点。
+    await wait_turnstile_token(page, min(TURNSTILE_TOKEN_WAIT_S, 3.0))
     submit_sel = None
     for sel in LOGIN_SUBMIT_SELECTORS:
         try:
@@ -6277,23 +6298,28 @@ async def _nexa_email_gate(page, adapter) -> str:
             continue
     if submit_sel is None:
         return "NO_SUBMIT"
-    # 登录提交后轮询 email 是否切到 account_name(含 Turnstile 结算,最多 20s)。
+    # 登录提交后轮询 email 是否切到该账号(含 Turnstile 结算,最多 20s)。
     deadline = time.monotonic() + 20.0
     email = ""
     while time.monotonic() < deadline:
         await asyncio.sleep(2.0)
         email = await _nexa_current_email(page)
-        if email == NEXA_EMAIL_ACCOUNT:
+        if email == expect_email:
             print(f"  nexa email login OK -> {email}", flush=True)
             return "OK"
     return f"WRONG_ACCOUNT({email or 'none'})"
 
 
 async def _nexa_linuxdo_gate(page, adapter, browser=None) -> str:
-    """NEXA LinuxDO 账号(USERNAME)登入。前置:已落到未登录登录卡。
+    """NEXA LinuxDO 账号登入(单账号任务,site name 含 linuxdo)。
 
-    try_linuxdo_sso 点击「使用 Linux.do 登录」→ 授权 → 回跳。校验
-    auth_user.email 切到 USERNAME 的绑定邮箱(your_secondary_email@example.com)。"""
+    前置:已落到未登录登录卡。LinuxDO OAuth 复用 9222 共享 profile 的 linux.do
+    会话,try_linuxdo_sso 点击「使用 Linux.do 登录」→ 授权 → 回跳,校验
+    auth_user.email 切到该账号绑定的邮箱(accounts 文件第1行)。"""
+    cred = get_account_credential(adapter.name)
+    if not cred:
+        return "NO_CREDENTIAL"
+    expect_email = cred[0].strip()
     try:
         await page.goto(NEXA_LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
     except Exception:
@@ -6306,7 +6332,7 @@ async def _nexa_linuxdo_gate(page, adapter, browser=None) -> str:
         return sso
     await asyncio.sleep(NEXA_OAUTH_RETURN_S)
     email = await _nexa_current_email(page)
-    if email != NEXA_LINUXDO_EMAIL:
+    if email != expect_email:
         return f"WRONG_ACCOUNT({email or 'none'})"
     return "OK"
 
@@ -6348,22 +6374,12 @@ def _nexa_result(adapter: str, attempts: dict[str, str]) -> CheckinResult:
     )
 
 
-async def nexa_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
-    """nexavlinks.com 双账号签到:LinuxDO(USERNAME)+ 邮箱(your_primary_email)。
+async def nexa_linuxdo_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """nexavlinks-linuxdo 单账号签到:登出 → LinuxDO SSO → /check-in 点「立即签到」。
 
-    1) goto /check-in;已登录先登出(用户下拉 → 退出登录)。
-    2) 账号1 LinuxDO:登录卡 → LinuxDO SSO → 回站 /check-in 点「立即签到」。
-    3) 再登出 → 账号2 邮箱:登录卡填 account_name 邮箱密码 → /check-in 签到。
-    4) 聚合:两账号都 OK → OK;任一失败 → FAIL。终态停在 account_name。
-
-    ⚠️ 登出只点 NEXA 站内「退出登录」(清 NEXA 域 localStorage),绝不用共享
-    profile 的全量清除器(9222 共享 profile,P0 红线,见运维手册「P0:共享 9222
-    profile 的 Cookie 全清禁令」)。
-    """
+    LinuxDO OAuth 复用 9222 共享 profile 的 linux.do 会话;账号绑定邮箱从
+    accounts 文件按 adapter.name 读取。登出只点站内「退出登录」(P0)。"""
     kind = adapter.kind or "nexa"
-    print(f"  nexa flow: {adapter.name}", flush=True)
-    attempts: dict[str, str] = {"linuxdo": "unknown", "email": "unknown"}
-
     try:
         await page.goto(NEXA_SITE_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
     except Exception:
@@ -6372,35 +6388,36 @@ async def nexa_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResul
     cf = await wait_out_cloudflare(page, CF_WAIT_S)
     if cf:
         return fail_result("cloudflare", adapter=kind)
-
-    # ---- 必要初始登出(清掉残留会话,落到未登录登录卡) ----
     await _nexa_logout(page)
+    ld = await _nexa_linuxdo_gate(page, adapter, browser)
+    if ld != "OK":
+        return fail_result(
+            "login_failed", detail=f"linuxdo={ld}", adapter=kind, stage="login",
+        )
+    return await _nexa_signin_current(page, adapter)
 
-    # ---- 账号1: LinuxDO (USERNAME) ----
-    ld_sso = await _nexa_linuxdo_gate(page, adapter, browser)
-    attempts["linuxdo"] = ld_sso
-    if ld_sso == "OK":
-        res1 = await _nexa_signin_current(page, adapter)
-        attempts["linuxdo"] = "OK" if res1.ok else res1.reason
 
-    # ---- 再登出 → 账号2: 邮箱 (account_name) ----
-    # 先导航到应用页 /check-in 带上 LinuxDO 登录态再登出,UI 退出登录才能真清
-    # localStorage(同 agentrouter smoke7 教训:gate page 停在 /login 时 logout
-    # 会秒退不生效;_nexa_logout 内部会保证先到 /check-in 应用页)。
+async def nexa_email_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """nexavlinks-email 单账号签到:登出 → 邮箱+密码登录 → /check-in 点「立即签到」。
+
+    邮箱密码从 accounts 文件按 adapter.name(如 'nexavlinks-email')读取。登出
+    只点站内「退出登录」(清 NEXA 域 localStorage,P0 红线)。"""
+    kind = adapter.kind or "nexa_email"
     try:
-        await page.goto(NEXA_CHECKIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
-        await wait_text_ready(page, 40, max(adapter.ready_rounds, 10))
+        await page.goto(NEXA_SITE_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
     except Exception:
         pass
+    await wait_text_ready(page, 40, adapter.ready_rounds)
+    cf = await wait_out_cloudflare(page, CF_WAIT_S)
+    if cf:
+        return fail_result("cloudflare", adapter=kind)
     await _nexa_logout(page)
-
-    em_login = await _nexa_email_gate(page, adapter)
-    attempts["email"] = em_login
-    if em_login == "OK":
-        res2 = await _nexa_signin_current(page, adapter)
-        attempts["email"] = "OK" if res2.ok else res2.reason
-
-    return _nexa_result(kind, attempts)
+    em = await _nexa_email_gate(page, adapter)
+    if em != "OK":
+        return fail_result(
+            "login_failed", detail=f"email={em}", adapter=kind, stage="login",
+        )
+    return await _nexa_signin_current(page, adapter)
 
 
 async def tabitoken_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
@@ -7484,7 +7501,12 @@ async def legacy_checkin_on_page(
         if kind == "ultrarouter" or is_ultrarouter_site(site_url) or is_ultrarouter_name(site_url or adapter.name):
             return await ultrarouter_checkin(page, adapter, browser=browser)
         if kind == "nexa" or is_nexa_site(site_url) or is_nexa_name(site_url or adapter.name):
-            return await nexa_checkin(page, adapter, browser=browser)
+            # nexavlinks 自 2026-09-11 拆分为两个独立单账号任务:名字含 linuxdo →
+            # LinuxDO OAuth 签到;含 email/mail/邮箱 → 邮箱+密码签到。各自先登出再
+            # 签到,不再双账号聚合。旧名 'nexavlinks' 默认走 LinuxDO 单账号。
+            if is_nexa_email_name(adapter.name):
+                return await nexa_email_checkin(page, adapter, browser=browser)
+            return await nexa_linuxdo_checkin(page, adapter, browser=browser)
         if kind == "mulink" or is_mulink_site(site_url):
             return await mulink_checkin(page, adapter, browser=browser)
         if kind == "abnt" or is_abnt_site(site_url):
@@ -8554,8 +8576,8 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
                 trusted_already_selectors=True,
             )
         if is_nexa_site(url_from_note):
-            # nexavlinks.com(New API 聚合站):双账号(LinuxDO USERNAME + 邮箱密码)。
-            # 客户若仅 note URL 也落 nexa kind → nexa_checkin 双流程。
+            # nexavlinks.com(New API 聚合站)。客户若仅 note URL 也落 nexa kind →
+            # 按任务名进入单账号流程(linuxdo/email),名字不明确时默认 LinuxDO。
             return SiteAdapter(
                 name=name,
                 url=url_from_note,

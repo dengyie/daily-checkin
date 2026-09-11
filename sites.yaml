@@ -662,13 +662,25 @@ sites:
       - 'button:has-text("今日已签到")'
       - 'text=今日已签到'
       - 'text=签到成功'
-  # nexavlinks.com(NexaVlinks 聚合 / New API 系 AI 聚合站):两个账号,
-  # ① Linux.do OAuth 账号(USERNAME,复用 9222 共享 profile 的 linux.do 会话),
-  # ② 邮箱+密码账号(your_primary_email@example.com)。签到页 /check-in,签到按钮「立即签到」,
-  # 已签状态按钮变「今日已签到」(disabled),挂 Cloudflare Turnstile(runner 内置
-  # wait_turnstile_token 会等 token 就绪后才点 CTA)。双账号轮换登出只点站内
-  # 「退出登录」(清 NEXA 域 localStorage),P0 红线守。
-  - name: 'nexavlinks'
+  # nexavlinks.com(NexaVlinks 聚合 / New API 系 AI 聚合站)—— 2026-09-11 拆成
+  # 两个独立单账号任务(不再双账号聚合轮换):
+  #   ① nexavlinks-linuxdo  → Linux.do OAuth 单账号(复用 9222 共享 profile 的
+  #                            linux.do 会话,名字含 linuxdo → nexa_linuxdo_checkin)。
+  #   ② nexavlinks-email    → 邮箱+密码单账号(账号密码从 accounts 文件按站名读取,
+  #                            名字含 email → nexa_email_checkin)。
+  # 签到页 /check-in,签到按钮「立即签到」,已签状态按钮变「今日已签到」(disabled),
+  # 挂 Cloudflare Turnstile(runner 内置 wait_turnstile_token 会等 token 就绪)。
+  # 两个任务都先登出:只点站内「退出登录」(清 NEXA 域 localStorage),P0 红线守。
+  - name: 'nexavlinks-linuxdo'
+    url: https://www.nexavlinks.com/check-in
+    kind: nexa
+    signs:
+      - 'button:has-text("立即签到")'
+    already:
+      - 'button:has-text("今日已签到")'
+      - 'text=今日已签到'
+      - 'text=签到成功'
+  - name: 'nexavlinks-email'
     url: https://www.nexavlinks.com/check-in
     kind: nexa
     signs:

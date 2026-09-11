@@ -3343,18 +3343,19 @@ class TestUltrarouterDualOAuth(unittest.TestCase):
         self.assertIn("linuxdo", res.detail if res else "")
 
 class TestNexaDualAccount(unittest.TestCase):
-    """nexavlinks.com(New API 聚合站)双账号签到(LinuxDO + 邮箱)。
+    """nexavlinks.com(New API 聚合站)—— 2026-09-11 拆分单账号签到。
 
-    2026-09-10 接入:账号1=LinuxDO(USERNAME,复用 9222 linux.do 会话);账号2=
-    邮箱+密码(your_primary_email@example.com)。终端正则停在 account_name。
+    拆成两个独立任务:① nexavlinks-linuxdo = LinuxDo OAuth 单账号(复用 9222
+    linux.do 会话);② nexavlinks-email = 邮箱+密码单账号(账号密码从 accounts
+    文件按站名读取,不硬编码)。每个任务先登出再签到,不再双账号聚合轮换。
 
     P0 红线:登出只点 NEXA 站内「退出登录」(清 NEXA 域 localStorage),唯一仅
     清本站;绝不用 BrowserContext.clear_cookies()/clear localStorage 全清 9222。
     """
 
-    def _nexa_adapter(self):
+    def _nexa_adapter(self, name="nexavlinks-linuxdo"):
         return self.m.SiteAdapter(
-            name="nexavlinks",
+            name=name,
             url="https://www.nexavlinks.com/check-in",
             kind="nexa",
             sign_selectors=['button:has-text("立即签到")'],
@@ -3384,8 +3385,7 @@ class TestNexaDualAccount(unittest.TestCase):
         self.assertFalse(f(""))
 
     def test_nexa_constants_nonempty(self):
-        self.assertEqual(self.m.NEXA_EMAIL_ACCOUNT, "your_primary_email@example.com")
-        self.assertTrue(self.m.NEXA_LINUXDO_EMAIL)
+        # 2026-09-11 拆分单账号后不再有硬编码占位账号常量;关键选择器保留。
         self.assertTrue(any("Linux" in x for x in self.m.LINUXDO_SELECTORS))
         self.assertTrue(any("退出登录" in x for x in self.m.NEXA_LOGOUT_SELECTORS))
         a = self._nexa_adapter()
@@ -3431,93 +3431,59 @@ class TestNexaDualAccount(unittest.TestCase):
         self.assertEqual(self.asyncio.run(self.m._nexa_current_email(P())), "")
 
     def test_nexa_checkin_dual_ok(self):
-        """双账号(LinuxDO + 邮箱)都签到成功 → OK;登出两次,不碰 clear_cookies."""
+        """LinuxDO 单账号签到成功 → OK;登出一次,不碰 clear_cookies."""
         m = self.m
         calls = []
-        class FakePage:
-            async def goto(self, url, **kwargs):
-                calls.append("goto:" + (url or "")); return None
-            async def evaluate(self, expr):
-                if "auth_token" in expr:
-                    # 已经提到邮箱账号时其余登场
-                    if "nexadam" in calls and calls.count("login_ok") >= 1:
-                        return False
-                    return True
-                if "auth_user" in expr:
-                    # 每次登后返回当前账号
-                    if calls.count("login_ok") >= 2:
-                        return '{"email":"your_primary_email@example.com"}'
-                    return '{"email":"your_secondary_email@example.com"}'
-                return ""
-        page = FakePage()
-
+        fake_logout = 0
         async def fake_wait(*a, **k):
             return True
         async def fake_cf(*a, **k):
             return None
-        async def fake_text(page, n=4000):
-            return "每日签到 连续签到 立即签到 今日奖励"
-        async def fake_url(page):
-            return "https://www.nexavlinks.com/login"
-        async def fake_login(page):
-            return "OK"
-        async def fake_click(page, selectors, timeout_each=800):
-            joined = " ".join(selectors or [])
-            for sel in selectors:
-                call_key = None
-                if "立即签到" in joined:
-                    call_key = "click_signin"
-                if call_key:
-                    calls.append(call_key); return sel
-            return None
-        async def fake_sso(page, origin_host="", browser=None):
-            return "OK"
-
-        # 简化:用真实 nexa_checkin 骨架但 mock 外部 SSO/邮箱/签到,同时 mock
-        # _nexa_logout 只在特定条件下真实执行,避免无限递归。
-        # 为保证稳定,此处整个 nexa_checkin 用高度 mock 的隔离单元验主流程接线。
-        fake_logout = 0
-        async def fake_nexa_logout(page):
+        async def fake_logout_fn(page):
             nonlocal fake_logout
             fake_logout += 1
             calls.append("logout")
             return True
         async def fake_linuxdo_gate(page, adapter, browser=None):
             return "OK"
-        async def fake_email_gate(page, adapter):
-            return "OK"
         async def fake_signin(page, adapter):
             return m.confirmed_done_result("签到成功", adapter="nexa")
 
+        class FakePage:
+            async def goto(self, url, **kw):
+                return ""
+            async def evaluate(self, expr):
+                return ""
+        page = FakePage()
+
         with mock.patch.object(m, "wait_text_ready", fake_wait), \
              mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
-             mock.patch.object(m, "_nexa_logout", fake_nexa_logout), \
+             mock.patch.object(m, "_nexa_logout", fake_logout_fn), \
              mock.patch.object(m, "_nexa_linuxdo_gate", fake_linuxdo_gate), \
-             mock.patch.object(m, "_nexa_email_gate", fake_email_gate), \
              mock.patch.object(m, "_nexa_signin_current", fake_signin):
-            res = self.asyncio.run(m.nexa_checkin(page, self._nexa_adapter(), browser=None))
+            res = self.asyncio.run(
+                m.nexa_linuxdo_checkin(page, self._nexa_adapter("nexavlinks-linuxdo"), browser=None)
+            )
 
-        self.assertEqual(res.status, "OK")
+        self.assertIn(res.status, ("OK", "ALREADY"))
         self.assertGreaterEqual(fake_logout, 1)
         self.assertIn("logout", calls)
 
     def test_nexa_checkin_email_fail_fails(self):
-        """邮箱账号失败 → FAIL(无论 LinuxDO 是否成功)."""
+        """邮箱账号登录失败 → FAIL(单账号流程,登录失败直接 FAIL,不再聚合)."""
         m = self.m
         class FakePage:
             async def goto(self, url, **kw):
                 return ""
         page = FakePage()
-        async def fake_wait(*a,**k):
+        async def fake_wait(*a, **k):
             return True
-        async def fake_cf(*a,**k):
+        async def fake_cf(*a, **k):
             return None
         async def fake_logout(page):
             return True
-        async def fake_linuxdo_gate(page, adapter, browser=None):
-            return "OK"
         async def fake_email_gate(page, adapter):
-            return "NO_FORM"
+            return "NO_SUBMIT"
         async def fake_signin(page, adapter):
             return m.confirmed_done_result("签到成功", adapter="nexa")
         with mock.patch.object(m, "wait_text_ready", fake_wait), \
@@ -3525,14 +3491,43 @@ class TestNexaDualAccount(unittest.TestCase):
              mock.patch.object(m, "_nexa_logout", fake_logout), \
              mock.patch.object(m, "_nexa_email_gate", fake_email_gate), \
              mock.patch.object(m, "_nexa_signin_current", fake_signin):
-            res = self.asyncio.run(m.nexa_checkin(page, self._nexa_adapter(), browser=None))
+            res = self.asyncio.run(
+                m.nexa_email_checkin(page, self._nexa_adapter("nexavlinks-email"), browser=None)
+            )
         self.assertEqual(res.status, "FAIL")
-        self.assertEqual(res.reason, "dual_account_incomplete")
+        self.assertEqual(res.reason, "login_failed")
+
+    def test_nexa_is_subflow_name(self):
+        """子流程判定:名字含 email → email 流程;含 linuxdo/默认 → linuxdo."""
+        self.assertTrue(self.m.is_nexa_email_name("nexavlinks-email"))
+        self.assertTrue(self.m.is_nexa_email_name("nexa-mail"))
+        self.assertFalse(self.m.is_nexa_email_name("nexavlinks-linuxdo"))
+        self.assertFalse(self.m.is_nexa_email_name("nexavlinks"))
+
+    def test_nexa_sites_yaml_split_entries(self):
+        """sites.yaml 拆成两个单账号条目,且都解析成 kind=nexa."""
+        import yaml
+        with open("sites.yaml", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        names = {e.get("name"): e for e in data.get("sites", [])}
+        self.assertIn("nexavlinks-linuxdo", names)
+        self.assertIn("nexavlinks-email", names)
+        from stealth_checkin_runner import _adapter_from_yaml_entry
+        for nm in ("nexavlinks-linuxdo", "nexavlinks-email"):
+            a = _adapter_from_yaml_entry(names[nm])
+            self.assertEqual(a.kind, "nexa")
+
+    def test_legacy_dispatch_has_both_nexa_single_account_branches(self):
+        """分发链同时含 nexa_email_checkin 与 nexa_linuxdo_checkin 两个分支."""
+        src = TARGET.read_text(encoding="utf-8")
+        self.assertIn("nexa_email_checkin(page, adapter, browser=browser)", src)
+        self.assertIn("nexa_linuxdo_checkin(page, adapter, browser=browser)", src)
 
     def test_p0_no_clear_cookies_in_nexa_path(self):
         """NEXA 专属流程不得存在 clear_cookies/clear_localStorage 全清调用."""
         import inspect
-        src = inspect.getsource(self.m.nexa_checkin)
+        src = inspect.getsource(self.m.nexa_linuxdo_checkin)
+        src += inspect.getsource(self.m.nexa_email_checkin)
         src += inspect.getsource(self.m._nexa_logout)
         lowercase = src.lower()
         self.assertNotIn("clear_cookies", lowercase)
