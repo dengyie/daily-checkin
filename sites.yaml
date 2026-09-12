@@ -719,3 +719,20 @@ sites:
       - 'text=今日已签到'
       - 'text=签到成功'
       - 'button:has-text("今日已签到")'
+  # aihappy(images.aihappy.indevs.in, 流光绘境 AI 生图站)—— 2026-09-12 接入。
+  # 自定义 Vue SPA(hash 路由,非 New API),LinuxDO OAuth 登录(复用 9222 共享
+  # profile 的 linux.do 会话;站方也有 GitHub OAuth)。签到在顶栏 UserQuotaBar
+  # 小按钮:未签=「签到」(title「领取今日签到额度」),点击 POST /api/me/checkin,
+  # toast「签到成功,获得 X 点额度」;已签=按钮变「已签到」且 disabled。
+  # kind=browser;signs 优先精确 class button.user-quota-checkin,has-text 兜底;
+  # bare「已签到」按钮已签态是 disabled,done_button_signal 按 disabled 判定。
+  - name: 'aihappy'
+    url: https://images.aihappy.indevs.in/#/profile
+    kind: browser
+    signs:
+      - 'button.user-quota-checkin'
+      - 'button:has-text("签到")'
+    already:
+      - 'button:has-text("已签到")'
+      - 'text=签到成功'
+      - 'text=今天已签到'

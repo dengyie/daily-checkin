@@ -3726,6 +3726,28 @@ class TestSitesYaml(unittest.TestCase):
         self.assertIn("立即签到", joined)
         self.assertTrue(a.already_selectors)
 
+    def test_yaml_registers_aihappy_entry(self):
+        """sites.yaml 的 aihappy 条目解析为 kind=browser,带 quota bar 精确选择器与已签签名。"""
+        import yaml
+        self.assertTrue(os.path.exists("sites.yaml"))
+        with open("sites.yaml", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "aihappy"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 aihappy 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://images.aihappy.indevs.in/#/profile")
+        joined = " ".join(a.sign_selectors)
+        self.assertIn("user-quota-checkin", joined)
+        self.assertIn("签到", joined)
+        self.assertTrue(a.already_selectors)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("已签到", joined_already)
+        # LinuxDO OAuth 站:不得配置 prefer_cta_before_auth(未登录必须先走 SSO)
+        self.assertFalse(a.prefer_cta_before_auth)
+
+
     def test_fengwind_and_mulink_features(self):
         # 1. fengwind site resolution
         adapter = self.m.resolve_site("fengwind", "https://api-welfalre.fengwind.com/")
