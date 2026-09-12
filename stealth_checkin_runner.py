@@ -6941,16 +6941,20 @@ async def mulink_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     """mulink (demo.dev2.mulink.top) 签到。
 
     2026-09-06 前端改版:签到从 /wallet 直显改为「点导航里的 钱包 → 进入 /wallet
-    iframe → 额度池卡片里的「领取」按钮」；若直接 goto /wallet 会被 shell 重定向回
-    /dashboard/overview，拿不到签到卡。因此必须:
-      1) 打开 /dashboard/overview shell,点「Open navigation」展开侧边栏
+    iframe → 额度池卡片里的「领取」按钮」；若直接 goto /wallet 会被 shell 重定向送回
+    shell。2026-09-12 再次改版:shell 迁至 /os-desktop(旧 /dashboard/overview 302 到新页),
+    新 shell 侧边栏默认已展开。因此必须:
+      1) 打开 /os-desktop shell;侧边栏默认展开,钱包不可见时才点 Open navigation 展开
       2) 点「钱包」菜单项,等 /wallet iframe 出现
       3) 在 iframe 额度池里点「领取」(可领) 或判定「今日已领取」(已领)
     确认文案「今日已领取 / 今天 +」或按钮变「签到」/已领状态。
     """
     kind = adapter.kind or "mulink"
     print(f"  mulink flow: {adapter.name}", flush=True)
-    shell_url = "https://demo.dev2.mulink.top/dashboard/overview"
+    # 2026-09-12 改版:shell 迁至 /os-desktop,旧 /dashboard/overview 会 302 到新页。
+    # 新 shell 侧边栏默认已展开(钱包等项直接可见),故导航展开改为条件式,避免把
+    # 已展开的侧边栏误收起再点不到钱包。
+    shell_url = "https://demo.dev2.mulink.top/os-desktop"
 
     try:
         await page.goto(shell_url, wait_until="networkidle", timeout=GOTO_TIMEOUT_MS)
@@ -6959,14 +6963,21 @@ async def mulink_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     await wait_text_ready(page, 40, max(adapter.ready_rounds or 12, 15))
     await asyncio.sleep(4)
 
-    # 展开 Dock 侧边栏(露出「钱包」入口)
-    try:
-        nav_btn = page.locator('button[aria-label="Open navigation"]').first
-        if await nav_btn.count():
-            await nav_btn.click(timeout=4000)
-            await asyncio.sleep(1.5)
-    except Exception:
-        pass
+    async def wallet_visible() -> bool:
+        wl = page.get_by_text("钱包", exact=True).first
+        if not await wl.count():
+            return False
+        return await wl.is_visible()
+
+    # 新版 /os-desktop 侧边栏默认展开;若「钱包」不可见才点 Open navigation 展开 Dock
+    if not await wallet_visible():
+        try:
+            nav_btn = page.locator('button[aria-label="Open navigation"]').first
+            if await nav_btn.count():
+                await nav_btn.click(timeout=4000)
+                await asyncio.sleep(1.5)
+        except Exception:
+            pass
 
     # 点「钱包」菜单项(展开后侧边栏里可见)
     try:
