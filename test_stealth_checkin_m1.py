@@ -4051,6 +4051,49 @@ class TestIsAbntSite(unittest.TestCase):
         a = _adapter_from_yaml_entry(entry)
         self.assertEqual(a.kind, "abnt")
 
+    def test_abnt_checkin_already_authed_skips_sso(self):
+        """已登录态下(9222 共享 profile)直接访问 /profile 签到,不调用 try_linuxdo_sso。"""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        m = self.m
+        fake_page = AsyncMock()
+        fake_page.url = "https://api.abnt.it/profile"
+        adapter = m.resolve_site("abnt", "https://api.abnt.it/profile")
+
+        with patch.object(m, "_abnt_close_stale_tabs", new_callable=AsyncMock), \
+             patch.object(m, "_abnt_goto_profile", new_callable=AsyncMock), \
+             patch.object(m, "wait_out_cloudflare", new_callable=AsyncMock, return_value=None), \
+             patch.object(m, "dismiss_obstructing_dialogs", new_callable=AsyncMock), \
+             patch.object(m, "page_text", new_callable=AsyncMock, return_value="Aether API 用户 ID 38 @mangoqwq 当前余额 Payload 80"), \
+             patch.object(m, "try_linuxdo_sso", new_callable=AsyncMock) as mock_sso, \
+             patch.object(m, "_abnt_sign_current", new_callable=AsyncMock, return_value=m.confirmed_done_result("abnt check-in clicked", adapter="abnt")):
+            res = asyncio.run(m.abnt_checkin(fake_page, adapter))
+            self.assertTrue(res.ok)
+            mock_sso.assert_not_called()
+
+    def test_abnt_checkin_logged_out_calls_sso(self):
+        """未登录态下(/sign-in 登录页)必须触发 try_linuxdo_sso。"""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        m = self.m
+        fake_page = AsyncMock()
+        fake_page.url = "https://api.abnt.it/sign-in"
+        adapter = m.resolve_site("abnt", "https://api.abnt.it/profile")
+
+        with patch.object(m, "_abnt_close_stale_tabs", new_callable=AsyncMock), \
+             patch.object(m, "_abnt_goto_profile", new_callable=AsyncMock), \
+             patch.object(m, "wait_out_cloudflare", new_callable=AsyncMock, return_value=None), \
+             patch.object(m, "dismiss_obstructing_dialogs", new_callable=AsyncMock), \
+             patch.object(m, "page_text", new_callable=AsyncMock, return_value="Sign in to your account 欢迎回来 使用 LinuxDO 继续"), \
+             patch.object(m, "wait_text_ready", new_callable=AsyncMock), \
+             patch.object(m, "try_linuxdo_sso", new_callable=AsyncMock, return_value="OK") as mock_sso, \
+             patch.object(m, "_abnt_find_authed_profile_tab", new_callable=AsyncMock, return_value=fake_page), \
+             patch.object(m, "_abnt_sign_current", new_callable=AsyncMock, return_value=m.confirmed_done_result("done", adapter="abnt")):
+            res = asyncio.run(m.abnt_checkin(fake_page, adapter))
+            mock_sso.assert_called_once()
+
 
 class TestRelayForLoanCycle(unittest.TestCase):
     """relayfor.xyz(RelayFor / 词元贷借贷站)—— 2026-09-11 接入。

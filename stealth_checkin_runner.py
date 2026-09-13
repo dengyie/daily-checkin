@@ -5932,6 +5932,7 @@ async def _abnt_sign_current(page, adapter) -> CheckinResult:
     if has_done:
         return confirmed_done_result("abnt already checked in on /profile", adapter="abnt")
 
+    await wait_turnstile_token(page, 3.0)
     btn = await click_first_visible(page, ABNT_SIGN_SELECTORS, timeout_each=1500)
     if not btn:
         _, btn2 = await wait_for_any_visible(page, ABNT_SIGN_SELECTORS, 4.0)
@@ -5953,8 +5954,8 @@ async def _abnt_sign_current(page, adapter) -> CheckinResult:
         "立即签到" not in after and is_valid_checkin_confirm(after)
     )
     if not confirmed:
-        for _ in range(3):
-            await asyncio.sleep(1.2)
+        for _ in range(6):
+            await asyncio.sleep(1.5)
             try:
                 after = await page_text(page, 4000)
             except Exception:
@@ -5964,6 +5965,17 @@ async def _abnt_sign_current(page, adapter) -> CheckinResult:
             ):
                 confirmed = True
                 break
+    if not confirmed:
+        # 有界一次 reload 重扫兜底(防新加坡节点/CF 代理回源翻转慢,只读不重点击)
+        try:
+            await _abnt_goto_profile(page)
+            after = await page_text(page, 4000)
+            if any(ind in after for ind in ABNT_DONE_INDICATORS) or (
+                "立即签到" not in after and is_valid_checkin_confirm(after)
+            ):
+                confirmed = True
+        except Exception:
+            pass
     if not confirmed:
         return fail_result(
             "no_confirm", detail=f"clicked {btn} but no done text", adapter="abnt", stage="confirm",
@@ -5975,44 +5987,61 @@ async def _abnt_sign_current(page, adapter) -> CheckinResult:
 
 
 async def abnt_checkin(page, adapter, browser=None) -> CheckinResult:
-    """api.abnt.it LinuxDo New API 签到:SSO 后按带登录态 /profile 再点签到。"""
+    """api.abnt.it LinuxDo New API 签到:
+    若当前 9222 共享 profile 已有有效登录态,直接访问 /profile 签到;
+    未登录时走 /sign-in -> LinuxDo SSO -> 回跳定位 profile tab -> 签到。
+    """
     kind = adapter.kind or "abnt"
     print(f"  abnt flow: {adapter.name}", flush=True)
 
     await _abnt_close_stale_tabs(page, browser)
 
-    try:
-        await page.goto(ABNT_SIGNIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
-    except Exception:
-        pass
-    try:
-        await wait_text_ready(page, 30, max(adapter.ready_rounds, 10))
-    except Exception:
-        pass
-
+    # 优先检测当前 profile 是否已登录(复用 9222 共享 profile 登录态)。
+    # 避免已登录态下直接访问 /sign-in 会被站点重定向至 /dashboard/overview,导致 SSO 找登录按钮超时报 NO_BUTTON。
+    await _abnt_goto_profile(page)
     cf = await wait_out_cloudflare(page, CF_WAIT_S)
     if cf:
         return fail_result("cloudflare", adapter=kind)
     await dismiss_obstructing_dialogs(page)
 
-    status = await try_linuxdo_sso(page, origin_host="api.abnt.it", browser=browser)
-    if status != "OK":
-        return result_from_sso_failure(status, kind)
+    txt0 = await page_text(page, 600)
+    u0 = (page.url or "").lower()
+    is_authed = not looks_logged_out(txt0) and not any(s in u0 for s in ("/sign-in", "/signin", "/login"))
 
-    await asyncio.sleep(ABNT_OAUTH_RETURN_S)
-    tgt = await _abnt_find_authed_profile_tab(page, browser)
-    if tgt is None:
-        await _abnt_goto_profile(page)
+    if not is_authed:
         try:
-            txt = await page_text(page, 600)
+            await page.goto(ABNT_SIGNIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
         except Exception:
-            txt = ""
-        if looks_logged_out(txt):
-            return fail_result("auth_required", detail="abnt not logged in after SSO", adapter=kind)
-        tgt = page
+            pass
+        try:
+            await wait_text_ready(page, 30, max(adapter.ready_rounds, 10))
+        except Exception:
+            pass
 
-    await _abnt_goto_profile(tgt)
-    return await _abnt_sign_current(tgt or page, adapter)
+        cf = await wait_out_cloudflare(page, CF_WAIT_S)
+        if cf:
+            return fail_result("cloudflare", adapter=kind)
+        await dismiss_obstructing_dialogs(page)
+
+        status = await try_linuxdo_sso(page, origin_host="api.abnt.it", browser=browser)
+        if status != "OK":
+            return result_from_sso_failure(status, kind)
+
+        await asyncio.sleep(ABNT_OAUTH_RETURN_S)
+        tgt = await _abnt_find_authed_profile_tab(page, browser)
+        if tgt is None:
+            await _abnt_goto_profile(page)
+            try:
+                txt = await page_text(page, 600)
+            except Exception:
+                txt = ""
+            if looks_logged_out(txt):
+                return fail_result("auth_required", detail="abnt not logged in after SSO", adapter=kind)
+            tgt = page
+        page = tgt
+
+    await _abnt_goto_profile(page)
+    return await _abnt_sign_current(page, adapter)
 
 # ---------------------------------------------------------------------------
 # relayfor.xyz(RelayFor / 词元贷借贷站)—— 2026-09-11 接入。
