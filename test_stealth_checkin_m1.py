@@ -3747,6 +3747,25 @@ class TestSitesYaml(unittest.TestCase):
         # LinuxDO OAuth 站:不得配置 prefer_cta_before_auth(未登录必须先走 SSO)
         self.assertFalse(a.prefer_cta_before_auth)
 
+    def test_yaml_registers_qkmss_entry(self):
+        """sites.yaml 的 qkmss 条目解析为 kind=browser,URL 为 /user/checkin 且 prefer_catalog_url=True。"""
+        import yaml
+        self.assertTrue(os.path.exists("sites.yaml"))
+        with open("sites.yaml", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "qkmss"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 qkmss 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://qkmss.com/user/checkin")
+        self.assertTrue(a.prefer_catalog_url)
+        joined = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined)
+        # 验证就算传入旧 /profile note URL,prefer_catalog_url 也会自动胜出保持新 URL
+        resolved = resolve_site("qkmss", "https://qkmss.com/profile")
+        self.assertEqual(resolved.url, "https://qkmss.com/user/checkin")
+
 
     def test_fengwind_and_mulink_features(self):
         # 1. fengwind site resolution

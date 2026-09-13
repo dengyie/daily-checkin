@@ -75,6 +75,23 @@ sites:
   # checkin_enabled=true,无 turnstile),走尊属 abnt_checkin:
   # /sign-in → LinuxDo SSO(OAuth 回跳落新 tab,适配器接管带登录态 /profile)
   # → 点「立即签到」+ 确认门。
+  - name: 'hkai25'
+    url: https://share.hkai25.top/profile
+    kind: newapi_profile
+  # qkmss(qkmss.com / 钱咖API):前台路由更新，旧 /profile 404 (Unexpected Application Error)，
+  # 签到入口迁至 /user/checkin。「每日签到」卡片，未签时展示「立即签到」按钮，点击后随机赠送积分。
+  - name: 'qkmss'
+    url: https://qkmss.com/user/checkin
+    kind: browser
+    prefer_catalog_url: true
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'button:has-text("已签到")'
+      - 'text=已签到'
   - name: 'abnt'
     url: https://api.abnt.it/profile
     kind: abnt
