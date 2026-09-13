@@ -6977,6 +6977,10 @@ async def mulink_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
       2) 点「钱包」菜单项,等 /wallet iframe 出现
       3) 在 iframe 额度池里点「领取」(可领) 或判定「今日已领取」(已领)
     确认文案「今日已领取 / 今天 +」或按钮变「签到」/已领状态。
+    2026-09-13 措辞改版:额度池 CTA 文案从「领取」改为「签到」(副标题「余额不满足
+    领取条件」只是常驻说明,按钮 enabled 可点),点击成功后按钮消失、副标题变
+    「今日已打卡」+ CTA 位变「今天已打卡」+ 日历当日翻 ✓。已领预判/确认门同补
+    「打卡」措辞(「领取」措辞保留向后兼容)。
     """
     kind = adapter.kind or "mulink"
     print(f"  mulink flow: {adapter.name}", flush=True)
@@ -7031,20 +7035,29 @@ async def mulink_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
         text = await page_text(page, 700)
         return fail_result("no_wallet_frame", detail=text[:120], adapter=kind, stage="action")
 
-    # 已领态预判:今日已领取
+    # 已领态预判:「今日已领取/今日已领」(旧措辞)、「今日已打卡/今天已打卡」
+    # (2026-09-13 新措辞)。注意未签页脚注只有「本月已领」,不含「今日已领」。
     wtext = await wf.evaluate("document.body ? document.body.innerText : ''")
-    if "今日已领取" in wtext or "今日已领" in wtext:
-        return confirmed_done_result("text=今日已领取", adapter=kind)
+    if (
+        "今日已领取" in wtext or "今日已领" in wtext
+        or "今日已打卡" in wtext or "今天已打卡" in wtext
+    ):
+        detail = "text=今日已打卡" if "已打卡" in wtext else "text=今日已领取"
+        return confirmed_done_result(detail, adapter=kind)
 
     # 找额度池「领取」按钮
     # 根因(2026-09-07):mulink 额度池卡片头<button>文本为「额度池/本周期还可领取 1 次」,
     # 也命中 has-text("领取")("可领取"子串),且 DOM 顺序排在真领取按钮之前,.first 会点错
     # 到卡片折叠头而非签到。改为按「精确文本=领取」定位(:text-is),实测只命中真领取按钮。
+    # 2026-09-13:CTA 文案改为「签到」,精确 text-is 实测唯一命中真按钮
+    # (卡片头「额度池/余额不满足领取条件」与「取消」均不含「签到」,无碰撞)。
     claim = None
     for sel in [
         'button:text-is("领取")',
         'button:text-is("今日领取")',
         'button:text-is("签到领取")',
+        'button:text-is("签到")',
+        'button:text-is("打卡")',
         'button:has-text("领取"):not(:has-text("已领取"))',
     ]:
         try:
@@ -7052,7 +7065,7 @@ async def mulink_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
             if await loc.count():
                 txt = (await loc.inner_text()).strip()
                 # 精确文本命中即为真领取按钮;模糊命中再排除折叠头(含"本周期/额度池"等)
-                if txt == "领取" or txt in ("今日领取", "签到领取"):
+                if txt in ("领取", "今日领取", "签到领取", "签到", "打卡"):
                     claim = loc
                     break
                 if "领取" in txt and "已领取" not in txt and "本周期" not in txt and "额度池" not in txt:
@@ -7071,9 +7084,12 @@ async def mulink_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     await asyncio.sleep(5)
 
     wtext2 = await wf.evaluate("document.body ? document.body.innerText : ''")
-    if "今日已领取" in wtext2 or "今日已领" in wtext2 or "今天 +" in wtext2:
+    if (
+        "今日已领取" in wtext2 or "今日已领" in wtext2 or "今天 +" in wtext2
+        or "今日已打卡" in wtext2 or "今天已打卡" in wtext2
+    ):
         return confirmed_done_result(
-            "领取成功", adapter=kind,
+            "打卡成功" if "已打卡" in wtext2 else "领取成功", adapter=kind,
             action=ActionEvidence(
                 kind="dom_click", target="claim",
                 attempted_at=datetime.now().isoformat(timespec="seconds"),

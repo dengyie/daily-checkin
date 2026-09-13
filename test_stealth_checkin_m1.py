@@ -4019,6 +4019,25 @@ class TestMulinkClaimSelector(unittest.TestCase):
         self.assertIn('"本周期" not in txt', src)
         self.assertIn('"额度池" not in txt', src)
 
+    def test_mulink_accepts_signin_cta_and_dakao_done_cues(self):
+        """2026-09-13 措辞改版回归:CTA「签到」精确命中;已领预判/确认门补「打卡」措辞。
+
+        实测(9222 真机):额度池 CTA 文案从「领取」改为「签到」(enabled),点击成功后
+        按钮消失、副标题变「今日已打卡」+ CTA 位变「今天已打卡」+ 日历当日翻 ✓;
+        旧确认词「今日已领取/今天 +」均不再出现。旧「领取」选择器与确认词保留兼容。
+        """
+        src = TARGET.read_text(encoding="utf-8")
+        # CTA 精确选择器:领取(旧措辞) + 签到/打卡(新措辞) 都必须在候选列表
+        self.assertIn('button:text-is("签到")', src)
+        self.assertIn('button:text-is("打卡")', src)
+        # 精确文本命中白名单扩到「签到」「打卡」
+        self.assertIn('"签到领取", "签到", "打卡"', src)
+        # 已领态预判(点击前)与确认门(点击后)都要覆盖打卡措辞
+        self.assertIn('"今日已打卡" in wtext', src)
+        self.assertIn('"今天已打卡" in wtext', src)
+        self.assertIn('"今日已打卡" in wtext2', src)
+        self.assertIn('"今天已打卡" in wtext2', src)
+
 class TestIsAbntSite(unittest.TestCase):
     """abnt.it(Aether API)尊属适配的站点判定与接线。
 
