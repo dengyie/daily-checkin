@@ -552,10 +552,14 @@ sites:
   - name: 'ddcat'
     url: https://ddcat.pronhubcn.com/wallet
     kind: browser
+    signin_api: /api/wallet/checkin
     signs:
+      - 'button.app-workspace-sidebar-checkin-claim'
+      - 'button:has-text("立即领取")'
       - 'button:has-text("签到 +0.5")'
       - 'button:has-text("签到")'
     already:
+      - 'text=今天已经签到过了'
       - 'text=今日已签到'
       - 'text=已签到'
       - 'text=签到成功'
@@ -570,6 +574,18 @@ sites:
       - 'button:has-text("签到")'
       - 'button:has-text("立即签到")'
       - 'button:has-text("今日签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今日已签'
+      - 'button:has-text("已签到")'
+  - name: '白鸽'
+    url: https://new-api.pigeonw.com/profile
+    kind: newapi_profile
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:has-text("今日签到")'
+      - 'button:has-text("签到")'
     already:
       - 'text=今日已签到'
       - 'text=签到成功'
@@ -753,3 +769,22 @@ sites:
       - 'button:has-text("已签到")'
       - 'text=签到成功'
       - 'text=今天已签到'
+  # 虾蹬王(checkin.kunyou.asia)—— 2026-09-15 接入。
+  # 每日签到领 10 余额（有效期 7 天）。
+  # 站内绑定保存在 localStorage ck_userId（9222 共享 profile 已绑定 userId=206）。
+  # 未签：button#btn「立即签到」，点击后调用 POST /api/checkin；
+  # 签到成功后：button#btn 文本变为「今日已签到 ✓」，消息栏显示「✅ 签到成功…」；
+  # 已签态：button#btn 为「今日已签到 ✓」，或接口返回 already。
+  - name: '虾蹬王'
+    url: https://checkin.kunyou.asia/
+    kind: browser
+    prefer_cta_before_auth: true
+    signs:
+      - 'button#btn:has-text("立即签到")'
+      - 'button:has-text("立即签到")'
+      - 'button#btn'
+    already:
+      - 'button#btn:has-text("今日已签到")'
+      - 'button:has-text("今日已签到")'
+      - 'text=今日已签到'
+      - 'text=签到成功'

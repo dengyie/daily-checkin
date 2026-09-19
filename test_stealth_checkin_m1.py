@@ -4428,6 +4428,38 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertEqual(res.status, "OK")
         self.assertIn("还款", res.detail)
 
+    def test_pending_amount_parses_comma_and_newline(self):
+        """金额解析:换行分隔与千分位逗号."""
+        self.assertEqual(self.m._relayfor_pending_amount("当前待还\n$0.39"), 0.39)
+        self.assertEqual(self.m._relayfor_pending_amount("待还 $1,234.56"), 1234.56)
+        self.assertIsNone(self.m._relayfor_pending_amount("无待还字样 $5.00"))
+        self.assertIsNone(self.m._relayfor_pending_amount(""))
+
+    def test_repay_cleared_card_requires_settlement_cue(self):
+        """待还卡片消失时必须有结清类文案佐证;无佐证(DOM 重排)不得确认."""
+        before = '当前待还\n$0.39\n今日签到还款'
+        # 有「已还清」佐证 → 确认
+        res, _ = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": False},
+                'button:has-text("今日签到还款")': {"is_visible": True, "disabled": False},
+            },
+            page_text=before,
+            page_text_after='已还清\n本笔签到记录',
+        )
+        self.assertEqual(res.status, "OK")
+        # 无任何结清佐证(after 与 before 同窗截断丢掉待还卡)→ no_confirm
+        res2, _ = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": False},
+                'button:has-text("今日签到还款")': {"is_visible": True, "disabled": False},
+            },
+            page_text=before,
+            page_text_after='进行中的计费活动\n当前没有进行中的计费活动。',
+        )
+        self.assertEqual(res2.status, "FAIL")
+        self.assertEqual(res2.reason, "no_confirm")
+
     def test_click_no_landed_confirm_returns_fail(self):
         """点击借/还后页面文案无变化(未落账)→ FAIL no_confirm,不是 OK 假阳性."""
         res, clicks = self._run_handler(
@@ -4465,6 +4497,45 @@ class TestRelayForLoanCycle(unittest.TestCase):
         )
         self.assertEqual(res.status, "ALREADY")
         self.assertFalse(clicks, "已处理态不应点击任何按钮")
+
+
+class TestSsoOriginMatch(unittest.TestCase):
+    """SSO 回跳 netloc 判定:必须精确匹配 host,禁止子串匹配."""
+
+    def setUp(self):
+        self.m = __import__("stealth_checkin_runner")
+
+    def test_exact_netloc_matches(self):
+        self.assertTrue(self.m._sso_origin_matches("nexavlinks.com", "https://nexavlinks.com/check-in"))
+        self.assertTrue(self.m._sso_origin_matches("nexavlinks.com", "nexavlinks.com/profile"))
+
+    def test_substring_host_never_matches(self):
+        self.assertFalse(self.m._sso_origin_matches("x.com", "https://ax.com/profile"))
+        self.assertFalse(self.m._sso_origin_matches("relayfor.xyz", "https://evil-relayfor.xyz/"))
+        self.assertFalse(self.m._sso_origin_matches("", "https://nexavlinks.com/"))
+
+
+class TestConfirmGateSourceGuards(unittest.TestCase):
+    """源码守卫:确认/成功判据不允许放宽成无 before 对比或吞掉 success=false."""
+
+    def setUp(self):
+        self.m = __import__("stealth_checkin_runner")
+        with open(self.m.__file__, encoding="utf-8") as f:
+            self.src = f.read()
+
+    def test_signin_api_success_field_has_priority(self):
+        """success 字段存在时必须以其为准;code===200 不得覆盖 success===false."""
+        self.assertIn("typeof body.success === 'boolean'", self.src)
+
+    def test_nexa_dismiss_loop_is_bounded(self):
+        self.assertIn("count < 10 && ann.currentPopup", self.src)
+
+    def test_nexa_dismiss_never_removes_unknown_modal(self):
+        self.assertNotIn("m.remove()", self.src)
+
+    def test_relayfor_confirm_uses_shared_text_window(self):
+        self.assertIn("RELAYFOR_TEXT_WINDOW", self.src)
+        self.assertNotIn("before = await page_text(page, 1500)", self.src)
 
 
 if __name__ == "__main__":

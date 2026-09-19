@@ -3468,6 +3468,17 @@ def sso_terminal_page_status(text: str, url: str) -> str | None:
     return None
 
 
+def _sso_origin_matches(origin_host: str, url: str) -> bool:
+    """SSO 回跳判定:解析 URL 后比较 netloc,绝不做子串匹配(短 host 会误配其它域)。"""
+    if not origin_host:
+        return False
+    u = url if "//" in url else "https://" + url
+    try:
+        return urlparse(u).netloc.lower() == origin_host.lower()
+    except Exception:
+        return False
+
+
 async def try_linuxdo_sso(page, origin_host: str = "", browser=None) -> str:
     """
     Full SSO:
@@ -3640,7 +3651,7 @@ async def try_linuxdo_sso(page, origin_host: str = "", browser=None) -> str:
                     await asyncio.sleep(1.5)
                 continue
 
-            if saw_linuxdo and origin_host and origin_host in lower_url:
+            if saw_linuxdo and _sso_origin_matches(origin_host, lower_url):
                 await wait_text_ready(active, 40, 12)
                 text2 = await page_text(active, 900)
                 if not looks_logged_out(text2):
@@ -3660,7 +3671,7 @@ async def try_linuxdo_sso(page, origin_host: str = "", browser=None) -> str:
             if not looks_logged_out(text) and any(
                 k in lower_url for k in ("profile", "console", "personal", "wallet", "check-in", "checkin", "dashboard")
             ):
-                if saw_linuxdo or authorize_clicks or (origin_host and origin_host in lower_url and "/login" not in lower_url):
+                if saw_linuxdo or authorize_clicks or (_sso_origin_matches(origin_host, lower_url) and "/login" not in lower_url):
                     remain = MIN_DWELL_AFTER_SSO_CLICK_S - (time.monotonic() - click_t0)
                     if remain > 0:
                         await asyncio.sleep(remain)
@@ -6134,12 +6145,15 @@ async def _try_page_text(page, n: int = 1500) -> str:
         return ""
 
 
-_REPAY_PENDING_RE = re.compile(r"待还\s*\$([0-9][0-9,.]*)")
+_RELAYFOR_PENDING_RE = re.compile(r"待还\s*\$([0-9][0-9,.]*)")
+# 借/还确认的页面文本窗口:点击前后必须用同一窗口宽度,保证 before/after
+# 对比的是同一片 DOM 区域;3000 给「我的福利」面板 + 记录区留足余量。
+RELAYFOR_TEXT_WINDOW = 3000
 
 
 def _relayfor_pending_amount(text: str) -> float | None:
     """从页面文本提取「待还 $x.xx」金额;没有则 None."""
-    m = _REPAY_PENDING_RE.search(text or "")
+    m = _RELAYFOR_PENDING_RE.search(text or "")
     if not m:
         return None
     try:
@@ -6155,16 +6169,18 @@ def _relayfor_confirm_after(which: str, before: str, after: str) -> bool:
     if which == "还款":
         # 还款确认绝不能只看 after 是否含「还清/还款成功」——站点说明文案
         # 「每周期有 50% 概率提前还清」常驻含「还清」,会造成点击无效也假确认
-        # (2026-09-19 事故:点完按钮被弹窗/无响应吞掉,静态文案瞬间假确认 OK,
-        # 实际待还 $0.39 未变)。必须前后对比或以「待还」金额数值下降为准。
+        # (2026-09-19 事故)。主判据是「待还」金额数值(前后同一窗口快照):
         if "还款成功" in after and "还款成功" not in before:
-            return True
-        if "还清" in after and "还清" not in before and "待还" not in after:
+            # 点击后新出现的成功 toast(金额可能尚未刷新)
             return True
         before_amt = _relayfor_pending_amount(before)
         after_amt = _relayfor_pending_amount(after)
-        if before_amt is not None and (after_amt is None or after_amt < before_amt):
-            # 待还金额下降,或待还卡片整个消失(全部结清)
+        if before_amt is not None and after_amt is not None and after_amt < before_amt:
+            return True
+        if before_amt is not None and after_amt is None and (
+            "还清" in after or "还款成功" in after or "已还" in after
+        ):
+            # 待还卡片整个消失(全部结清),且需结清类文案佐证,防 DOM 重排假阳性
             return True
         return False
     # 借款确认:出现「待还」或「今日签到还款」,且点击前就存在(避免既有文案)。
@@ -6246,7 +6262,7 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
     )
     # 点击前快照:用于借/还确认做「前后对比」,避免把页面本就存在的待还/还款
     # 文案当成点击成功的证据(见 P2b)。
-    before = await page_text(page, 1500)
+    before = await page_text(page, RELAYFOR_TEXT_WINDOW)
 
     try:
         await page.locator(action_sel).first.click(timeout=5000, force=True)
@@ -6259,7 +6275,7 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
     confirmed = False
     while time.monotonic() < deadline:
         await asyncio.sleep(0.8)
-        after = await _try_page_text(page, 1500)
+        after = await _try_page_text(page, RELAYFOR_TEXT_WINDOW)
         if _relayfor_confirm_after(which, before, after):
             confirmed = True
             break
@@ -6380,7 +6396,7 @@ async def _nexa_dismiss_announcements(page) -> bool:
                                 if (typeof ann.markAllAsRead === "function") {
                                     ann.markAllAsRead();
                                 }
-                                while (ann.currentPopup && typeof ann.dismissPopup === "function") {
+                                while (count < 10 && ann.currentPopup && typeof ann.dismissPopup === "function") {
                                     ann.dismissPopup();
                                     count++;
                                 }
@@ -6392,10 +6408,17 @@ async def _nexa_dismiss_announcements(page) -> bool:
                 try {
                     const modals = document.querySelectorAll('div[class*="z-[120]"]');
                     for (const m of modals) {
-                        const btn = m.querySelector("button");
-                        if (btn) btn.click();
-                        else m.remove();
-                        count++;
+                        // 只点有「已读/关闭」语义的按钮;绝不 remove 未知浮层,
+                        // 防止误杀合法确认弹窗(与 dismiss_obstructing_dialogs 护栏对齐)。
+                        for (const b of m.querySelectorAll("button")) {
+                            const t = (b.innerText || "").trim();
+                            if (t.includes("已读") || t.includes("知道了") || t.includes("我知道")
+                                || /^(mark as read|got it|close|ok)$/i.test(t)) {
+                                b.click();
+                                count++;
+                                break;
+                            }
+                        }
                     }
                 } catch (e) {}
 
@@ -7635,7 +7658,10 @@ async def try_signin_api(page, adapter: SiteAdapter) -> str:
         try {{ body = await r.json(); }}
         catch (e) {{ try {{ body = await r.text(); }} catch (e2) {{}} }}
         const txt = typeof body === 'string' ? body : JSON.stringify(body || {{}});
-        const ok = (body && (body.success === true || body.code === 0 || body.status === "success" || body.code === 200)) === true;
+        const hasSuccessField = body && typeof body.success === 'boolean';
+        const ok = hasSuccessField
+            ? body.success === true
+            : (body && (body.code === 0 || body.code === 200 || body.status === "success")) === true;
         return {{ status: r.status, text: txt, success: ok }};
     }}"""
     try:
