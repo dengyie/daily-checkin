@@ -4531,6 +4531,36 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertFalse(clicks, "已处理态不应点击任何按钮")
 
 
+class TestDoctorHelpers(unittest.TestCase):
+    """--doctor 健康自检的纯函数与接线守卫."""
+
+    def setUp(self):
+        self.m = __import__("stealth_checkin_runner")
+
+    def test_recent_failure_summary_groups_and_truncates(self):
+        rows = [("no_button", "a"), ("no_button", "b"), ("timeout", "c")]
+        lines = self.m._summarize_recent_failures(rows)
+        self.assertEqual(lines[0].split(" ")[0], "FAIL:no_button")
+        self.assertIn("2", lines[0])
+        many = [(f"r{i % 3}", f"site{i}") for i in range(30)]
+        joined = " | ".join(self.m._summarize_recent_failures(many))
+        self.assertIn("等10站", joined)
+
+    def test_doctor_exit_code_aggregation(self):
+        self.assertEqual(self.m._doctor_exit_code(["OK", "OK"]), 0)
+        self.assertEqual(self.m._doctor_exit_code(["OK", "WARN"]), 1)
+        self.assertEqual(self.m._doctor_exit_code(["OK", "WARN", "FAIL"]), 2)
+        self.assertEqual(self.m._doctor_exit_code([]), 0)
+
+    def test_doctor_dispatch_precedes_business_run(self):
+        """--doctor 必须在任何业务运行/CDP 连接之前短路返回."""
+        import inspect as _inspect
+        src = _inspect.getsource(self.m.run)
+        idx = src.find("run_doctor()")
+        self.assertGreater(idx, -1, "run() 应在入口处分派 --doctor")
+        self.assertLess(idx, src.find("parse_cli_args(argv)") + len("parse_cli_args(argv)") + 200)
+
+
 class TestSsoOriginMatch(unittest.TestCase):
     """SSO 回跳 netloc 判定:必须精确匹配 host,禁止子串匹配."""
 

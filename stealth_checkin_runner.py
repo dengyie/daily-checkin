@@ -9304,7 +9304,197 @@ def parse_cli_args(argv: list[str] | None = None):
         "--source", default="cli", choices=("cli", "cron", "web"),
         help="Run origin stored in system history",
     )
+    ap.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Health self-check only (read-only): CDP/API/FE/SQLite/7-day failures/"
+        "cron sync/state files. Never starts Chrome or runs check-ins.",
+    )
     return ap.parse_args(argv)
+
+
+def _doctor_http_status(url: str, timeout: float = 4.0) -> int | None:
+    """GET url 返回 HTTP 状态码;连接失败返回 None(不打断后续检查)."""
+    import urllib.error
+
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return int(resp.status)
+    except urllib.error.HTTPError as e:
+        return int(e.code)
+    except Exception:
+        return None
+
+
+def _summarize_recent_failures(rows: list[tuple], days: int = 7) -> list[str]:
+    """近 N 天 FAIL 按原因聚合;rows=(reason, site). 纯函数,便于单测."""
+    buckets: dict[str, list[str]] = {}
+    for reason, site in rows:
+        buckets.setdefault(reason or "unknown", []).append(site or "?")
+    lines = []
+    for reason, sites in sorted(buckets.items(), key=lambda x: (-len(x[1]), x[0])):
+        shown = ", ".join(sites[:8]) + (f" 等{len(sites)}站" if len(sites) > 8 else "")
+        lines.append(f"FAIL:{reason} ({len(sites)}): {shown}")
+    return lines
+
+
+def _doctor_exit_code(levels: list[str]) -> int:
+    """聚合退出码:0 全 OK;1 有 WARN;2 有 FAIL."""
+    if any(l == "FAIL" for l in levels):
+        return 2
+    if any(l == "WARN" for l in levels):
+        return 1
+    return 0
+
+
+def run_doctor() -> int:
+    """健康自检(只读):不启停 Chrome、不触发签到、不写任务状态.
+
+    检查项:CDP 9222、API/前端双进程、SQLite 完整性与今日任务、近 7 天失败
+    聚合、cron 入口同步、launchd 批次任务、状态文件与 Obsidian 投影目录。
+    退出码:0 全绿 / 1 有警告 / 2 有故障。
+    """
+    import subprocess
+    from pathlib import Path
+
+    checks: list[tuple[str, str, str]] = []  # (level, name, detail)
+
+    def add(level: str, name: str, detail: str) -> None:
+        checks.append((level, name, detail))
+        print(f"  [{level:<4}] {name}: {detail}", flush=True)
+
+    print("=== daily-checkin doctor ===", flush=True)
+
+    # 1) CDP 9222
+    try:
+        info = discover_cdp_endpoint(prefer_port=9222, strict_prefer=False)
+        http = info.get("http") or ""
+        if not http:
+            add("FAIL", "CDP", "无可达 headed Chrome CDP(9222 未监听且无备选)")
+        else:
+            ver = _doctor_http_status(f"{http.rstrip('/')}/json/version")
+            if ver != 200:
+                add("FAIL", "CDP", f"{http} /json/version -> {ver}(发现结果不可用)")
+            elif info.get("headless"):
+                add("WARN", "CDP", f"{http} 可达但为 headless;签到需要 headed 实例")
+            else:
+                add("OK", "CDP", f"{http} headed 正常")
+    except Exception as exc:
+        add("FAIL", "CDP", f"发现流程异常: {exc}")
+
+    # 2) 后端 API 8765(期望 401=存活且鉴权开启;200=存活)
+    api = _doctor_http_status("http://127.0.0.1:8765/api/state")
+    if api in (200, 401):
+        # GET /api/state 是 web.py 设计的公开探活端点(200 空 state);其余 /api/* 需鉴权
+        add("OK", "API 8765", f"HTTP {api}(存活)")
+    else:
+        add("FAIL", "API 8765", f"HTTP {api}(应启动 `-m checkin_core.web --port 8765`)")
+
+    # 3) 前端 8766
+    fe = _doctor_http_status("http://127.0.0.1:8766/")
+    if fe == 200:
+        add("OK", "FE 8766", "HTTP 200")
+    else:
+        add("FAIL", "FE 8766", f"HTTP {fe}(应启动 scripts/serve-frontend.py --port 8766)")
+
+    # 4) SQLite + 今日任务
+    store = store_from_env()
+    db_path = Path(store.path)
+    if not db_path.exists():
+        add("FAIL", "SQLite", f"{db_path} 不存在")
+    else:
+        try:
+            with store.connect() as db:
+                integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
+                enabled = db.execute("SELECT COUNT(*) FROM sites WHERE enabled=1").fetchone()[0]
+                today = datetime.now().strftime("%Y-%m-%d")
+                pend = db.execute(
+                    "SELECT COUNT(*) FROM daily_tasks WHERE day=? AND status='pending'", (today,)
+                ).fetchone()[0]
+            if str(integrity) == "ok":
+                add("OK", "SQLite", f"{db_path} integrity=ok,启用站点 {enabled},今日待跑 {pend}")
+            else:
+                add("FAIL", "SQLite", f"integrity_check={integrity}")
+        except Exception as exc:
+            add("FAIL", "SQLite", f"打开/查询失败: {exc}")
+
+        # 5) 近 7 天失败聚合
+        try:
+            cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            with store.connect() as db:
+                rows = db.execute(
+                    "SELECT r.reason, r.site_name FROM run_items r JOIN runs ru ON r.run_id=ru.id "
+                    "WHERE ru.day >= ? AND r.status='FAIL' AND r.site_name != ''",
+                    (cutoff,),
+                ).fetchall()
+            lines = _summarize_recent_failures(rows)
+            if lines:
+                add("WARN", "近7天失败", f"{len(rows)} 站次; " + " | ".join(lines))
+            else:
+                add("OK", "近7天失败", "无")
+        except Exception as exc:
+            add("WARN", "近7天失败", f"查询失败: {exc}")
+
+    # 6) cron 入口同步 + launchd 批次任务
+    repo_sh = Path(__file__).resolve().parent / "scripts" / "daily-checkin-cdp.sh"
+    prod_sh = Path.home() / ".hermes" / "scripts" / "daily-checkin-cdp.sh"
+    try:
+        if not prod_sh.exists():
+            add("WARN", "cron 入口", f"{prod_sh} 不存在")
+        elif repo_sh.read_bytes() == prod_sh.read_bytes():
+            add("OK", "cron 入口", "仓库脚本与 ~/.hermes 入口一致")
+        else:
+            add("FAIL", "cron 入口", "仓库脚本与 ~/.hermes 入口不一致,需同步")
+    except Exception as exc:
+        add("WARN", "cron 入口", f"比对失败: {exc}")
+    try:
+        out = subprocess.run(
+            ["launchctl", "list", "com.mango.daily-checkin"],
+            capture_output=True, text=True, timeout=8,
+        )
+        if out.returncode == 0 and "daily-checkin" in out.stdout:
+            add("OK", "launchd 批次", "com.mango.daily-checkin 已注册")
+        else:
+            add("WARN", "launchd 批次", "com.mango.daily-checkin 未注册(仅 Hermes 调度时为正常)")
+    except Exception as exc:
+        add("WARN", "launchd 批次", f"查询失败: {exc}")
+
+    # 7) 状态文件新鲜度
+    for label, path in (
+        ("last-run.json", Path.home() / ".hermes" / "checkin" / "last-run.json"),
+        ("last-attempt.json", Path.home() / ".hermes" / "checkin" / "last-attempt.json"),
+    ):
+        try:
+            if not path.exists():
+                add("WARN", label, f"{path} 不存在")
+                continue
+            age_h = (time.time() - path.stat().st_mtime) / 3600.0
+            if age_h > 30:
+                add("WARN", label, f"已 {age_h:.0f}h 未更新")
+            else:
+                add("OK", label, f"{age_h:.1f}h 前更新")
+        except Exception as exc:
+            add("WARN", label, f"检查失败: {exc}")
+
+    # 8) Obsidian 投影目录
+    try:
+        from checkin_core.store import obsidian_vault_root
+        vault = obsidian_vault_root()
+        d = Path(vault) / "Note" / "Task" / "daily"
+        if d.is_dir():
+            add("OK", "Obsidian 投影", f"{d} 存在")
+        else:
+            add("WARN", "Obsidian 投影", f"{d} 不存在(投影会降级为 SQLite-only)")
+    except Exception as exc:
+        add("WARN", "Obsidian 投影", f"解析失败: {exc}")
+
+    levels = [c[0] for c in checks]
+    code = _doctor_exit_code(levels)
+    n_fail = levels.count("FAIL")
+    n_warn = levels.count("WARN")
+    print(f"=== doctor done: exit={code} (FAIL={n_fail} WARN={n_warn}) ===", flush=True)
+    return code
 
 
 def print_run_summary(results: list[CheckinResult]) -> None:
@@ -9328,6 +9518,8 @@ def print_run_summary(results: list[CheckinResult]) -> None:
 async def run(argv: list[str] | None = None) -> int:
     """Run check-in batch. Returns process exit code (0/1/2)."""
     args = parse_cli_args(argv)
+    if getattr(args, "doctor", False):
+        return run_doctor()
     run_started = time.monotonic()
     source = getattr(args, "source", "cli")
     only = {x.strip() for x in args.only.split(",") if x.strip()}
