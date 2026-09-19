@@ -6155,11 +6155,25 @@ async def _relayfor_today_done(page) -> bool:
     """
     for sel in ('button:has-text("今日已签到")', 'button:has-text("已还清")'):
         try:
-            loc = page.locator(sel).first
-            if await loc.is_visible(timeout=400) and await loc.is_disabled():
-                return True
+            loc_all = page.locator(sel)
+            n = await loc_all.count()
         except Exception:
-            continue
+            n = 0
+        for i in range(min(n, 20)):
+            try:
+                loc = loc_all.nth(i)
+                if await loc.is_visible(timeout=300) and await loc.is_disabled():
+                    return True
+            except Exception:
+                continue
+        # locator 不可枚举(测试 fake / 异常)时回退 .first 单实例判定
+        if n == 0:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=400) and await loc.is_disabled():
+                    return True
+            except Exception:
+                continue
     return False
 
 
@@ -6226,13 +6240,18 @@ def _relayfor_confirm_after(which: str, before: str, after: str) -> bool:
             # 待还卡片整个消失(全部结清),且需结清类文案佐证,防 DOM 重排假阳性
             return True
         return False
-    # 借款确认:出现「待还」或「今日签到还款」,且点击前就存在(避免既有文案)。
-    if ("待还" in after and "待还" not in before) or (
-        "今日签到还款" in after and "今日签到还款" not in before
-    ):
+    # 借款确认:以「待还」金额为准——出现新待还卡,或金额增大(2026-09-19
+    # 二次实证:完结日点击被吞后文本轻微抖动 + 页面本就有「待还/$」字样,
+    # 旧兜底 `after != before and 待还 in after and $ in after` 恒真 → 假 OK)。
+    before_amt = _relayfor_pending_amount(before)
+    after_amt = _relayfor_pending_amount(after)
+    if before_amt is None and after_amt is not None:
         return True
-    # 保底:点击前后待还金额数字变化(如 已还清 → 待还 $1.00)。
-    return bool(after != before and "待还" in after and ("待还" not in before or "$" in after))
+    if before_amt is not None and after_amt is not None and after_amt > before_amt:
+        return True
+    if "今日签到还款" in after and "今日签到还款" not in before:
+        return True
+    return False
 
 
 async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:

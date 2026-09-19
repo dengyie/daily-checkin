@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import json
 import py_compile
 import os
@@ -4441,6 +4442,23 @@ class TestRelayForLoanCycle(unittest.TestCase):
         )
         self.assertEqual(res.status, "ALREADY")
         self.assertFalse(clicks, "完结态在位时不应点击任何按钮")
+
+    def test_borrow_confirm_requires_amount_delta(self):
+        """借款确认以金额为准:点击被吞 + 文本抖动绝不确认(2026-09-19 二次实证)."""
+        f = self.m._relayfor_confirm_after
+        before = '当前待还\n$0.07\n今日已签到'
+        # 点击无效,文本轻微抖动/局部重渲染 → 不得确认
+        self.assertFalse(f("借款", before, before + " "))
+        self.assertFalse(f("借款", before, '当前待还\n$0.07\n加载中…\n今日已签到'))
+        # 待还金额增大 → 确认
+        self.assertTrue(f("借款", '当前待还\n$0.07', '当前待还\n$1.07\n今日签到还款'))
+        # 借款日新出现待还卡 → 确认
+        self.assertTrue(f("借款", '已还清', '当前待还\n$1.00\n今日签到还款'))
+
+    def test_done_gate_walks_button_instances(self):
+        """完结态判定必须逐实例检查(SPA 多视图同名按钮),不能只看 .first."""
+        src = inspect.getsource(self.m._relayfor_today_done)
+        self.assertIn("nth(i)", src)
 
     def test_pending_amount_parses_comma_and_newline(self):
         """金额解析:换行分隔与千分位逗号."""
