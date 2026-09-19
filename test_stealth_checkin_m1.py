@@ -4552,6 +4552,28 @@ class TestDoctorHelpers(unittest.TestCase):
         self.assertEqual(self.m._doctor_exit_code(["OK", "WARN", "FAIL"]), 2)
         self.assertEqual(self.m._doctor_exit_code([]), 0)
 
+    def test_doctor_log_dir_resolves_staging_env(self):
+        """doctor 必须按 env > staging env.sh > 默认解析日志目录,不 source 任意 shell."""
+        import tempfile
+        from pathlib import Path as P
+        f = self.m._doctor_resolve_log_dir
+        with mock.patch.dict(os.environ, {"DAILY_CHECKIN_LOG_DIR": "/tmp/x-log"}):
+            self.assertEqual(f(), P("/tmp/x-log"))
+        with mock.patch.dict(os.environ, {"DAILY_CHECKIN_LOG_DIR": ""}), \
+             tempfile.TemporaryDirectory() as td:
+            fake_home = P(td)
+            env_dir = fake_home / "daily-checkin-staging"
+            env_dir.mkdir()
+            (env_dir / "env.sh").write_text(
+                'export DAILY_CHECKIN_ROOT=/repo\nexport DAILY_CHECKIN_LOG_DIR="/tmp/staging-log"\n',
+                encoding="utf-8",
+            )
+            with mock.patch.object(self.m.Path, "home", staticmethod(lambda: fake_home)):
+                self.assertEqual(f(), P("/tmp/staging-log"))
+            (env_dir / "env.sh").unlink()
+            with mock.patch.object(self.m.Path, "home", staticmethod(lambda: fake_home)):
+                self.assertEqual(f(), self.m.CHECKIN_LOG_DIR)
+
     def test_doctor_dispatch_precedes_business_run(self):
         """--doctor 必须在任何业务运行/CDP 连接之前短路返回."""
         import inspect as _inspect

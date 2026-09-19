@@ -9327,7 +9327,7 @@ def _doctor_http_status(url: str, timeout: float = 4.0) -> int | None:
         return None
 
 
-def _summarize_recent_failures(rows: list[tuple], days: int = 7) -> list[str]:
+def _summarize_recent_failures(rows: list[tuple]) -> list[str]:
     """近 N 天 FAIL 按原因聚合;rows=(reason, site). 纯函数,便于单测."""
     buckets: dict[str, list[str]] = {}
     for reason, site in rows:
@@ -9346,6 +9346,31 @@ def _doctor_exit_code(levels: list[str]) -> int:
     if any(l == "WARN" for l in levels):
         return 1
     return 0
+
+
+def _doctor_resolve_log_dir() -> Path:
+    """解析生产日志目录:env > staging env.sh 中的 DAILY_CHECKIN_LOG_DIR > 默认.
+
+    launchd cron 通过 ~/daily-checkin-staging/env.sh export DAILY_CHECKIN_LOG_DIR
+    指向 staging/log(2026-08-25 前后端分离后 last-run/last-attempt 实际落点)。
+    doctor 自身不带该 env,必须按同样优先级解析,否则会把旧 ~/.hermes/checkin
+    的遗留快照误报成"626h 未更新"(2026-09-19 review 实证)。只做行级解析,
+    不 source env.sh(避免执行任意 shell)。
+    """
+    env_val = os.environ.get("DAILY_CHECKIN_LOG_DIR", "").strip()
+    if env_val:
+        return Path(env_val).expanduser()
+    env_file = Path.home() / "daily-checkin-staging" / "env.sh"
+    try:
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith("export DAILY_CHECKIN_LOG_DIR="):
+                val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if val:
+                    return Path(val).expanduser()
+    except Exception:
+        pass
+    return CHECKIN_LOG_DIR
 
 
 def run_doctor() -> int:
@@ -9461,9 +9486,10 @@ def run_doctor() -> int:
         add("WARN", "launchd 批次", f"查询失败: {exc}")
 
     # 7) 状态文件新鲜度
+    log_dir = _doctor_resolve_log_dir()
     for label, path in (
-        ("last-run.json", Path.home() / ".hermes" / "checkin" / "last-run.json"),
-        ("last-attempt.json", Path.home() / ".hermes" / "checkin" / "last-attempt.json"),
+        ("last-run.json", log_dir / "last-run.json"),
+        ("last-attempt.json", log_dir / "last-attempt.json"),
     ):
         try:
             if not path.exists():
