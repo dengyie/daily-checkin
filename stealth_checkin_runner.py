@@ -56,7 +56,7 @@ CAPTCHA_WAIT_S = float(os.environ.get("CAPTCHA_WAIT_S", "40"))  # Turnstile may 
 CTA_WAIT_S = float(os.environ.get("CTA_WAIT_S", "8"))  # LinuxDO / login UI before NO_BUTTON
 SIGN_WAIT_S = float(os.environ.get("SIGN_WAIT_S", "8"))
 MIN_DWELL_AFTER_SSO_CLICK_S = float(os.environ.get("MIN_DWELL_AFTER_SSO_CLICK_S", "4"))
-CONNECT_TIMEOUT_S = 12.0
+CONNECT_TIMEOUT_S = float(os.environ.get("CONNECT_TIMEOUT_S", "25.0"))
 CLOSE_TIMEOUT_S = 5.0
 # Bounded CDP call -- a half-dead websocket (Chrome stuck on a stalled tab)
 # must not hang page_cdp_target_id / SSO cleanup / close_extra_pages, which
@@ -999,17 +999,20 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         "https://search.604020.xyz/",
         feature_unavailable_reason="loaded Searchix dashboard has no check-in feature",
     ),
-    # ddcat CTA「签到 +0.5」lives inside a layout the generic scanner classifies
-    # as navigation → generic CTA rejects it as a nav node.  Trusted sign
-    # selectors bypass that heuristic so the button is matched directly.
+    # ddcat 改版后主按钮在侧栏加油站「立即领取」(button.app-workspace-sidebar-checkin-claim)
+    # 接口通过 POST /api/wallet/checkin 签到，支持 signin_api 与 UI 双通道。
     _B(
         "ddcat",
         "https://ddcat.pronhubcn.com/wallet",
+        signin_api="/api/wallet/checkin",
         signs=[
+            'button.app-workspace-sidebar-checkin-claim',
+            'button:has-text("立即领取")',
             'button:has-text("签到 +0.5")',
             'button:has-text("签到")',
         ],
         already=[
+            'text=今天已经签到过了',
             'text=今日已签到',
             'text=已签到',
             'text=签到成功',
@@ -1940,11 +1943,12 @@ async def safe_connect(p) -> Any:
     """connect_over_cdp with bounded retries. A transient handshake hiccup
     (slow page table, race with another CDP client) must not abort the batch."""
     last_err: Exception | None = None
+    timeout_ms = max(5000, int(CONNECT_TIMEOUT_S * 1000))
     for attempt in range(max(1, CONNECT_RETRIES)):
         try:
             return await asyncio.wait_for(
-                p.chromium.connect_over_cdp(CDP_HTTP, timeout=10000),
-                timeout=CONNECT_TIMEOUT_S,
+                p.chromium.connect_over_cdp(CDP_HTTP, timeout=timeout_ms),
+                timeout=CONNECT_TIMEOUT_S + 5.0,
             )
         except Exception as e:
             last_err = e
@@ -2121,6 +2125,8 @@ def has_interactive_captcha(text: str, url: str = "") -> bool:
         return True
     if "安全验证" in t and "刷新验证码" in t:
         return True
+    if "签到验证" in t and ("按照提示图形" in t or "点击大图" in t or "请依次点击" in t):
+        return True
     if "hcaptcha" in u or "recaptcha" in u:
         return True
     if "h-captcha" in t.lower() or "hcaptcha" in t.lower():
@@ -2159,6 +2165,7 @@ async def captcha_dom_present(page) -> bool:
             "[class*='cf-turnstile'], #cf-turnstile, [data-sitekey], "
             # in-page captcha modals (随想 dash-turnstile-modal; Tencent turing popup)
             "[class*='turnstile-modal'], .captcha-card, [class*='captcha-card'], "
+            ".captcha-panel, [class*='captcha-panel'], "
             "button:has-text('点击完成安全验证'), button:has-text('完成安全验证')"
         ).count() > 0:
             return True
@@ -3651,9 +3658,9 @@ async def try_linuxdo_sso(page, origin_host: str = "", browser=None) -> str:
                     return "OK"
 
             if not looks_logged_out(text) and any(
-                k in lower_url for k in ("profile", "console", "personal", "wallet", "check-in", "checkin")
+                k in lower_url for k in ("profile", "console", "personal", "wallet", "check-in", "checkin", "dashboard")
             ):
-                if saw_linuxdo or authorize_clicks:
+                if saw_linuxdo or authorize_clicks or (origin_host and origin_host in lower_url and "/login" not in lower_url):
                     remain = MIN_DWELL_AFTER_SSO_CLICK_S - (time.monotonic() - click_t0)
                     if remain > 0:
                         await asyncio.sleep(remain)
@@ -6127,15 +6134,37 @@ async def _try_page_text(page, n: int = 1500) -> str:
         return ""
 
 
+_REPAY_PENDING_RE = re.compile(r"待还\s*\$([0-9][0-9,.]*)")
+
+
+def _relayfor_pending_amount(text: str) -> float | None:
+    """从页面文本提取「待还 $x.xx」金额;没有则 None."""
+    m = _REPAY_PENDING_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
 def _relayfor_confirm_after(which: str, before: str, after: str) -> bool:
     """判断点击借/还后是否真的落账(前后对比,避免页面既有文案假阳性)。"""
     before = before or ""
     after = after or ""
     if which == "还款":
-        # 还款确认:页面上「待还」消失,或出现「已还/还清/还款成功」。
-        if "还清" in after or "还款成功" in after:
+        # 还款确认绝不能只看 after 是否含「还清/还款成功」——站点说明文案
+        # 「每周期有 50% 概率提前还清」常驻含「还清」,会造成点击无效也假确认
+        # (2026-09-19 事故:点完按钮被弹窗/无响应吞掉,静态文案瞬间假确认 OK,
+        # 实际待还 $0.39 未变)。必须前后对比或以「待还」金额数值下降为准。
+        if "还款成功" in after and "还款成功" not in before:
             return True
-        if "待还" not in after and "待还" in before:
+        if "还清" in after and "还清" not in before and "待还" not in after:
+            return True
+        before_amt = _relayfor_pending_amount(before)
+        after_amt = _relayfor_pending_amount(after)
+        if before_amt is not None and (after_amt is None or after_amt < before_amt):
+            # 待还金额下降,或待还卡片整个消失(全部结清)
             return True
         return False
     # 借款确认:出现「待还」或「今日签到还款」,且点击前就存在(避免既有文案)。
@@ -6304,6 +6333,90 @@ NEXA_ALREADY_SELECTORS = [
 ]
 NEXA_DONE_INDICATORS = ("今日已签到", "签到成功", "今天已签")
 
+NEXA_ANNOUNCEMENT_DISMISS_SELECTORS = [
+    'div[class*="z-[120]"] button:has-text("标记已读")',
+    'div[class*="z-[120]"] button:has-text("已读")',
+    'button:has-text("标记已读")',
+    'button:has-text("Mark as read")',
+    'div[class*="z-[120]"] button',
+]
+
+
+async def _nexa_dismiss_announcements(page) -> bool:
+    """关闭 NEXA 全屏公告弹窗(AnnouncementPopup / z-[120])。
+
+    当站方发布 popup 模式公告时,页面挂载全屏遮罩 div.fixed.inset-0.z-[120]
+    且设置 body.overflow='hidden',会彻底拦截用户下拉与签到按钮点击。
+    通过站内「标记已读」按钮 / Pinia store dismissPopup / markAllAsRead
+    关闭弹窗并恢复 body 滚动。
+    """
+    dismissed = False
+    try:
+        for sel in NEXA_ANNOUNCEMENT_DISMISS_SELECTORS:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=500):
+                    await loc.click(timeout=1500, force=True)
+                    print(f"  nexa: clicked announcement dismiss button {sel}", flush=True)
+                    dismissed = True
+                    await asyncio.sleep(0.5)
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    try:
+        js_dismissed = await page.evaluate(
+            """() => {
+                let count = 0;
+                try {
+                    const app = document.querySelector("#app");
+                    if (app && app.__vue_app__) {
+                        const pinia = app.__vue_app__.config.globalProperties.$pinia;
+                        if (pinia && pinia._s && pinia._s.has("announcements")) {
+                            const ann = pinia._s.get("announcements");
+                            if (ann) {
+                                if (typeof ann.markAllAsRead === "function") {
+                                    ann.markAllAsRead();
+                                }
+                                while (ann.currentPopup && typeof ann.dismissPopup === "function") {
+                                    ann.dismissPopup();
+                                    count++;
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {}
+
+                try {
+                    const modals = document.querySelectorAll('div[class*="z-[120]"]');
+                    for (const m of modals) {
+                        const btn = m.querySelector("button");
+                        if (btn) btn.click();
+                        else m.remove();
+                        count++;
+                    }
+                } catch (e) {}
+
+                try {
+                    if (document.body && document.body.style.overflow === "hidden") {
+                        document.body.style.overflow = "";
+                    }
+                } catch (e) {}
+
+                return count;
+            }"""
+        )
+        if js_dismissed:
+            dismissed = True
+            print(f"  nexa: dismissed {js_dismissed} announcement popup(s) via Pinia/DOM", flush=True)
+    except Exception:
+        pass
+
+    return dismissed
+
+
 
 def is_nexa_site(site_url: str) -> bool:
     """nexavlinks.com 专属站判定."""
@@ -6390,9 +6503,13 @@ async def _nexa_logout(page) -> bool:
     except Exception:
         pass
 
+    # 登出前先清理可能遮挡画面的全屏公告弹窗
+    await _nexa_dismiss_announcements(page)
+
     for attempt in range(3):
         if await _nexa_is_logged_out(page):
             return True
+        await _nexa_dismiss_announcements(page)
         clicked = False
         # 1) 点用户下拉展开
         for usel in NEXA_USER_MENU_SELECTORS:
@@ -6432,7 +6549,8 @@ async def _nexa_signin_current(page, adapter) -> CheckinResult:
     """对当前已登录 NEXA 账号在 /check-in 执行签到(点立即签到 + 确认)。
 
     若已签文案存在 → ALREADY;否则点「立即签到」并等「今日已签到/签到成功」
-    确认。确认用 STRICT 死证据门(同 ultrarouter/mzlone)。"""
+    确认。若触发图形验证码(CheckInChallengeDialog),等待人工或自动通过,
+    超时按 interactive 报错。"""
     kind = adapter.kind or "nexa"
     try:
         await page.goto(NEXA_CHECKIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
@@ -6443,6 +6561,9 @@ async def _nexa_signin_current(page, adapter) -> CheckinResult:
     cf = await wait_out_cloudflare(page, CF_WAIT_S)
     if cf:
         return fail_result("cloudflare", adapter=kind)
+
+    # 签到前先清理全屏公告
+    await _nexa_dismiss_announcements(page)
 
     try:
         text0 = await page_text(page, 4000)
@@ -6455,6 +6576,7 @@ async def _nexa_signin_current(page, adapter) -> CheckinResult:
 
     btn = await click_first_visible(page, NEXA_SIGN_SELECTORS, timeout_each=1500)
     if not btn:
+        await _nexa_dismiss_announcements(page)
         _, btn2 = await wait_for_any_visible(page, NEXA_SIGN_SELECTORS, 4.0)
         if btn2:
             try:
@@ -6488,6 +6610,25 @@ async def _nexa_signin_current(page, adapter) -> CheckinResult:
                 confirmed = True
                 break
     if not confirmed:
+        if has_interactive_captcha(after) or await captcha_dom_present(page):
+            print("  nexa: detected check-in challenge dialog (interactive captcha)", flush=True)
+            cap = await wait_out_captcha(page, min(CAPTCHA_WAIT_S, 40.0))
+            if cap == "INTERACTIVE":
+                return fail_result(
+                    "interactive",
+                    detail="nexa check-in requires interactive click captcha",
+                    adapter=kind,
+                    stage="confirm",
+                )
+            try:
+                after = await page_text(page, 4000)
+            except Exception:
+                after = ""
+            if any(ind in after for ind in NEXA_DONE_INDICATORS):
+                return confirmed_done_result(
+                    "签到成功" if "签到成功" in after else "btn:今日已签到",
+                    adapter=kind,
+                )
         return fail_result("no_confirm", adapter=kind, stage="confirm")
     return confirmed_done_result(
         "签到成功" if "签到成功" in after else "btn:今日已签到",
@@ -6519,6 +6660,7 @@ async def _nexa_email_gate(page, adapter) -> str:
     except Exception:
         pass
     await wait_text_ready(page, 30, max(getattr(adapter, "ready_rounds", 15), 10))
+    await _nexa_dismiss_announcements(page)
     try:
         acct_sel = await fill_first_visible(page, ACCOUNT_FIELD_SELECTORS, account)
         pw_sel = await fill_first_visible(page, PASSWORD_FIELD_SELECTORS, password)
@@ -6576,6 +6718,7 @@ async def _nexa_linuxdo_gate(page, adapter, browser=None) -> str:
     except Exception:
         pass
     await wait_text_ready(page, 30, max(getattr(adapter, "ready_rounds", 15), 10))
+    await _nexa_dismiss_announcements(page)
     sso = await try_linuxdo_sso(
         page, origin_host=urlparse(NEXA_SITE_URL).netloc, browser=browser
     )
@@ -6639,6 +6782,7 @@ async def nexa_linuxdo_checkin(page, adapter: SiteAdapter, browser=None) -> Chec
     cf = await wait_out_cloudflare(page, CF_WAIT_S)
     if cf:
         return fail_result("cloudflare", adapter=kind)
+    await _nexa_dismiss_announcements(page)
     await _nexa_logout(page)
     ld = await _nexa_linuxdo_gate(page, adapter, browser)
     if ld != "OK":
@@ -6662,6 +6806,7 @@ async def nexa_email_checkin(page, adapter: SiteAdapter, browser=None) -> Checki
     cf = await wait_out_cloudflare(page, CF_WAIT_S)
     if cf:
         return fail_result("cloudflare", adapter=kind)
+    await _nexa_dismiss_announcements(page)
     await _nexa_logout(page)
     em = await _nexa_email_gate(page, adapter)
     if em != "OK":
@@ -7249,8 +7394,8 @@ def is_lucky_flip_site(site_url: str) -> bool:
     return "lucky0625" in u or "fuli.lucky0625" in u
 
 
-_LUCKY_LEAF_FIRST = 'button[aria-label="第 1 片四叶草"]'
-_LUCKY_LEAF_ALL = 'button[aria-label^="第 "]'
+_LUCKY_LEAF_FIRST = 'button[aria-label="翻开第 1 片四叶草"], button[aria-label="第 1 片四叶草"], button[aria-label*="第 1 片四叶草"]'
+_LUCKY_LEAF_ALL = 'button[aria-label*="第 "][aria-label*="片四叶草"], button.site-draw-button'
 
 
 async def lucky_flip_first_leaf(page) -> CheckinResult | None:
@@ -7415,7 +7560,7 @@ _DIALOG_DISMISS_JS = """() => {
         k => t.includes(k) || aria.includes(k)
       );
     });
-    const looksAnnouncement = /公告|通知|notice|activity|规则|升级|维护/.test(text);
+    const looksAnnouncement = /公告|通知|notice|activity|规则|升级|维护|充值、兑换与消费记录/.test(text);
     // Close only when we have a real dismiss control AND the text marks this
     // as an announcement-style overlay. A dialog with 确定/OK but no 公告/通知
     // marker is a modal decision — leave it alone (fail-safe).
@@ -7490,7 +7635,8 @@ async def try_signin_api(page, adapter: SiteAdapter) -> str:
         try {{ body = await r.json(); }}
         catch (e) {{ try {{ body = await r.text(); }} catch (e2) {{}} }}
         const txt = typeof body === 'string' ? body : JSON.stringify(body || {{}});
-        return {{ status: r.status, text: txt, success: (body && body.success) === true }};
+        const ok = (body && (body.success === true || body.code === 0 || body.status === "success" || body.code === 200)) === true;
+        return {{ status: r.status, text: txt, success: ok }};
     }}"""
     try:
         res = await page.evaluate(js)
@@ -7512,7 +7658,7 @@ async def try_signin_api(page, adapter: SiteAdapter) -> str:
     # body says so (hcnsec returns "今日已签到"); that's a done-state, not a
     # failure. Treat it as ALREADY so the dispatch reports the day as signed.
     if status is not None and status < 500:
-        if not success and re.search(r"今日已签到|已签到|already.*check|already signed|已签", text, re.I):
+        if not success and re.search(r"今日已签到|已签到|今天已经签到|already.*check|already signed|已签", text, re.I):
             print(f"  signin api {api}: already signed today", flush=True)
             return "ALREADY"
         # genuinely declined — reported distinctly

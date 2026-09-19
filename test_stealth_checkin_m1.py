@@ -3534,6 +3534,79 @@ class TestNexaDualAccount(unittest.TestCase):
         self.assertNotIn("clear_localstorage", lowercase)
         self.assertNotIn("clear_all", lowercase)
 
+    def test_nexa_announcement_dismiss_constants(self):
+        """公告弹窗关闭选择器包含标记已读与遮罩弹窗选择器."""
+        sels = " ".join(self.m.NEXA_ANNOUNCEMENT_DISMISS_SELECTORS)
+        self.assertIn("标记已读", sels)
+        self.assertIn("z-[120]", sels)
+
+    def test_nexa_has_interactive_captcha_signals(self):
+        """NEXA 图形点选签到验证码文本特征被判定为人机验证."""
+        sample_text = "签到验证\n按照提示图形的顺序，点击大图中的对应图形。请依次点击"
+        self.assertTrue(self.m.has_interactive_captcha(sample_text))
+
+    def test_nexa_dismiss_announcements_calls_locator_and_eval(self):
+        """_nexa_dismiss_announcements 正确触发定位器点击与 Pinia 状态清理."""
+        eval_called = []
+        class FakeLoc:
+            @property
+            def first(self):
+                return self
+            async def is_visible(self, timeout=None):
+                return True
+            async def click(self, timeout=None, force=False):
+                eval_called.append("btn_click")
+        class FakePage:
+            def locator(self, sel):
+                return FakeLoc()
+            async def evaluate(self, expr):
+                eval_called.append("js_eval")
+                return 1
+        page = FakePage()
+        res = self.asyncio.run(self.m._nexa_dismiss_announcements(page))
+        self.assertTrue(res)
+        self.assertIn("btn_click", eval_called)
+        self.assertIn("js_eval", eval_called)
+
+    def test_nexa_signin_current_detects_challenge_and_returns_interactive(self):
+        """当签到点击后弹出 CheckInChallengeDialog 且未完成时,返回 interactive 报错."""
+        m = self.m
+        class FakePage:
+            async def goto(self, url, **kw):
+                return ""
+        page = FakePage()
+        async def fake_wait(*a, **k):
+            return True
+        async def fake_cf(*a, **k):
+            return None
+        async def fake_dismiss(*a, **k):
+            return True
+        async def fake_page_text(p, limit=4000):
+            # 点前为未签 CTA,点后为图形验证码弹窗文本
+            if not getattr(fake_page_text, "clicked", False):
+                return "立即签到"
+            return "签到验证\n按照提示图形的顺序，点击大图中的对应图形。请依次点击"
+        fake_page_text.clicked = False
+
+        async def fake_click(p, sels, **kw):
+            fake_page_text.clicked = True
+            return "button:has-text('立即签到')"
+        async def fake_wait_out_captcha(p, max_s=40.0):
+            return "INTERACTIVE"
+
+        with mock.patch.object(m, "wait_text_ready", fake_wait), \
+             mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
+             mock.patch.object(m, "_nexa_dismiss_announcements", fake_dismiss), \
+             mock.patch.object(m, "page_text", fake_page_text), \
+             mock.patch.object(m, "click_first_visible", fake_click), \
+             mock.patch.object(m, "wait_out_captcha", fake_wait_out_captcha):
+            res = self.asyncio.run(
+                m._nexa_signin_current(page, self._nexa_adapter("nexavlinks-email"))
+            )
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "interactive")
+        self.assertIn("interactive click captcha", res.detail)
+
 class TestSitesYamlCrashPaths(unittest.TestCase):
     """Crash-path / unix-path unit tests for load_sites_from_yaml.
 
@@ -3765,6 +3838,27 @@ class TestSitesYaml(unittest.TestCase):
         # 验证就算传入旧 /profile note URL,prefer_catalog_url 也会自动胜出保持新 URL
         resolved = resolve_site("qkmss", "https://qkmss.com/profile")
         self.assertEqual(resolved.url, "https://qkmss.com/user/checkin")
+
+    def test_yaml_registers_xiadengwang_entry(self):
+        """sites.yaml 的 虾蹬王 条目解析为 kind=browser,带 button#btn 立即签到及今日已签到回执，且设置 prefer_cta_before_auth=True。"""
+        import yaml
+        self.assertTrue(os.path.exists("sites.yaml"))
+        with open("sites.yaml", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "虾蹬王"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 虾蹬王 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://checkin.kunyou.asia/")
+        self.assertTrue(a.prefer_cta_before_auth)
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn('button#btn:has-text("立即签到")', joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn('button#btn:has-text("今日已签到")', joined_already)
+        self.assertIn('text=今日已签到', joined_already)
+        resolved = resolve_site("虾蹬王", "https://checkin.kunyou.asia/")
+        self.assertEqual(resolved.url, "https://checkin.kunyou.asia/")
 
 
     def test_fengwind_and_mulink_features(self):
@@ -4304,6 +4398,35 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertEqual(res.status, "OK")
         self.assertIn("还款", res.detail)
         self.assertTrue(any("今日签到还款" in c for c in clicks), "今日应点击 今日签到还款")
+
+    def test_repay_static_huanqing_copy_never_confirms(self):
+        """2026-09-19 事故回归:页面静态说明「…提前还清…」常驻含「还清」,点击被吞/无响应
+        时 after 与 before 相同,绝不能因该静态文案假确认 OK(实际待还未变)."""
+        before = '公益福利 · 词元贷\n每次签到额度至少 $2.88；每周期有 50% 概率提前还清，第 4 次必定结清\n当前待还\n$0.39\n今日可签到\n今日签到还款'
+        res, clicks = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": False},
+                'button:has-text("今日签到还款")': {"is_visible": True, "disabled": False},
+            },
+            page_text=before,
+            page_text_after=before,  # 点击无效,页面纹丝不动
+        )
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_confirm")
+        self.assertTrue(any("今日签到还款" in c for c in clicks), "仍应尝试点击 今日签到还款")
+
+    def test_repay_confirmed_by_pending_amount_decrease(self):
+        """还款落账真判据:待还金额数值下降 → OK."""
+        res, clicks = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": False},
+                'button:has-text("今日签到还款")': {"is_visible": True, "disabled": False},
+            },
+            page_text='每周期有 50% 概率提前还清\n当前待还\n$0.39\n今日签到还款',
+            page_text_after='每周期有 50% 概率提前还清\n当前待还\n$0.00\n已还清\n本笔签到记录\n2026-09-19 还款 $0.39',
+        )
+        self.assertEqual(res.status, "OK")
+        self.assertIn("还款", res.detail)
 
     def test_click_no_landed_confirm_returns_fail(self):
         """点击借/还后页面文案无变化(未落账)→ FAIL no_confirm,不是 OK 假阳性."""
