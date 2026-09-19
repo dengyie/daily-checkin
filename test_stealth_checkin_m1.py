@@ -4428,6 +4428,20 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertEqual(res.status, "OK")
         self.assertIn("还款", res.detail)
 
+    def test_today_done_gate_blocks_borrow_click(self):
+        """2026-09-19 二次实证:当日还款完成后站点仍放出「确认借款」按钮,
+        完结态(「今日已签到」disabled)在位时必须 ALREADY,绝不点借款."""
+        res, clicks = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+                'button:has-text("今日签到还款")': {"is_visible": True, "disabled": True},
+                'button:has-text("今日已签到")': {"is_visible": True, "disabled": True},
+            },
+            page_text='当前待还\n$0.07\n签到进度\n3 / 4 天\n今日已签到',
+        )
+        self.assertEqual(res.status, "ALREADY")
+        self.assertFalse(clicks, "完结态在位时不应点击任何按钮")
+
     def test_pending_amount_parses_comma_and_newline(self):
         """金额解析:换行分隔与千分位逗号."""
         self.assertEqual(self.m._relayfor_pending_amount("当前待还\n$0.39"), 0.39)

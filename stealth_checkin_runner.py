@@ -6095,6 +6095,36 @@ def is_relayfor_site(site_url: str) -> bool:
     return "relayfor.xyz" in u
 
 
+async def _relayfor_pick_visible(page, sel: str):
+    """从同 selector 的多个实例里挑「可见且可用(非 disabled)」的 locator.
+
+    relayfor 控制台是 SPA,#benefits 视图与其它视图同时挂在 DOM 里,同一
+    「确认借款」文案可能出现多个实例(含隐藏/未挂载视图的)。`.first` 按 DOM
+    顺序取到的不一定是可见实例,force click 会点在隐藏节点上不落账
+    (2026-09-19 实证)。所以逐实例挑可见者;locator 不支持 count 时(测试
+    fake / 异常)回退 `.first` 单实例判定。
+    """
+    loc_all = page.locator(sel)
+    try:
+        n = await loc_all.count()
+    except Exception:
+        n = 0
+    for i in range(min(n, 20)):
+        loc = loc_all.nth(i)
+        try:
+            if await loc.is_visible(timeout=400) and not await loc.is_disabled():
+                return loc
+        except Exception:
+            continue
+    try:
+        loc = page.locator(sel).first
+        if await loc.is_visible(timeout=400) and not await loc.is_disabled():
+            return loc
+    except Exception:
+        return None
+    return None
+
+
 async def _relayfor_available_button(page, selectors: list[str]) -> str | None:
     """返回第一个「可见且可用(非 disabled)」按钮的 selector;都不满足返回 None.
 
@@ -6105,12 +6135,8 @@ async def _relayfor_available_button(page, selectors: list[str]) -> str | None:
     logged_error = False
     for sel in selectors:
         try:
-            loc = page.locator(sel).first
-            if not await loc.is_visible(timeout=600):
-                continue
-            if await loc.is_disabled():
-                continue
-            return sel
+            if await _relayfor_pick_visible(page, sel) is not None:
+                return sel
         except Exception as e:
             if not logged_error:
                 err = str(e or e.__class__.__name__)
@@ -6118,6 +6144,23 @@ async def _relayfor_available_button(page, selectors: list[str]) -> str | None:
                 logged_error = True
             continue
     return None
+
+
+async def _relayfor_today_done(page) -> bool:
+    """站点「今日已签到 / 已还清」disabled 按钮在位 → 今日已处理,不再借/还.
+
+    实测(2026-09-19):当日还款完成后页面仍放出「确认借款」按钮(下一周期
+    预告),仅按「动作按钮优先」会误点借款。完结态按钮存在时必须先于借/还
+    决策返回 ALREADY。
+    """
+    for sel in ('button:has-text("今日已签到")', 'button:has-text("已还清")'):
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=400) and await loc.is_disabled():
+                return True
+        except Exception:
+            continue
+    return False
 
 
 async def _relayfor_done_state(page) -> str:
@@ -6229,7 +6272,20 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
             break
         await asyncio.sleep(0.5)
 
-    # 决策:动作按钮优先(借款 > 还款),都不可见才回退到 done(已处理态)兜底。
+    # 决策:今日完结态优先(「今日已签到」disabled 按钮在位 → 已处理),
+    # 其次动作按钮(借款 > 还款),都不可见才回退到 done(已处理态)兜底。
+    if await _relayfor_today_done(page):
+        return ok_result(
+            "ALREADY",
+            adapter=kind,
+            detail="relayfor 今日已签到(完结态按钮在位)",
+            action=ActionEvidence(kind="none"),
+            confirmation=dom_confirmation("今日已签到", done_state=True),
+            pre_state="DONE",
+            post_state="DONE",
+            transition="NONE",
+            attribution="precheck",
+        )
     if action_sel is None:
         if done:
             return ok_result(
@@ -6265,7 +6321,10 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
     before = await page_text(page, RELAYFOR_TEXT_WINDOW)
 
     try:
-        await page.locator(action_sel).first.click(timeout=5000, force=True)
+        target_loc = await _relayfor_pick_visible(page, action_sel)
+        if target_loc is None:
+            target_loc = page.locator(action_sel).first
+        await target_loc.click(timeout=5000, force=True)
     except Exception as exc:
         return fail_result("no_click", detail=f"relayfor 点击{which}失败: {exc}", adapter=kind, action=action)
 
