@@ -429,7 +429,7 @@ TERMS_CLICK_SELECTORS = [
 ]
 
 Status = Literal["OK", "ALREADY", "FAIL"]
-AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor"]
+AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool"]
 
 
 @dataclass
@@ -737,6 +737,37 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         "cross",
         "https://newapi-checkin.keungliang.dpdns.org/",
         signs=['button:has-text("立即签到")', 'button:has-text("签到")', 'button:has-text("使用 Linux Do 登录")'],
+    ),
+    _B(
+        "darkforger",
+        "https://welfare.darkforger.com/#/checkin",
+        signs=[
+            'button:has-text("验证并签到")',
+            'button:has-text("确认签到")',
+        ],
+        already=[
+            'button:has-text("今日已签到")',
+            'text=今日已签到',
+            'text=今天的探索额度，已到账',
+            'text=签到成功',
+        ],
+        kind="darkforger",
+    ),
+    _B(
+        "pool",
+        "https://pool.983698.xyz/",
+        signs=[
+            'button.primary:has-text("立即签到")',
+            'button:has-text("立即签到")',
+        ],
+        already=[
+            'button.primary:has-text("今日已签到")',
+            'button:has-text("今日已签到")',
+            'text=今日已签到',
+            'text=签到成功',
+        ],
+        kind="pool",
+        prefer_catalog_url=True,
     ),
     _B(
         "guxiaomo",
@@ -1255,6 +1286,27 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             already=list(already) if already is not None else None,
             ready_rounds=rr,
             kind="relayfor",
+        )
+    if kind == "darkforger":
+        # welfare.darkforger.com 专属 darkforger_checkin 流程:
+        # Turnstile + Web Worker PoW (SHA-256) 验证码求解与签到落账。
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else None,
+            already=list(already) if already is not None else None,
+            ready_rounds=rr,
+            kind="darkforger",
+        )
+    if kind == "pool":
+        # pool.983698.xyz 专属 pool_checkin 流程:首页无 CTA,必须先点侧栏「商店」
+        # tab 才出现「立即签到」。kind 必须透传,否则落 browser 默认扫首页 no_button。
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else None,
+            already=list(already) if already is not None else None,
+            ready_rounds=rr,
+            prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
+            kind="pool",
         )
     # browser (default)
     return _B(
@@ -7206,6 +7258,301 @@ async def cross_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResu
     return confirmed_done_result("签到完成", adapter="cross")
 
 
+def is_darkforger_site(site_url: str) -> bool:
+    """welfare.darkforger.com 专属站判定."""
+    u = (site_url or "").lower()
+    return "darkforger.com" in u
+
+
+async def darkforger_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """darkforger (welfare.darkforger.com) 专用签到流程.
+
+    架构特征:
+    1. React SPA + Hash 路由 (/#/checkin)。
+    2. 基于 Cookie 驱动 POST /api/user/auth/refresh 获取短效 JWT 鉴权。
+    3. 签到包含双重前端人机校验:
+       - Cloudflare Turnstile 验证码
+       - Web Worker SHA-256 PoW (难度动态计算)
+    4. 流程:
+       - 访问 /#/checkin，检查是否已登录 (未登录走 LinuxDO SSO)
+       - 检查是否今日已签 (按钮显示「今日已签到」或页面文案「今天的探索额度，已到账」)
+       - 点击主 CTA「验证并签到」，弹出 dialog.verification-modal
+       - 轮询等待 Turnstile + Web Worker PoW 求解完毕 (button.verification-submit disabled -> false)
+       - 点击「确认签到」，等待接口提交与提示落账 (toast「签到成功！已获得...」或主按钮变「今日已签到」)
+       - 校验落账状态并返回 CheckinResult。
+    严格遵守 P0: 复用共享 9222 profile 登录态，禁止全清 Cookie。
+    """
+    kind = adapter.kind or "darkforger"
+    site_url = adapter.url or "https://welfare.darkforger.com/#/checkin"
+    print(f"  darkforger flow: {adapter.name}", flush=True)
+
+    try:
+        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception:
+        pass
+    await bypass_chrome_interstitial_if_needed(page)
+    await wait_text_ready(page, 30, adapter.ready_rounds)
+
+    # 1. 检查是否未登录
+    login_btn = page.locator('button:has-text("使用 Linux.do 登录"), a:has-text("使用 Linux.do 登录"), button:has-text("使用 Linux.do 开始")').first
+    if await login_btn.count() > 0 and await login_btn.is_visible(timeout=1000):
+        print("  darkforger: unauthenticated, attempting LinuxDO SSO...", flush=True)
+        try:
+            await login_btn.click()
+            await asyncio.sleep(1)
+        except Exception:
+            pass
+        status = await try_linuxdo_sso(page, origin_host="welfare.darkforger.com", browser=browser)
+        if status not in ("OK", "ALREADY"):
+            return fail_result("auth_failed", detail=f"SSO: {status}", adapter=kind)
+        try:
+            await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+        except Exception:
+            pass
+        await wait_text_ready(page, 30, adapter.ready_rounds)
+
+    # 2. 检查是否今日已签到 (DOM 判定)
+    body_text = await page_text(page, 2000)
+    already_btn = page.locator('button:has-text("今日已签到")').first
+    if (await already_btn.count() > 0 and await already_btn.is_visible(timeout=1000)) or (
+        "今日已签到" in body_text or "今天的探索额度，已到账" in body_text
+    ):
+        return confirmed_done_result("今日已签到", adapter=kind)
+
+    # 3. 寻找主 CTA 按钮「验证并签到」
+    checkin_btn = page.locator('button.button.primary.wide:has-text("验证并签到"), button:has-text("验证并签到")').first
+    if await checkin_btn.count() == 0 or not await checkin_btn.is_visible(timeout=2000):
+        # 再次兜底检查是否已签
+        body_text_fresh = await page_text(page, 2000)
+        if "今日已签到" in body_text_fresh or "今天的探索额度，已到账" in body_text_fresh:
+            return confirmed_done_result("今日已签到", adapter=kind)
+        return fail_result("no_button", detail="验证并签到 button not found", adapter=kind, stage="action")
+
+    # 4. 点击「验证并签到」，唤起验证对话框
+    print("  darkforger: clicking 验证并签到 CTA...", flush=True)
+    try:
+        await checkin_btn.click()
+    except Exception as e:
+        return fail_result("click_failed", detail=f"click 验证并签到 failed: {e}", adapter=kind, stage="action")
+
+    # 5. 等待验证弹窗加载与 Turnstile + PoW 求解
+    dialog = page.locator("dialog.verification-modal, dialog.modal").first
+    try:
+        await dialog.wait_for(state="visible", timeout=6000)
+    except Exception:
+        pass
+
+    submit_loc = page.locator("dialog.verification-modal .verification-submit, .verification-submit, button:has-text(\"确认签到\")").first
+
+    started = time.monotonic()
+    max_wait_s = 45.0
+    ready = False
+    probe = {}
+
+    while time.monotonic() - started < max_wait_s:
+        try:
+            probe = await page.evaluate('''() => {
+                const btn = document.querySelector("dialog.verification-modal .verification-submit, .verification-submit");
+                if (!btn) return {found: false};
+                return {
+                    found: true,
+                    disabled: Boolean(btn.disabled),
+                    text: (btn.innerText || "").trim()
+                };
+            }''')
+        except Exception:
+            probe = {"found": False}
+
+        if probe.get("found") and not probe.get("disabled") and "确认签到" in probe.get("text", ""):
+            ready = True
+            break
+        await asyncio.sleep(0.5)
+
+    if not ready:
+        detail_msg = probe.get("text") if probe.get("found") else "submit button not found in modal"
+        return fail_result("verification_timeout", detail=f"Turnstile/PoW timeout ({detail_msg})", adapter=kind, stage="action")
+
+    print(f"  darkforger: verification ready in {time.monotonic() - started:.1f}s, submitting...", flush=True)
+
+    # 6. 点击「确认签到」
+    action = ActionEvidence(
+        kind="dom_click",
+        target="button.verification-submit",
+        attempted_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    try:
+        await submit_loc.click()
+    except Exception as e:
+        return fail_result("click_failed", detail=f"click 确认签到 failed: {e}", adapter=kind, action=action, stage="action")
+
+    # 7. 轮询确认落账状态 (15s)
+    confirm_started = time.monotonic()
+    confirmed = False
+    confirm_detail = ""
+
+    while time.monotonic() - confirm_started < 15.0:
+        await asyncio.sleep(0.8)
+        # 检查 toast 提示
+        try:
+            toast_text = await page.evaluate('''() => {
+                const toasts = document.querySelectorAll(".toast, [role='status'], .alert, [class*='notification'], [class*='message']");
+                return Array.from(toasts).map(t => t.innerText || "").join(" ");
+            }''')
+        except Exception:
+            toast_text = ""
+        if "签到成功" in toast_text or "已获得" in toast_text:
+            confirmed = True
+            confirm_detail = toast_text[:120]
+            break
+
+        # 检查主页面按钮与状态文案
+        card_text = await page_text(page, 2000)
+        if "今日已签到" in card_text or "今天的探索额度，已到账" in card_text:
+            confirmed = True
+            confirm_detail = "今日已签到"
+            break
+
+    if not confirmed:
+        after_text = await page_text(page, 500)
+        return fail_result("no_confirm", detail=f"submit clicked but no confirm text: {after_text[:100]}", adapter=kind, action=action, stage="confirm")
+
+    return confirmed_done_result(
+        f"darkforger 签到成功 ({confirm_detail})",
+        adapter=kind,
+        action=action,
+    )
+
+
+def is_pool_site(site_url: str) -> bool:
+    """pool.983698.xyz 专属站判定."""
+    u = (site_url or "").lower()
+    return "pool.983698.xyz" in u or "983698.xyz" in u
+
+
+async def pool_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """pool.983698.xyz 专用签到流程.
+
+    React SPA,侧栏「商店」是 in-app tab(page==='store'),URL 不改 hash/path。
+    首页没有「立即签到」,通用 browser 扫首页会 FAIL:no_button,必须先点「商店」。
+    未签: button.primary「立即签到」→ POST /api/user/checkin → toast「签到成功，获得 10 积分」
+         随后按钮翻成 disabled「今日已签到」。
+    已签: button.primary disabled「今日已签到」。常驻「每日签到」标题绝不能当已签。
+    登录: 未登录落 auth 页,点「LinuxDo 登录 / 注册」走 /api/auth/linuxdo/start。
+    严格遵守 P0: 复用共享 9222 profile 登录态,禁止全清 Cookie。
+    """
+    kind = adapter.kind or "pool"
+    site_url = adapter.url or "https://pool.983698.xyz/"
+    print(f"  pool flow: {adapter.name}", flush=True)
+
+    try:
+        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception:
+        pass
+    await bypass_chrome_interstitial_if_needed(page)
+    await wait_text_ready(page, 30, adapter.ready_rounds)
+
+    login_btn = page.locator(
+        'button:has-text("LinuxDo 登录 / 注册"), '
+        'button:has-text("LinuxDo 登录"), '
+        'a:has-text("LinuxDo 登录 / 注册")'
+    ).first
+    if await login_btn.count() > 0 and await login_btn.is_visible(timeout=1000):
+        print("  pool: unauthenticated, attempting LinuxDO SSO...", flush=True)
+        try:
+            await login_btn.click()
+            await asyncio.sleep(1)
+        except Exception:
+            pass
+        status = await try_linuxdo_sso(page, origin_host="pool.983698.xyz", browser=browser)
+        if status not in ("OK", "ALREADY"):
+            return fail_result("auth_failed", detail=f"SSO: {status}", adapter=kind)
+        try:
+            await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+        except Exception:
+            pass
+        await wait_text_ready(page, 30, adapter.ready_rounds)
+
+    store_tab = page.locator('button:has-text("商店")').first
+    if await store_tab.count() == 0 or not await store_tab.is_visible(timeout=2000):
+        body = await page_text(page, 800)
+        return fail_result("no_store_tab", detail=f"商店 tab not found: {body[:120]}", adapter=kind, stage="action")
+    print("  pool: clicking 商店 tab...", flush=True)
+    try:
+        await store_tab.click()
+    except Exception as e:
+        return fail_result("click_failed", detail=f"click 商店 failed: {e}", adapter=kind, stage="action")
+    await asyncio.sleep(0.8)
+    await wait_text_ready(page, 20, max(adapter.ready_rounds or 8, 6))
+
+    already_btn = page.locator(
+        'button.primary:has-text("今日已签到"), button:has-text("今日已签到")'
+    ).first
+    if await already_btn.count() > 0 and await already_btn.is_visible(timeout=1000):
+        return confirmed_done_result("今日已签到", adapter=kind)
+
+    body_text = await page_text(page, 2000)
+    if "今日已签到" in body_text and "立即签到" not in body_text:
+        return confirmed_done_result("今日已签到", adapter=kind)
+
+    checkin_btn = page.locator(
+        'button.primary:has-text("立即签到"), button:has-text("立即签到")'
+    ).first
+    if await checkin_btn.count() == 0 or not await checkin_btn.is_visible(timeout=2000):
+        body_fresh = await page_text(page, 800)
+        if "今日已签到" in body_fresh:
+            return confirmed_done_result("今日已签到", adapter=kind)
+        return fail_result("no_button", detail=f"立即签到 not found after 商店: {body_fresh[:120]}", adapter=kind, stage="action")
+
+    print("  pool: clicking 立即签到...", flush=True)
+    action = ActionEvidence(
+        kind="dom_click",
+        target='button.primary:has-text("立即签到")',
+        attempted_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    try:
+        await checkin_btn.click()
+    except Exception as e:
+        return fail_result("click_failed", detail=f"click 立即签到 failed: {e}", adapter=kind, action=action, stage="action")
+
+    confirm_started = time.monotonic()
+    confirmed = False
+    confirm_detail = ""
+    while time.monotonic() - confirm_started < 12.0:
+        await asyncio.sleep(0.5)
+        toast_text = ""
+        try:
+            toast_text = await page.evaluate('''() => {
+                const toasts = document.querySelectorAll(".toast, [role='status'], .alert, [class*='notification'], [class*='message'], [class*='toast']");
+                return Array.from(toasts).map(t => t.innerText || "").join(" ");
+            }''')
+        except Exception:
+            toast_text = ""
+        if "签到成功" in toast_text:
+            confirmed = True
+            confirm_detail = toast_text[:120]
+            break
+        card_text = await page_text(page, 2000)
+        if "签到成功" in card_text or "今日已签到" in card_text:
+            confirmed = True
+            confirm_detail = "签到成功" if "签到成功" in card_text else "今日已签到"
+            break
+        done_btn = page.locator('button:has-text("今日已签到")').first
+        if await done_btn.count() > 0 and await done_btn.is_visible(timeout=400):
+            confirmed = True
+            confirm_detail = "今日已签到"
+            break
+
+    if not confirmed:
+        after_text = await page_text(page, 500)
+        return fail_result("no_confirm", detail=f"clicked 立即签到 but no confirm: {after_text[:100]}", adapter=kind, action=action, stage="confirm")
+
+    return confirmed_done_result(
+        f"pool 签到成功 ({confirm_detail})",
+        adapter=kind,
+        action=action,
+    )
+
+
 def is_mulink_site(site_url: str) -> bool:
     """demo.dev2.mulink.top 专属站判定."""
     u = (site_url or "").lower()
@@ -8041,6 +8388,10 @@ async def legacy_checkin_on_page(
             return await abnt_checkin(page, adapter, browser=browser)
         if kind == "relayfor" or is_relayfor_site(site_url):
             return await relayfor_checkin(page, adapter, browser=browser)
+        if kind == "darkforger" or is_darkforger_site(site_url):
+            return await darkforger_checkin(page, adapter, browser=browser)
+        if kind == "pool" or is_pool_site(site_url):
+            return await pool_checkin(page, adapter, browser=browser)
         # fengwind 专属窗口守卫(业务根因,2026-09-07):读服务端 /api/checkin/status 的
         # next_reset_at。今日新周期未开时页面残留昨日「已签到」,通用 already 会误判
         # ALREADY 并把 daily_tasks 标 done,使 cron 跳过真实可签时段。本轮守卫只作用于

@@ -788,3 +788,39 @@ sites:
       - 'button:has-text("今日已签到")'
       - 'text=今日已签到'
       - 'text=签到成功'
+  # darkforger(welfare.darkforger.com, Darkforger 炼金工坊/公益福利站)—— 2026-09-20 接入。
+  # React SPA(hash 路由 /#/checkin), LinuxDO OAuth 登录(复用 9222 共享 profile 登录态)。
+  # 双重前端人机校验: Cloudflare Turnstile 验证码 + Web Worker SHA-256 PoW 算力证明。
+  # 未签: 点击「验证并签到」唤起 verification-modal, 等待 PoW+Turnstile 就绪后点击「确认签到」;
+  # 已签态: button 为「今日已签到」(disabled) 或页面文案「今天的探索额度，已到账」;
+  # 严格守 P0: 复用 9222 共享 profile 登录态(不配账密), 禁止全清 Cookie。
+  - name: 'darkforger'
+    url: https://welfare.darkforger.com/#/checkin
+    kind: darkforger
+    signs:
+      - 'button:has-text("验证并签到")'
+      - 'button:has-text("确认签到")'
+    already:
+      - 'button:has-text("今日已签到")'
+      - 'text=今日已签到'
+      - 'text=今天的探索额度，已到账'
+      - 'text=签到成功'
+  # pool(pool.983698.xyz)—— 2026-09-20 接入。React SPA,侧栏「商店」是 in-app
+  # tab(page==='store',URL 不改 hash/path)。首页没有「立即签到」,通用 browser
+  # 扫首页会 FAIL:no_button,必须专属流程先点「商店」再点 CTA。
+  # 未签: button.primary「立即签到」→ POST /api/user/checkin → toast「签到成功，获得 10 积分」
+  # 随后按钮翻成 disabled「今日已签到」。已签: 按钮「今日已签到」(disabled)。
+  # 常驻「每日签到 / 每天一次，每次获得 10 积分」说明绝不能当已签。
+  # LinuxDo OAuth 登录(复用 9222 共享 profile,已关联 mangoqwq)。P0:禁止全清 Cookie。
+  - name: 'pool'
+    url: https://pool.983698.xyz/
+    kind: pool
+    prefer_catalog_url: true
+    signs:
+      - 'button.primary:has-text("立即签到")'
+      - 'button:has-text("立即签到")'
+    already:
+      - 'button.primary:has-text("今日已签到")'
+      - 'button:has-text("今日已签到")'
+      - 'text=今日已签到'
+      - 'text=签到成功'

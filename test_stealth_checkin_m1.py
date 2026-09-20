@@ -3692,7 +3692,7 @@ class TestSitesYamlCrashPaths(unittest.TestCase):
             adapters = self.m.load_sites_from_yaml(missing)
             self.assertEqual(adapters, self.m._BUILTIN_SITE_ADAPTERS)
             self.assertEqual(len(adapters), self.builtin_len)
-            self.assertEqual(len(adapters), 70)
+            self.assertEqual(len(adapters), 72)
 
     def test_missing_pyyaml_falls_back_to_builtin(self):
         """When `import yaml` raises ImportError, loader falls back to built-in."""
@@ -4620,6 +4620,350 @@ class TestConfirmGateSourceGuards(unittest.TestCase):
     def test_relayfor_confirm_uses_shared_text_window(self):
         self.assertIn("RELAYFOR_TEXT_WINDOW", self.src)
         self.assertNotIn("before = await page_text(page, 1500)", self.src)
+
+
+class TestDarkforgerCheckin(unittest.TestCase):
+    """welfare.darkforger.com(Darkforger 炼金工坊/公益福利站)—— 2026-09-20 接入.
+
+    React SPA (hash 路由 /#/checkin), LinuxDO OAuth 登录态(复用 9222 共享 profile).
+    签到流程依赖前端双重人机校验: Cloudflare Turnstile + Web Worker PoW (SHA-256).
+    P0 红线: 绝不调用 clear_cookies / clear_localStorage / clear_all (全清 9222 其它域).
+    """
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+        import asyncio as _aio
+        self.asyncio = _aio
+
+    def _adapter(self):
+        return self.m.SiteAdapter(
+            name="darkforger",
+            url="https://welfare.darkforger.com/#/checkin",
+            kind="darkforger",
+            sign_selectors=['button:has-text("验证并签到")', 'button:has-text("确认签到")'],
+            already_selectors=['button:has-text("今日已签到")', 'text=今日已签到', 'text=今天的探索额度，已到账', 'text=签到成功'],
+            ready_rounds=10,
+        )
+
+    def test_is_darkforger_site_positive_negative(self):
+        f = self.m.is_darkforger_site
+        self.assertTrue(f("https://welfare.darkforger.com/#/checkin"))
+        self.assertTrue(f("https://welfare.darkforger.com/"))
+        self.assertTrue(f("welfare.darkforger.com"))
+        self.assertFalse(f("https://mzlone.top/"))
+        self.assertFalse(f(""))
+        self.assertFalse(f("https://example.com/"))
+
+    def test_kind_in_literal(self):
+        self.assertIn("darkforger", self.m.AdapterKind.__args__)
+
+    def test_yaml_registers_darkforger_entry(self):
+        """sites.yaml 的 darkforger 条目解析后 kind=darkforger 且包含相应签名。"""
+        import yaml
+        self.assertTrue(os.path.exists("sites.yaml"))
+        with open("sites.yaml", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "darkforger"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 darkforger 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "darkforger")
+        self.assertTrue(a.url.startswith("https://welfare.darkforger.com"))
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("验证并签到", joined_signs)
+        self.assertIn("确认签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+
+    def test_dispatch_contains_darkforger_branch(self):
+        src = TARGET.read_text(encoding="utf-8")
+        self.assertIn("is_darkforger_site(site_url)", src)
+        self.assertIn("return await darkforger_checkin(page, adapter, browser=browser)", src)
+
+    def test_p0_no_clear_cookies_in_darkforger_path(self):
+        """darkforger 专属流程不得存在 clear_cookies / clear_localstorage / 全清调用."""
+        import inspect
+        src = inspect.getsource(self.m.darkforger_checkin)
+        lower = src.lower()
+        self.assertNotIn("clear_cookies", lower)
+        self.assertNotIn("clear_localstorage", lower)
+        self.assertNotIn("clear_all", lower)
+
+    def test_darkforger_already_checked_in(self):
+        """当页面或按钮显示今日已签到时，直接返回 ALREADY。"""
+        m = self.m
+        clicks = []
+
+        class FakeLocator:
+            def __init__(self, sel, visible=True):
+                self.sel = sel
+                self._visible = visible
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def click(self, **kw):
+                clicks.append(self.sel)
+
+        class FakePage:
+            url = "https://welfare.darkforger.com/#/checkin"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k): return ""
+            def locator(self, sel):
+                if "今日已签到" in sel:
+                    return FakeLocator(sel, visible=True)
+                return FakeLocator(sel, visible=False)
+
+        async def fake_page_text(p, limit=2000):
+            return "每日签到\n今日已签到\n今天的探索额度，已到账"
+
+        orig_page_text = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.darkforger_checkin(FakePage(), self._adapter()))
+            self.assertEqual(res.status, "ALREADY")
+            self.assertIn("今日已签到", res.detail)
+            self.assertEqual(len(clicks), 0)
+        finally:
+            m.page_text = orig_page_text
+
+    def test_darkforger_successful_checkin(self):
+        """正常流程：点击验证并签到 -> 弹窗 Turnstile/PoW 就绪 -> 点击确认签到 -> 成功确认。"""
+        m = self.m
+        clicks = []
+        state = {"submitted": False}
+
+        class FakeLocator:
+            def __init__(self, sel, visible=True):
+                self.sel = sel
+                self._visible = visible
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def wait_for(self, state="visible", timeout=6000):
+                return True
+            async def click(self, **kw):
+                clicks.append(self.sel)
+                if "确认签到" in self.sel or "verification-submit" in self.sel:
+                    state["submitted"] = True
+
+        class FakePage:
+            url = "https://welfare.darkforger.com/#/checkin"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k):
+                if "verification-submit" in expr:
+                    return {"found": True, "disabled": False, "text": "确认签到"}
+                if "toast" in expr:
+                    return "签到成功！已获得 5.00 额度" if state["submitted"] else ""
+                return ""
+            def locator(self, sel):
+                if "使用 Linux.do" in sel:
+                    return FakeLocator(sel, visible=False)
+                if "今日已签到" in sel:
+                    return FakeLocator(sel, visible=state["submitted"])
+                if "验证并签到" in sel:
+                    return FakeLocator(sel, visible=not state["submitted"])
+                return FakeLocator(sel, visible=True)
+
+        async def fake_page_text(p, limit=2000):
+            if state["submitted"]:
+                return "每日签到\n今日已签到\n签到成功"
+            return "每日签到\n完成轻量验证，领取今天的公益额度。\n验证并签到"
+
+        orig_page_text = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.darkforger_checkin(FakePage(), self._adapter()))
+            self.assertEqual(res.status, "OK")
+            self.assertIn("签到成功", res.detail)
+            self.assertEqual(len(clicks), 2)
+            self.assertTrue(any("验证并签到" in c for c in clicks))
+            self.assertTrue(any("确认签到" in c or "verification-submit" in c for c in clicks))
+        finally:
+            m.page_text = orig_page_text
+
+
+class TestPoolCheckin(unittest.TestCase):
+    """pool.983698.xyz —— 2026-09-20 接入.
+
+    React SPA,侧栏「商店」是 in-app tab,首页没有立即签到。必须先点商店再点 CTA。
+    P0 红线: 绝不调用 clear_cookies / clear_localStorage / clear_all (全清 9222 其它域).
+    """
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+        import asyncio as _aio
+        self.asyncio = _aio
+
+    def _adapter(self):
+        return self.m.SiteAdapter(
+            name="pool",
+            url="https://pool.983698.xyz/",
+            kind="pool",
+            sign_selectors=['button.primary:has-text("立即签到")', 'button:has-text("立即签到")'],
+            already_selectors=['button.primary:has-text("今日已签到")', 'button:has-text("今日已签到")', 'text=今日已签到', 'text=签到成功'],
+            ready_rounds=6,
+        )
+
+    def test_is_pool_site_positive_negative(self):
+        f = self.m.is_pool_site
+        self.assertTrue(f("https://pool.983698.xyz/"))
+        self.assertTrue(f("https://pool.983698.xyz"))
+        self.assertTrue(f("https://983698.xyz/"))
+        self.assertFalse(f("https://mzlone.top/"))
+        self.assertFalse(f(""))
+        self.assertFalse(f("https://example.com/"))
+        self.assertFalse(f("https://welfare.darkforger.com/"))
+
+    def test_kind_in_literal(self):
+        self.assertIn("pool", self.m.AdapterKind.__args__)
+
+    def test_yaml_registers_pool_entry(self):
+        """sites.yaml 的 pool 条目解析后 kind=pool 且包含商店签到签名。"""
+        import yaml
+        self.assertTrue(os.path.exists("sites.yaml"))
+        with open("sites.yaml", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "pool"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 pool 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "pool")
+        self.assertTrue("pool.983698.xyz" in a.url)
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        self.assertTrue(a.prefer_catalog_url)
+
+    def test_dispatch_contains_pool_branch(self):
+        src = TARGET.read_text(encoding="utf-8")
+        self.assertIn("is_pool_site(site_url)", src)
+        self.assertIn("return await pool_checkin(page, adapter, browser=browser)", src)
+
+    def test_p0_no_clear_cookies_in_pool_path(self):
+        """pool 专属流程不得存在 clear_cookies / clear_localstorage / 全清调用."""
+        import inspect
+        src = inspect.getsource(self.m.pool_checkin)
+        lower = src.lower()
+        self.assertNotIn("clear_cookies", lower)
+        self.assertNotIn("clear_localstorage", lower)
+        self.assertNotIn("clear_all", lower)
+
+    def test_pool_already_checked_in_on_store_tab(self):
+        """点开商店后按钮显示今日已签到时，直接返回 ALREADY，不再点立即签到。"""
+        m = self.m
+        clicks = []
+
+        class FakeLocator:
+            def __init__(self, sel, visible=True):
+                self.sel = sel
+                self._visible = visible
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def click(self, **kw):
+                clicks.append(self.sel)
+
+        class FakePage:
+            url = "https://pool.983698.xyz/"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k): return ""
+            def locator(self, sel):
+                if "LinuxDo" in sel:
+                    return FakeLocator(sel, visible=False)
+                if "商店" in sel:
+                    return FakeLocator(sel, visible=True)
+                if "今日已签到" in sel:
+                    return FakeLocator(sel, visible=True)
+                if "立即签到" in sel:
+                    return FakeLocator(sel, visible=False)
+                return FakeLocator(sel, visible=False)
+
+        async def fake_page_text(p, limit=2000):
+            return "商店\n每日签到\n每天一次，每次获得 10 积分\n今日已签到"
+
+        orig_page_text = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.pool_checkin(FakePage(), self._adapter()))
+            self.assertEqual(res.status, "ALREADY")
+            self.assertIn("今日已签到", res.detail)
+            self.assertTrue(any("商店" in c for c in clicks))
+            self.assertFalse(any("立即签到" in c for c in clicks))
+        finally:
+            m.page_text = orig_page_text
+
+    def test_pool_successful_checkin_via_store_tab(self):
+        """正常流程：点商店 → 点立即签到 → toast 签到成功。"""
+        m = self.m
+        clicks = []
+        state = {"clicked": False, "store": False}
+
+        class FakeLocator:
+            def __init__(self, sel, visible=True):
+                self.sel = sel
+                self._visible = visible
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def click(self, **kw):
+                clicks.append(self.sel)
+                if "商店" in self.sel:
+                    state["store"] = True
+                if "立即签到" in self.sel:
+                    state["clicked"] = True
+
+        class FakePage:
+            url = "https://pool.983698.xyz/"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k):
+                if "toast" in expr:
+                    return "签到成功，获得 10 积分" if state["clicked"] else ""
+                return ""
+            def locator(self, sel):
+                if "LinuxDo" in sel:
+                    return FakeLocator(sel, visible=False)
+                if "商店" in sel:
+                    return FakeLocator(sel, visible=True)
+                if "立即签到" in sel:
+                    return FakeLocator(sel, visible=state["store"] and not state["clicked"])
+                if "今日已签到" in sel:
+                    return FakeLocator(sel, visible=state["clicked"])
+                return FakeLocator(sel, visible=False)
+
+        async def fake_page_text(p, limit=2000):
+            if state["clicked"]:
+                return "商店\n每日签到\n签到成功，获得 10 积分\n今日已签到"
+            if state["store"]:
+                return "商店\n每日签到\n每天一次，每次获得 10 积分\n立即签到"
+            return "我的信息\n商店\n动漫\nmangoqwq"
+
+        orig_page_text = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.pool_checkin(FakePage(), self._adapter()))
+            self.assertEqual(res.status, "OK")
+            self.assertIn("签到成功", res.detail)
+            self.assertTrue(any("商店" in c for c in clicks))
+            self.assertTrue(any("立即签到" in c for c in clicks))
+        finally:
+            m.page_text = orig_page_text
 
 
 if __name__ == "__main__":
