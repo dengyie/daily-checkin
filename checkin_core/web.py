@@ -101,9 +101,13 @@ def _constant_eq(a: str | None, b: str | None) -> bool:
     return secrets.compare_digest(a, b)
 
 
-# CORS allow-list for the separate static frontend (http://127.0.0.1:8766 / https://check.example.com)
-# calling this API on 8765 / check-api.example.com. Never wildcard; untrusted origins are rejected.
-_DEFAULT_ALLOWED_ORIGINS = "http://127.0.0.1:8766,http://localhost:8766,http://check.example.com:8766,https://check.example.com"
+# CORS allow-list for the separate static frontend (loopback :8766 plus the
+# hosts-file local domains). Never wildcard; untrusted origins are rejected.
+_DEFAULT_ALLOWED_ORIGINS = (
+    "http://127.0.0.1:8766,http://localhost:8766,"
+    "http://check.example.com:8766,https://check.example.com,"
+    "http://check.mangoqwq.com:8766,http://check-api.mangoqwq.com:8766"
+)
 CORS_ORIGINS_ENV = "DAILY_CHECKIN_WEB_ORIGINS"
 CORS_ALLOW_METHODS = "GET, POST, OPTIONS"
 CORS_ALLOW_HEADERS = "Authorization, Content-Type, X-CSRF-Token, X-DailyCheckin-Password"
@@ -283,7 +287,15 @@ class CheckinWebApp:
 
             def allowed_host(self) -> bool:
                 host = self.headers.get("Host", "").split(":", 1)[0].strip("[]").lower()
-                return host in {"127.0.0.1", "localhost", "::1", "check.example.com", "check-api.example.com"}
+                return host in {
+                    "127.0.0.1",
+                    "localhost",
+                    "::1",
+                    "check.example.com",
+                    "check-api.example.com",
+                    "check.mangoqwq.com",
+                    "check-api.mangoqwq.com",
+                }
 
             def send_json(self, data, status=HTTPStatus.OK):
                 raw = json.dumps(data, ensure_ascii=False).encode()

@@ -627,6 +627,23 @@ class WebTests(unittest.TestCase):
         response.read()
         self.assertEqual(response.status, 403)
 
+    def test_host_header_allows_local_check_domains(self):
+        """hosts-file local domains used by the production UI must pass Host checks."""
+        for host in (
+            "check.mangoqwq.com:8765",
+            "check-api.mangoqwq.com:8765",
+            "check.example.com:8765",
+        ):
+            self.conn.request(
+                "GET",
+                "/api/state",
+                headers={"Host": host, "Authorization": "Bearer " + self.app.auth_token},
+            )
+            response = self.conn.getresponse()
+            body = json.loads(response.read())
+            self.assertEqual(response.status, 200, host)
+            self.assertIn("tasks", body)
+
     def test_api_state_requires_bearer_token(self):
         status, data = self.request_json("GET", "/api/state")
         self.assertEqual(status, 401)
@@ -736,6 +753,44 @@ class WebTests(unittest.TestCase):
         finally:
             os.environ.pop("DAILY_CHECKIN_WEB_PASSWORD", None)
             os.environ.pop("DAILY_CHECKIN_WEB_ORIGINS", None)
+
+    def test_default_cors_allows_mangoqwq_frontend_origin(self):
+        """Production UI is http://check.mangoqwq.com:8766; default CORS must include it."""
+        import os
+        os.environ.pop("DAILY_CHECKIN_WEB_ORIGINS", None)
+        os.environ["DAILY_CHECKIN_WEB_PASSWORD"] = "p"
+        origin = "http://check.mangoqwq.com:8766"
+        try:
+            self.conn.request(
+                "OPTIONS",
+                "/api/state",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "GET",
+                    "Host": "check-api.mangoqwq.com:8765",
+                },
+            )
+            resp = self.conn.getresponse()
+            resp.read()
+            self.assertEqual(resp.status, 204)
+            self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), origin)
+
+            self.conn.request(
+                "GET",
+                "/api/state",
+                headers={
+                    "Origin": origin,
+                    "Host": "check-api.mangoqwq.com:8765",
+                    "X-DailyCheckin-Password": "p",
+                },
+            )
+            resp = self.conn.getresponse()
+            body = json.loads(resp.read())
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), origin)
+            self.assertIn("tasks", body)
+        finally:
+            os.environ.pop("DAILY_CHECKIN_WEB_PASSWORD", None)
 
     def test_api_independent_of_static_pages(self):
         # API must work without the static page routes present (frontend split).
@@ -1161,6 +1216,17 @@ class FrontendServerTests(unittest.TestCase):
         resp, _ = self.request("GET", "/", headers={"Host": "evil.example"})
         self.assertEqual(resp.status, 403)
 
+    def test_host_header_allows_mangoqwq_frontend_domain(self):
+        resp, body = self.request("GET", "/", headers={"Host": "check.mangoqwq.com:8766"})
+        self.assertEqual(resp.status, 200)
+        self.assertIn("Daily Check-in", body.decode())
+
+    def test_csp_permits_mangoqwq_api_connect(self):
+        resp, _ = self.request("GET", "/app.js")
+        csp = resp.getheader("Content-Security-Policy")
+        self.assertIn("http://check.mangoqwq.com:8765", csp)
+        self.assertIn("http://check-api.mangoqwq.com:8765", csp)
+
 
 class FrontendStaticAssetIntegrityTests(unittest.TestCase):
     """Sanity checks for static asset styles, dynamic form controls, and CSP compliance."""
@@ -1203,6 +1269,7 @@ class FrontendStaticAssetIntegrityTests(unittest.TestCase):
         self.assertIn('id="manual-tiles-container"', self.index_html)
         self.assertIn('id="sidebar-manual-badge"', self.index_html)
         self.assertIn("getManualTasks", self.app_js)
+        self.assertIn("check.mangoqwq.com", self.app_js)
         self.assertIn("handleManualCheckin", self.app_js)
         self.assertIn("/api/sites/update", self.app_js)
         self.assertIn("/api/sites/delete", self.app_js)

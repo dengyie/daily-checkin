@@ -275,8 +275,18 @@ if (!customElements.get("prompt-chips")) customElements.define("prompt-chips", P
    State & App Controller
    ========================================================================== */
 
-const defaultApiBase = (typeof window !== "undefined" && window.location && (window.location.hostname === "check.example.com" || window.location.hostname === "check-api.example.com"))
-  ? (window.location.port ? `${window.location.protocol}//${window.location.hostname}:8765` : `https://check-api.example.com`)
+const LOCAL_API_HOSTS = new Set([
+  "check.example.com",
+  "check-api.example.com",
+  "check.mangoqwq.com",
+  "check-api.mangoqwq.com",
+]);
+const defaultApiBase = (typeof window !== "undefined" && window.location && LOCAL_API_HOSTS.has(window.location.hostname))
+  ? (window.location.port
+    ? `${window.location.protocol}//${window.location.hostname}:8765`
+    : (window.location.hostname.endsWith("mangoqwq.com")
+      ? "https://check-api.mangoqwq.com"
+      : "https://check-api.example.com"))
   : "http://127.0.0.1:8765";
 const apiBase = window.API_BASE || defaultApiBase;
 const SESSION_KEY = "daily-checkin-password";

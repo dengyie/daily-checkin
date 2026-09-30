@@ -22,7 +22,14 @@ from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DIR = ROOT / "web"
-ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1", "check.example.com"}
+ALLOWED_HOSTS = {
+    "127.0.0.1",
+    "localhost",
+    "::1",
+    "check.example.com",
+    "check.mangoqwq.com",
+    "check-api.mangoqwq.com",
+}
 # Only these exact top-level basenames are ever served; anything else is 404.
 ALLOWED_FILES = {"index.html", "app.js", "style.css", "favicon.svg", "favicon.ico"}
 CONTENT_TYPES = {
@@ -37,8 +44,11 @@ CONTENT_TYPES = {
 # With an opaque `connect-src 'self'` the browser would block cross-origin API fetch,
 # so the CSP explicitly allows both the default local API and the check-api domain.
 DEFAULT_API_BASE = "http://127.0.0.1:8765"
-DEFAULT_LOCAL_DOMAIN_API_BASE = "http://check.example.com:8765 http://check-api.example.com:8765"
-DEFAULT_PUBLIC_API_BASE = "https://check-api.example.com"
+DEFAULT_LOCAL_DOMAIN_API_BASE = (
+    "http://check.example.com:8765 http://check-api.example.com:8765 "
+    "http://check.mangoqwq.com:8765 http://check-api.mangoqwq.com:8765"
+)
+DEFAULT_PUBLIC_API_BASE = "https://check-api.example.com https://check-api.mangoqwq.com"
 # Include the API origin in connect-src so the split frontend can reach it.
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
