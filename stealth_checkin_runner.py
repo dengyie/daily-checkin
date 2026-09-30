@@ -921,6 +921,7 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("DGB公益站", "https://freeapi.dgbmc.top/console/personal"),
     _N("chengmo", "https://api.chengmo.cc.cd/profile"),
     _N("rugao", "https://new-api.rugao.me/profile"),
+    _N("feixingwawa", "https://newapi.feixingwawa.cn/profile"),
     _B(
         "图片公益站",
         "https://wisart.kuaileshifu.com/#/me",

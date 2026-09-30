@@ -338,6 +338,11 @@ sites:
   - name: 'rugao'
     url: https://new-api.rugao.me/profile
     kind: newapi_profile
+  # feixingwawa(newapi.feixingwawa.cn, 蛙蛙公益站new)—— 2026-10-01 接入。
+  # 标准 LinuxDO OAuth + newapi_profile,checkin_enabled=true、无 Turnstile(2026-10-01 /api/status 实测)。
+  - name: 'feixingwawa'
+    url: https://newapi.feixingwawa.cn/profile
+    kind: newapi_profile
   - name: '图片公益站'
     url: https://wisart.kuaileshifu.com/#/me
     kind: browser
