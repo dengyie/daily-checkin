@@ -71,6 +71,58 @@ sites:
   - name: 'luckyg'
     url: https://luckyg.131518.xyz/profile
     kind: newapi_profile
+  # bxacc(api.bxacc.xyz / 方舟 New API)—— 2026-09-20 接入。LinuxDo OAuth 登录
+  # (linuxdo_oauth=true, github_oauth=false, checkin_enabled=true),签到接口挂
+  # turnstile(turnstile_check=true,token 自动就绪后才点 CTA,wait_turnstile_token
+  # 内置处理),走标准 newapi_profile 流程:/profile → 点「立即签到」。
+  # 常驻说明「每日仅可签到一次，请勿重复签到」绝不能当已签(同 guxiaomo/mzlone)。
+  # 9222 共享 profile 已登录 mangoqwq。P0:禁止全清 Cookie。
+  - name: 'bxacc'
+    url: https://api.bxacc.xyz/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # techmob(newapi.do.techmob.net New API 站)—— 2026-09-22 接入。标准 LinuxDo OAuth
+  # 登录(共享 9222 profile 已登录 mangoqwq),走标准 newapi_profile 流程:
+  # /profile → 点「立即签到」+ 确认门。
+  # 常驻说明「每日仅可签到一次，请勿重复签到」绝不能当已签。
+  - name: 'techmob'
+    url: https://newapi.do.techmob.net/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # 0api(0api.cc.cd / 原 newapi.0api.cc.cd 308 重定向至 sub2api.0api.cc.cd)—— 2026-09-23 接入，2026-09-25 迁移。
+  # 纯账号密码登录(在 签到公益站账密.md 注册)。站方全站迁移且前台重构，签到从 /profile 迁移至
+  # /custom/activity 的 operations-ui iframe 中。
+  # 走专属 sub2api_checkin 流程:进入 /custom/activity → 定位 iframe → 点击 #checkin「立即签到」+ 确认门。
+  - name: '0api'
+    url: https://sub2api.0api.cc.cd/custom/activity
+    kind: sub2api
+    prefer_catalog_url: true
+    login_url: https://sub2api.0api.cc.cd/login
+    signs:
+      - '#checkin'
+      - 'button:has-text("立即签到")'
+    already:
+      - '#checkin-badge:has-text("今日已签")'
+      - 'text=今日已签到'
+      - 'text=今天已经签到过了'
+      - 'text=签到成功'
+  # happycoding(happycoding.xyz New API 站)—— 2026-09-24 接入。标准 LinuxDo OAuth
+  # 登录(共享 9222 profile 已登录 mangoqwq),走标准 newapi_profile 流程:
+  # /profile → 点「立即签到」+ 确认门。
+  # 常驻说明「每日仅可签到一次，请勿重复签到」绝不能当已签。
+  - name: 'happycoding'
+    url: https://happycoding.xyz/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # nailao(nailao.biz, 奶酪公益站)—— 2026-09-28 接入。标准 New API 站点 (sha-779b233de21c),
+  # 账密登录站(在 签到公益站账密.md 注册),未登录时自动去 /sign-in 执行账密登录。
+  # 走标准 newapi_profile 流程: /profile → 点击「立即签到」+ 确认门。
+  # 严格遵守 P0: 复用当前调试 profile 会话，禁止全清 Cookie。
+  - name: 'nailao'
+    url: https://nailao.biz/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+    login_url: https://nailao.biz/sign-in
   # abnt(api.abnt.it New API 站):LinuxDo OAuth 登录(linuxdo_oauth2=true,
   # checkin_enabled=true,无 turnstile),走尊属 abnt_checkin:
   # /sign-in → LinuxDo SSO(OAuth 回跳落新 tab,适配器接管带登录态 /profile)
@@ -153,8 +205,19 @@ sites:
     url: https://ioll.pp.ua/profile
     kind: newapi_profile
   - name: '咕嘎咕嘎生图站'
-    url: https://ai.xmiaom.com/profile
-    kind: newapi_profile
+    url: https://ai.xmiaom.com/dashboard/overview
+    kind: xmiaom
+    signs:
+      - 'button:has-text("立即签到")'
+    already:
+      - 'button:has-text("已签到")'
+      - 'text=今日已签到'
+      - 'text="今日已签到"'
+      - 'text=已签到'
+      - 'text="已签到"'
+      - 'text=签到成功'
+    prefer_catalog_url: true
+    login_url: https://ai.xmiaom.com/sign-in
   - name: '午夜'
     url: https://api.lyjxka.top/profile
     kind: newapi_profile
@@ -254,30 +317,18 @@ sites:
       - 'text=签到成功'
       - 'text=已签到'
       - 'text=今天已签到'
-  # hcnsec(api.hcnsec.cn, 新疆幻城网安科技公益大模型API网关):New API 系
-  # (真实登录后落 /dashboard/overview,非 /console/personal——该路径 SPA 404
-  # shell「糟糕 页面未找到」)。纯账密登录站,登录卡在 /sign-in(/login 404),
-  # username/password + legal-consent 条款 checkbox(不勾则登录 submit disabled,
-  # 且只能 JS click 原生 checkbox 才能解除——label.click 不触发 React 状态)。
-  # 绑定真账密走 _ensure_account_logged_in + login_url override 到 /sign-in。
+  # hcnsec(api.hcnsec.cn, 新疆幻城网安科技公益大模型API网关)—— 2026-09-24 重构为标准 newapi_profile。
+  # 站点已升级标准 New API 前台(v1.0.0-rc.40-hc2)，/profile 具完整个人中心与
+  # 「立即签到」按钮(button[data-slot="button"]:has-text("立即签到"))。
+  # 纯账密站(在 签到公益站账密.md 注册),未登录时自动去 /sign-in
+  # 执行账密登录；登录态在 9222 共享 profile 保持。
+  # 废弃原脆弱易 401 的 signin_api(/api/user/checkin)和旧 /dashboard/overview 路径，
+  # 走标准 newapi_profile 流程:/profile → 点「立即签到」+ 确认门。
   - name: 'hcnsec'
-    url: https://api.hcnsec.cn/dashboard/overview
-    kind: browser
+    url: https://api.hcnsec.cn/profile
+    kind: newapi_profile
     prefer_catalog_url: true
     login_url: https://api.hcnsec.cn/sign-in
-    # 无签到按钮(登录后 dashboard 无 CTA),后端 POST /api/user/checkin 消费签到,
-    # 需带 localStorage uid 的自定义身份头。改走 signin_api(uid header 版)。
-    signin_api: /api/user/checkin
-    signin_api_uid_header: true
-    signs:
-      - 'button:has-text("签到")'
-      - 'button:has-text("立即签到")'
-      - 'button:has-text("今日签到")'
-    already:
-      - 'text=今日已签到'
-      - 'text=签到成功'
-      - 'text=已签到'
-      - 'text=今天已签到'
   - name: 'DGB公益站'
     url: https://freeapi.dgbmc.top/console/personal
     kind: newapi_profile
@@ -724,6 +775,7 @@ sites:
       - 'text=签到成功'
   # relayfor.xyz(RelayFor 词元贷借贷站)—— 2026-09-11 接入。自动借/还全周期:
   # 第 1 天点「确认借款」领额度,之后每天点「今日签到还款」还贷,4 周期结清。
+  # 2026-09-25 新增中秋等限时签到活动(「立即签到」),自动兼顾活动签到与词元贷。
   # 复用 9222 共享 profile 登录态(不配账密),无 clear_cookies(P0)。
   - name: 'relayfor'
     url: https://relayfor.xyz/console/#benefits
@@ -731,10 +783,24 @@ sites:
     signs:
       - 'button:has-text("确认借款")'
       - 'button:has-text("今日签到还款")'
+      - 'button:has-text("立即签到")'
     already:
       - 'text=已还清'
       - 'text=今日已处理'
       - 'text=已提完'
+  # relayfor-go(relayfor.xyz RelayFor Go 会员每日签到)—— 2026-09-26 接入。
+  # 限时签到活动(每天领取 1 天 Go 套餐会员)。
+  # 页面: https://relayfor.xyz/console/#benefits
+  # 复用 9222 共享 profile 登录态(不配账密),无 clear_cookies(P0)。
+  - name: 'relayfor-go'
+    url: https://relayfor.xyz/console/#benefits
+    kind: relayfor_go
+    signs:
+      - 'button:has-text("立即签到")'
+    already:
+      - 'text=已签到'
+      - 'text=今日已签到'
+      - 'text=签到成功'
   # hiyo(free.hiyo.top, Hiyo Free / Codex订阅站)—— 2026-09-12 接入。New API 克隆站,
   # LinuxDo OAuth 登录(复用 9222 共享 profile 的 mango 会话)。签到在 **/dashboard**
   # 的「每日签到」卡片,奖励 $5.00–$10.00 随机:未签显示「立即签到」按钮,点后确认
@@ -824,3 +890,78 @@ sites:
       - 'button:has-text("今日已签到")'
       - 'text=今日已签到'
       - 'text=签到成功'
+  # sub2api(sub2api.0api.cc.cd Sub2API 站)—— 2026-09-25 接入。纯账号密码登录
+  # (在 签到公益站账密.md 注册)。
+  # 签到从旧 /profile 迁移至 /custom/activity 的 operations-ui iframe 中。
+  # 走专属 sub2api_checkin 流程:进入 /custom/activity → 定位 iframe → 点击 #checkin「立即签到」+ 确认门。
+  - name: 'sub2api'
+    url: https://sub2api.0api.cc.cd/custom/activity
+    kind: sub2api
+    prefer_catalog_url: true
+    login_url: https://sub2api.0api.cc.cd/login
+    signs:
+      - '#checkin'
+      - 'button:has-text("立即签到")'
+    already:
+      - '#checkin-badge:has-text("今日已签")'
+      - 'text=今日已签到'
+      - 'text=今天已经签到过了'
+      - 'text=签到成功'
+  # dygyz(dygyz.pmcat.top, PM订阅公益站)—— 2026-09-25 接入。
+  # LinuxDo OAuth 登录(复用 9222 共享 profile 的 mango 会话)。
+  # 签到入口位于 /dashboard 的「每日签到」卡片,表单 POST /checkin。
+  # 走 browser 流程:未签点击「立即签到领流量」按钮,已签显示 .checkin-done / .flash-ok。
+  - name: 'dygyz'
+    url: https://dygyz.pmcat.top/dashboard
+    kind: browser
+    prefer_catalog_url: true
+    login_url: https://dygyz.pmcat.top/login
+    signs:
+      - 'button:has-text("立即签到领流量")'
+      - 'button:has-text("立即签到")'
+      - 'form[action="/checkin"] button'
+    already:
+      - '.checkin-done'
+      - '.flash-ok'
+      - 'text=今日已签'
+      - 'text=今日已签到'
+      - 'text=今天已经签到过了'
+      - 'text=签到成功'
+  # glados(glados.rocks/console/checkin, GLaDOS 控制台每日签到)—— 2026-09-30 接入。
+  # 复用 9222 共享 profile 的 gld:sess 会话 Cookie，严守 P0 禁止全清 Cookie。
+  # 注意：Daily Punch 卡片日历图例常驻 "Checked in" / "Missed" 文案，不可用泛文本判已签；
+  # 专属 glados_checkin 流程通过 /api/user/points + button.checkin-cute-btn 精确点击与校验。
+  - name: 'glados'
+    url: https://glados.rocks/console/checkin
+    kind: glados
+    prefer_catalog_url: true
+    login_url: https://glados.rocks/login
+    signs:
+      - 'button.checkin-cute-btn:not(.is-done)'
+      - 'button.checkin-cute-btn:has-text("签到")'
+      - 'button.checkin-cute-btn:has-text("Checkin")'
+    already:
+      - 'button.checkin-cute-btn.is-done'
+      - 'text=Checkin! Got'
+      - 'text=Return tomorrow'
+      - 'text=Please Try Tomorrow'
+  # yunzhi(yunzhi.play.cn/ai 云智手机「今日登录福利」,赠 2 天云机空间权益)—— 2026-10-01 接入。
+  # 纯 RPC 流程(2026-10-01 抓包逆向):9222 页面内 fetch 调 yunzhi.new-gm.cn API,
+  # HMAC-SHA256 头签名(/yunzhi+path,盐 8822FF81...) + MD5 体签名(盐 7f9e2d08...);
+  # 流程: home-popups/init → {popupId}/claim → benefit/user/benefit(158) 取 userItems
+  # + 运行中云机(status=2) → benefit/claim → 轮询 claim/status 至 status=1。
+  # 登录态: localStorage cloud_phone_token / Cookie CG_CLINET_USER_TOKEN_YUN。
+  # 严禁 clear_cookies;直连 urllib 会被 WAF 503,必须页面内 fetch。
+  - name: 'yunzhi'
+    url: https://yunzhi.play.cn/ai/?channel_code=00000042
+    kind: yunzhi
+    prefer_catalog_url: true
+    login_url: https://yunzhi.play.cn/ai/#/login
+    signs:
+      - 'text=开心收下'
+      - 'text=立即领取'
+    already:
+      - 'text=今日已领取'
+      - 'text=明天再来'
+
+

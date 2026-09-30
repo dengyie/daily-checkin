@@ -146,6 +146,7 @@ class TestSuccessGate(unittest.TestCase):
             ("403\n地区限制\n当前地区不允许访问该资源", "blocked"),
             ("Bad gateway Error code 502\nVisit cloudflare.com", "upstream_unavailable"),
             ("Connection timed out Error code 522\nVisit cloudflare.com", "upstream_unavailable"),
+            ("Error 1033 Ray ID: a41a095e7e5e1d41\nCloudflare Tunnel error", "upstream_unavailable"),
             ("每日签到可获得固定额度奖励\n08:00 开放签到", "business_ineligible"),
             ("余额大于等于 $20，暂无法签到\n当前额度充足，无需签到", "business_ineligible"),
             (
@@ -386,16 +387,23 @@ class TestSuccessGate(unittest.TestCase):
         self.assertTrue(wxiai.use_native_click)
         self.assertFalse(wxiai.use_overlay_zapper)
 
-        # resolve_site must preserve signin_api + the New-Api-User(uid) header
-        # opt-in when it re-derives an adapter from the catalog (hcnsec 走
-        # note-URL 时若丢 flag,签会 401「未提供 New-Api-User」)。
+        # resolve_site must preserve signin_api when it re-derives an adapter from the catalog
+        anyrouter = self.m.resolve_site(
+            "anyrouter", "https://anyrouter.top/console"
+        )
+        self.assertIsNotNone(anyrouter)
+        assert anyrouter is not None
+        self.assertEqual(anyrouter.signin_api, "/api/user/sign_in")
+
+        # hcnsec 2026-09-24 重构为 newapi_profile: resolve_site 指向 /profile 且保留 login_url
         hcnsec = self.m.resolve_site(
             "hcnsec", "https://api.hcnsec.cn/dashboard/overview"
         )
         self.assertIsNotNone(hcnsec)
         assert hcnsec is not None
-        self.assertEqual(hcnsec.signin_api, "/api/user/checkin")
-        self.assertTrue(hcnsec.signin_api_uid_header)
+        self.assertEqual(hcnsec.kind, "newapi_profile")
+        self.assertEqual(hcnsec.url, "https://api.hcnsec.cn/profile")
+        self.assertTrue(hcnsec.prefer_catalog_url)
         self.assertEqual(hcnsec.login_url, "https://api.hcnsec.cn/sign-in")
 
     def test_signin_api_uid_header_js_builds_header(self):
@@ -3235,19 +3243,32 @@ class TestUltrarouterDualOAuth(unittest.TestCase):
         self.assertEqual(f(""), "")
         self.assertEqual(f("普通文本 无账号信息"), "")
 
+    def test_ultrarouter_profile_account_live_mangoqwq_20260921(self):
+        """2026-09-21 9222 实况:/profile 是 @mangoqwq + 立即签到,无 @yourhandle/LinuxDO 字样.
+
+        旧检测只认 @yourhandle 或 LinuxDO → SSO 成功后仍 WRONG_ACCOUNT(none)。
+        """
+        f = self.m._ultrarouter_profile_account_page_text
+        live = (
+            "M\nmango\n用户\n用户 ID 515\n@mangoqwq\n当前余额\n$247.15\n"
+            "每日签到\n每日签到可获得随机额度奖励\n立即签到\n14\n累计签到\n"
+            "$392\n本月获得"
+        )
+        self.assertEqual(f(live), "linuxdo")
+
     def test_ultrarouter_constants_nonempty(self):
         g = self.m.GITHUB_SELECTORS
         self.assertTrue(any("使用 GitHub 继续" in x for x in g))
         self.assertTrue(any("使用 Linux Do" in x for x in self.m.LINUXDO_SELECTORS))
-        # 该克隆实测:登录态 session cookie 是 'session'(path=/),非 new_api_refresh。
-        self.assertEqual(self.m.ULTRAROUTER_SESSION_COOKIE, "session")
+        # 2026-09-21 9222 实况:登录态 cookie 是 new_api_has_session(path=/)。
+        self.assertEqual(self.m.ULTRAROUTER_SESSION_COOKIE, "new_api_has_session")
         a = self._ultrarouter_adapter()
         self.assertEqual(a.kind, "ultrarouter")
         self.assertEqual(a.url, "https://ultrarouter.org/keys")
         self.assertIn("立即签到", " ".join(a.sign_selectors))
 
     def test_ultrarouter_checkin_linuxdo_ok(self):
-        """LinuxDo 单账号登录 + 签到成功 → OK;只清一次 session,不调 GitHub."""
+        """未登录才走 LinuxDo SSO + 签到成功 → OK;不先清 cookie,不调 GitHub."""
         m = self.m
         calls = []
 
@@ -3277,9 +3298,11 @@ class TestUltrarouterDualOAuth(unittest.TestCase):
         async def fake_terms(*a, **k):
             return 0
         async def fake_text(page, n=1500):
-            return "用户 立即签到 今日已签到 累计签到 本月获得"
+            if "try_linuxdo_sso" not in calls:
+                return "使用 LinuxDO 继续 登录您的账户"
+            return "用户 ID 515 @mangoqwq 立即签到 今日已签到 累计签到 本月获得"
         async def fake_purl(page):
-            return "https://ultrarouter.org/profile"
+            return "https://ultrarouter.org/sign-in" if "try_linuxdo_sso" not in calls else "https://ultrarouter.org/profile"
         async def fake_account_page(page):
             return "linuxdo"
 
@@ -3297,7 +3320,7 @@ class TestUltrarouterDualOAuth(unittest.TestCase):
             res = self.asyncio.run(m.ultrarouter_checkin(page, adapter, browser=None))
 
         self.assertEqual(res.status, "OK")
-        self.assertEqual(calls.count("clear_session"), 1)
+        self.assertEqual(calls.count("clear_session"), 0)
         self.assertIn("try_linuxdo_sso", calls)
         self.assertNotIn("try_github_oauth", calls)
         self.assertNotIn("click_github_cta", calls)
@@ -3325,9 +3348,9 @@ class TestUltrarouterDualOAuth(unittest.TestCase):
         async def fake_terms(*a, **k):
             return 0
         async def fake_text(page, n=1500):
-            return "用户 立即签到"
+            return "使用 LinuxDO 继续 登录您的账户"
         async def fake_purl(page):
-            return "https://ultrarouter.org/profile"
+            return "https://ultrarouter.org/sign-in"
 
         with mock.patch.object(m, "wait_text_ready", fake_wait), \
              mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
@@ -3342,6 +3365,121 @@ class TestUltrarouterDualOAuth(unittest.TestCase):
         self.assertEqual(res.status, "FAIL")
         self.assertEqual(res.reason, "TIMEOUT")
         self.assertIn("linuxdo", res.detail if res else "")
+
+    def test_ultrarouter_reuses_existing_session_skips_forced_sso(self):
+        """2026-09-21:9222 已登录且 /profile 有「立即签到」时,不得清 cookie / 走 SSO.
+
+        今日失败链:专属流程每次 CDP deleteCookies session@ultrarouter.org/ 再
+        try_linuxdo_sso → 早班 WRONG_ACCOUNT(none),午后再清后 NO_BUTTON。
+        其它 New API 站复用已有登录态直接点签到;ultrarouter 应对齐。
+        """
+        m = self.m
+        calls = []
+
+        class FakePage:
+            async def goto(self, url, **kwargs):
+                calls.append("goto:" + (url or ""))
+
+        page = FakePage()
+
+        async def fake_wait(*a, **k):
+            return True
+        async def fake_cf(*a, **k):
+            return None
+        async def fake_clear(*a, **k):
+            calls.append("clear_session")
+            return True
+        async def fake_dismiss(*a, **k):
+            return 0
+        async def fake_click(page, selectors, timeout_each=800):
+            joined = " ".join(selectors or [])
+            if "立即签到" in joined:
+                calls.append("click_signin_btn")
+                return 'button:has-text("立即签到")'
+            return None
+        async def fake_linuxdo_sso(page, origin_host="", browser=None):
+            calls.append("try_linuxdo_sso")
+            return "NO_BUTTON"
+        async def fake_text(page, n=1500):
+            return (
+                "mango 用户 ID 515 @mangoqwq 立即签到 今日已签到 累计签到 "
+                "本月获得 每日签到可获得随机额度奖励"
+            )
+        async def fake_purl(page):
+            return "https://ultrarouter.org/profile"
+
+        with mock.patch.object(m, "wait_text_ready", fake_wait), \
+             mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
+             mock.patch.object(m, "click_first_visible", fake_click), \
+             mock.patch.object(m, "try_linuxdo_sso", fake_linuxdo_sso), \
+             mock.patch.object(m, "page_text", fake_text), \
+             mock.patch.object(m, "page_url", fake_purl), \
+             mock.patch.object(m, "_ultrarouter_clear_session", fake_clear), \
+             mock.patch.object(m, "dismiss_obstructing_dialogs", fake_dismiss):
+            res = self.asyncio.run(m.ultrarouter_checkin(page, self._ultrarouter_adapter(), browser=None))
+
+        self.assertEqual(res.status, "OK")
+        self.assertEqual(calls.count("clear_session"), 0)
+        self.assertNotIn("try_linuxdo_sso", calls)
+        self.assertIn("click_signin_btn", calls)
+
+    def test_ultrarouter_waits_for_profile_spa_hydration(self):
+        """/profile SPA 壳先出,约 1s 后才有 @mangoqwq/立即签到;不得因壳页走 SSO.
+
+        2026-09-21 9222:wait_text_ready 在壳页(侧栏+语言偏好,无用户/签到)就返回,
+        旧逻辑判未登录去 /sign-in,已登录会话重定向 /dashboard/overview → NO_BUTTON.
+        """
+        m = self.m
+        calls = []
+        texts = [
+            "跳到主内容 Toggle Sidebar Ultra Router 主页 控制台 语言偏好 设置界面显示语言",
+            "mango 用户 ID 515 @mangoqwq 立即签到 今日已签到 累计签到 本月获得",
+        ]
+
+        class FakePage:
+            async def goto(self, url, **kwargs):
+                calls.append("goto:" + (url or ""))
+
+        page = FakePage()
+
+        async def fake_wait(*a, **k):
+            return True
+        async def fake_cf(*a, **k):
+            return None
+        async def fake_clear(*a, **k):
+            calls.append("clear_session")
+            return True
+        async def fake_dismiss(*a, **k):
+            return 0
+        async def fake_click(page, selectors, timeout_each=800):
+            joined = " ".join(selectors or [])
+            if "立即签到" in joined:
+                calls.append("click_signin_btn")
+                return 'button:has-text("立即签到")'
+            return None
+        async def fake_linuxdo_sso(page, origin_host="", browser=None):
+            calls.append("try_linuxdo_sso")
+            return "NO_BUTTON"
+        async def fake_text(page, n=1500):
+            if texts:
+                return texts.pop(0) if len(texts) > 1 else texts[0]
+            return texts[0]
+        async def fake_purl(page):
+            return "https://ultrarouter.org/profile"
+
+        with mock.patch.object(m, "wait_text_ready", fake_wait), \
+             mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
+             mock.patch.object(m, "click_first_visible", fake_click), \
+             mock.patch.object(m, "try_linuxdo_sso", fake_linuxdo_sso), \
+             mock.patch.object(m, "page_text", fake_text), \
+             mock.patch.object(m, "page_url", fake_purl), \
+             mock.patch.object(m, "_ultrarouter_clear_session", fake_clear), \
+             mock.patch.object(m, "dismiss_obstructing_dialogs", fake_dismiss):
+            res = self.asyncio.run(m.ultrarouter_checkin(page, self._ultrarouter_adapter(), browser=None))
+
+        self.assertEqual(res.status, "OK")
+        self.assertNotIn("try_linuxdo_sso", calls)
+        self.assertIn("click_signin_btn", calls)
 
 class TestNexaDualAccount(unittest.TestCase):
     """nexavlinks.com(New API 聚合站)—— 2026-09-11 拆分单账号签到。
@@ -3508,7 +3646,8 @@ class TestNexaDualAccount(unittest.TestCase):
     def test_nexa_sites_yaml_split_entries(self):
         """sites.yaml 拆成两个单账号条目,且都解析成 kind=nexa."""
         import yaml
-        with open("sites.yaml", encoding="utf-8") as fh:
+        yaml_path = ROOT / "sites.yaml"
+        with open(yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
         names = {e.get("name"): e for e in data.get("sites", [])}
         self.assertIn("nexavlinks-linuxdo", names)
@@ -3692,7 +3831,6 @@ class TestSitesYamlCrashPaths(unittest.TestCase):
             adapters = self.m.load_sites_from_yaml(missing)
             self.assertEqual(adapters, self.m._BUILTIN_SITE_ADAPTERS)
             self.assertEqual(len(adapters), self.builtin_len)
-            self.assertEqual(len(adapters), 72)
 
     def test_missing_pyyaml_falls_back_to_builtin(self):
         """When `import yaml` raises ImportError, loader falls back to built-in."""
@@ -3721,6 +3859,36 @@ class TestSitesYaml(unittest.TestCase):
         p = Path(td.name) / "sites.yaml"
         p.write_text(content, encoding="utf-8")
         return p
+
+    def _patch_accounts_fixture(self):
+        """用临时账密 fixture 替换真实 vault 文件.
+
+        测试必须与私密凭据文档解耦:CI/他机无 iCloud vault,且公开仓库
+        不得断言真实账号值(2026-10-01 CI 修复)。
+        """
+        fixture_md = (
+            "0api（https://sub2api.0api.cc.cd）\n"
+            "ci-account-0api@example.invalid\n"
+            "ci-password-0api\n"
+            "\n"
+            "hcnsec（https://api.hcnsec.cn）\n"
+            "ci-account-hcnsec\n"
+            "ci-password-hcnsec\n"
+            "\n"
+            "sub2api（https://sub2api.0api.cc.cd）\n"
+            "ci-account-sub2api\n"
+            "ci-password-sub2api\n"
+        )
+        fd, path = tempfile.mkstemp(suffix=".md")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(fixture_md)
+        self.addCleanup(lambda: os.unlink(path))
+        p_file = mock.patch.object(self.m, "ACCOUNTS_FILE", Path(path))
+        p_cache = mock.patch.object(self.m, "_ACCOUNTS_CACHE", None)
+        p_file.start()
+        p_cache.start()
+        self.addCleanup(p_file.stop)
+        self.addCleanup(p_cache.stop)
 
     def test_loads_three_kinds(self):
         p = self._write_yaml("""sites:
@@ -3787,8 +3955,9 @@ class TestSitesYaml(unittest.TestCase):
     def test_yaml_registers_hiyo_entry(self):
         """sites.yaml 的 hiyo 条目解析为 kind=browser,且带立即签到/今日已签到签名。"""
         import yaml
-        self.assertTrue(os.path.exists("sites.yaml"))
-        with open("sites.yaml", encoding="utf-8") as fh:
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
         entry = next((e for e in data.get("sites", []) if e.get("name") == "hiyo"), None)
         self.assertIsNotNone(entry, "sites.yaml 应有 hiyo 条目")
@@ -3803,8 +3972,9 @@ class TestSitesYaml(unittest.TestCase):
     def test_yaml_registers_aihappy_entry(self):
         """sites.yaml 的 aihappy 条目解析为 kind=browser,带 quota bar 精确选择器与已签签名。"""
         import yaml
-        self.assertTrue(os.path.exists("sites.yaml"))
-        with open("sites.yaml", encoding="utf-8") as fh:
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
         entry = next((e for e in data.get("sites", []) if e.get("name") == "aihappy"), None)
         self.assertIsNotNone(entry, "sites.yaml 应有 aihappy 条目")
@@ -3824,8 +3994,9 @@ class TestSitesYaml(unittest.TestCase):
     def test_yaml_registers_qkmss_entry(self):
         """sites.yaml 的 qkmss 条目解析为 kind=browser,URL 为 /user/checkin 且 prefer_catalog_url=True。"""
         import yaml
-        self.assertTrue(os.path.exists("sites.yaml"))
-        with open("sites.yaml", encoding="utf-8") as fh:
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
         entry = next((e for e in data.get("sites", []) if e.get("name") == "qkmss"), None)
         self.assertIsNotNone(entry, "sites.yaml 应有 qkmss 条目")
@@ -3843,8 +4014,9 @@ class TestSitesYaml(unittest.TestCase):
     def test_yaml_registers_xiadengwang_entry(self):
         """sites.yaml 的 虾蹬王 条目解析为 kind=browser,带 button#btn 立即签到及今日已签到回执，且设置 prefer_cta_before_auth=True。"""
         import yaml
-        self.assertTrue(os.path.exists("sites.yaml"))
-        with open("sites.yaml", encoding="utf-8") as fh:
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
         entry = next((e for e in data.get("sites", []) if e.get("name") == "虾蹬王"), None)
         self.assertIsNotNone(entry, "sites.yaml 应有 虾蹬王 条目")
@@ -3860,6 +4032,250 @@ class TestSitesYaml(unittest.TestCase):
         self.assertIn('text=今日已签到', joined_already)
         resolved = resolve_site("虾蹬王", "https://checkin.kunyou.asia/")
         self.assertEqual(resolved.url, "https://checkin.kunyou.asia/")
+
+    def test_yaml_registers_bxacc_entry(self):
+        """sites.yaml 的 bxacc 条目解析为 newapi_profile,/profile,prefer_catalog_url。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "bxacc"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 bxacc 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://api.bxacc.xyz/profile")
+        self.assertTrue(a.prefer_catalog_url)
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        resolved = resolve_site("bxacc", "https://api.bxacc.xyz/")
+        self.assertEqual(resolved.url, "https://api.bxacc.xyz/profile")
+
+    def test_yaml_registers_techmob_entry(self):
+        """sites.yaml 的 techmob 条目解析为 newapi_profile,/profile,prefer_catalog_url。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "techmob"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 techmob 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://newapi.do.techmob.net/profile")
+        self.assertTrue(a.prefer_catalog_url)
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        resolved = resolve_site("techmob", "https://newapi.do.techmob.net/")
+        self.assertEqual(resolved.url, "https://newapi.do.techmob.net/profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "techmob"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 techmob")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://newapi.do.techmob.net/profile")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
+
+    def test_yaml_registers_0api_entry(self):
+        """sites.yaml 的 0api 条目解析为 sub2api,/custom/activity,prefer_catalog_url,且账密注册有效。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "0api"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 0api 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "sub2api")
+        self.assertEqual(a.url, "https://sub2api.0api.cc.cd/custom/activity")
+        self.assertTrue(a.prefer_catalog_url)
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("#checkin", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签", joined_already)
+        resolved = resolve_site("0api", "https://newapi.0api.cc.cd/profile")
+        self.assertEqual(resolved.url, "https://sub2api.0api.cc.cd/custom/activity")
+        self.assertEqual(resolved.kind, "sub2api")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "0api"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 0api")
+        self.assertEqual(builtin_entry.kind, "sub2api")
+        self.assertEqual(builtin_entry.url, "https://sub2api.0api.cc.cd/custom/activity")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
+        cred = get_account_credential("0api")
+        self.assertIsNotNone(cred)
+        self.assertEqual(cred[0], "ci-account-0api@example.invalid")
+        self.assertEqual(cred[1], "ci-password-0api")
+
+    def test_yaml_registers_happycoding_entry(self):
+        """sites.yaml 的 happycoding 条目解析为 newapi_profile,/profile,prefer_catalog_url。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "happycoding"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 happycoding 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://happycoding.xyz/profile")
+        self.assertTrue(a.prefer_catalog_url)
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        resolved = resolve_site("happycoding", "https://happycoding.xyz/profile")
+        self.assertEqual(resolved.url, "https://happycoding.xyz/profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "happycoding"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 happycoding")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://happycoding.xyz/profile")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
+
+    def test_yaml_registers_nailao_entry(self):
+        """sites.yaml 的 nailao 条目解析为 newapi_profile,/profile,prefer_catalog_url。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "nailao"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 nailao 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://nailao.biz/profile")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertEqual(a.login_url, "https://nailao.biz/sign-in")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        resolved = resolve_site("nailao", "https://nailao.biz/profile")
+        self.assertEqual(resolved.url, "https://nailao.biz/profile")
+        self.assertEqual(resolved.login_url, "https://nailao.biz/sign-in")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "nailao"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 nailao")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://nailao.biz/profile")
+        self.assertEqual(builtin_entry.login_url, "https://nailao.biz/sign-in")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
+
+    def test_yaml_registers_hcnsec_entry(self):
+        """sites.yaml 的 hcnsec 条目解析为 newapi_profile,/profile,prefer_catalog_url,且账密注册有效。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "hcnsec"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 hcnsec 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://api.hcnsec.cn/profile")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertEqual(a.login_url, "https://api.hcnsec.cn/sign-in")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        resolved = resolve_site("hcnsec", "https://api.hcnsec.cn/dashboard/overview")
+        self.assertEqual(resolved.url, "https://api.hcnsec.cn/profile")
+        self.assertEqual(resolved.login_url, "https://api.hcnsec.cn/sign-in")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "hcnsec"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 hcnsec")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://api.hcnsec.cn/profile")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
+        self.assertEqual(builtin_entry.login_url, "https://api.hcnsec.cn/sign-in")
+        cred = get_account_credential("hcnsec")
+        self.assertIsNotNone(cred)
+        self.assertEqual(cred[0], "ci-account-hcnsec")
+        self.assertTrue(len(cred[1]) > 0)
+
+    def test_yaml_registers_sub2api_entry(self):
+        """sites.yaml 的 sub2api 条目解析为 sub2api,/custom/activity,prefer_catalog_url,且账密注册有效。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "sub2api"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 sub2api 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential, is_sub2api_site, is_sub2api_name
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "sub2api")
+        self.assertEqual(a.url, "https://sub2api.0api.cc.cd/custom/activity")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertEqual(a.login_url, "https://sub2api.0api.cc.cd/login")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("#checkin", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签", joined_already)
+        resolved = resolve_site("sub2api", "https://sub2api.0api.cc.cd/profile")
+        self.assertEqual(resolved.url, "https://sub2api.0api.cc.cd/custom/activity")
+        self.assertEqual(resolved.kind, "sub2api")
+        self.assertEqual(resolved.login_url, "https://sub2api.0api.cc.cd/login")
+        self.assertTrue(is_sub2api_site("https://sub2api.0api.cc.cd/custom/activity"))
+        self.assertTrue(is_sub2api_name("sub2api"))
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "sub2api"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 sub2api")
+        self.assertEqual(builtin_entry.kind, "sub2api")
+        self.assertEqual(builtin_entry.url, "https://sub2api.0api.cc.cd/custom/activity")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
+        self.assertEqual(builtin_entry.login_url, "https://sub2api.0api.cc.cd/login")
+        cred = get_account_credential("sub2api")
+        self.assertIsNotNone(cred)
+        self.assertEqual(cred[0], "ci-account-sub2api")
+        self.assertTrue(len(cred[1]) > 0)
+
+    def test_yaml_registers_dygyz_entry(self):
+        """sites.yaml 的 dygyz 条目解析为 browser,/dashboard,prefer_catalog_url,支持 LinuxDo 登录。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "dygyz"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 dygyz 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, is_dygyz_site, is_dygyz_name, LINUXDO_SELECTORS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://dygyz.pmcat.top/dashboard")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertEqual(a.login_url, "https://dygyz.pmcat.top/login")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到领流量", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn(".checkin-done", joined_already)
+        self.assertIn("今日已签", joined_already)
+        resolved = resolve_site("dygyz", "https://dygyz.pmcat.top/dashboard")
+        self.assertEqual(resolved.url, "https://dygyz.pmcat.top/dashboard")
+        self.assertEqual(resolved.kind, "browser")
+        self.assertEqual(resolved.login_url, "https://dygyz.pmcat.top/login")
+        self.assertTrue(is_dygyz_site("https://dygyz.pmcat.top/dashboard"))
+        self.assertTrue(is_dygyz_name("dygyz"))
+        self.assertTrue(is_dygyz_name("pmcat"))
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "dygyz"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 dygyz")
+        self.assertEqual(builtin_entry.kind, "browser")
+        self.assertEqual(builtin_entry.url, "https://dygyz.pmcat.top/dashboard")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
+        self.assertEqual(builtin_entry.login_url, "https://dygyz.pmcat.top/login")
+        self.assertIn('a:has-text("使用 LinuxDo 登录")', LINUXDO_SELECTORS)
 
 
     def test_fengwind_and_mulink_features(self):
@@ -4175,8 +4591,9 @@ class TestIsAbntSite(unittest.TestCase):
     def test_yaml_registers_abnt_adapter(self):
         """sites.yaml 注册的 abnt 条目可被 _adapter_from_yaml_entry 解析并透传 kind=abnt。"""
         import yaml
-        self.assertTrue(os.path.exists("sites.yaml"))
-        with open("sites.yaml", encoding="utf-8") as fh:
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
         entry = next((e for e in data.get("sites", []) if e.get("name") == "abnt"), None)
         self.assertIsNotNone(entry)
@@ -4275,10 +4692,11 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertTrue(a.url.startswith("https://relayfor.xyz"))
 
     def test_yaml_registers_relayfor_entry(self):
-        """sites.yaml 的 relayfor 条目解析后 kind=relayfor 且带借/还签名。"""
+        """sites.yaml 的 relayfor 条目解析后 kind=relayfor 且带借/还/活动签名。"""
         import yaml
-        self.assertTrue(os.path.exists("sites.yaml"))
-        with open("sites.yaml", encoding="utf-8") as fh:
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
         entry = next((e for e in data.get("sites", []) if e.get("name") == "relayfor"), None)
         self.assertIsNotNone(entry, "sites.yaml 应有 relayfor 条目")
@@ -4288,6 +4706,7 @@ class TestRelayForLoanCycle(unittest.TestCase):
         joined = " ".join(a.sign_selectors)
         self.assertIn("确认借款", joined)
         self.assertIn("今日签到还款", joined)
+        self.assertIn("立即签到", joined)
 
     def test_dispatch_contains_relayfor_branch(self):
         src = TARGET.read_text(encoding="utf-8")
@@ -4530,6 +4949,232 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertEqual(res.status, "ALREADY")
         self.assertFalse(clicks, "已处理态不应点击任何按钮")
 
+    def test_campaign_claim_executes_and_returns_ok(self):
+        """中秋等限时签到活动「立即签到」按钮在位时优先执行活动签到."""
+        res, clicks = self._run_handler(
+            {
+                'button[data-checkin-claim]': {"is_visible": True, "disabled": False},
+                'button:has-text("确认借款")': {"is_visible": False},
+                'button:has-text("今日签到还款")': {"is_visible": False},
+            },
+            page_text='RelayFor Checkin 中秋签到活动\n已还清',
+        )
+        self.assertEqual(res.status, "OK")
+        self.assertIn("活动签到成功", res.detail)
+        self.assertTrue(any("data-checkin-claim" in c for c in clicks), "应点击活动签到按钮")
+
+    def test_no_button_and_no_done_returns_fail_no_button(self):
+        """页面未找到借/还/活动按钮且无已还清文案 → FAIL:no_button,杜绝静默假阳性 ALREADY."""
+        res, clicks = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": False},
+                'button:has-text("今日签到还款")': {"is_visible": False},
+                'button[data-checkin-claim]': {"is_visible": False},
+            },
+            page_text='公益福利 · 词元贷\n加载中...',
+        )
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_button")
+        self.assertFalse(clicks)
+
+    def test_scoped_done_indicators_exclude_generic_yici(self):
+        """RELAYFOR_DONE_INDICATORS 仅限借贷结清相关文案,禁止包含通用已签到文案防活动卡片误判."""
+        indicators = self.m.RELAYFOR_DONE_INDICATORS
+        self.assertIn("已还清", indicators)
+        self.assertNotIn("已签到", indicators)
+        self.assertNotIn("签到成功", indicators)
+
+
+class TestRelayForGoCheckin(unittest.TestCase):
+    """relayfor-go (RelayFor Go 会员每日签到) 独立任务测试套件."""
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+        import asyncio as _aio
+        self.asyncio = _aio
+
+    def _adapter(self):
+        return self.m.SiteAdapter(
+            name="relayfor-go",
+            url="https://relayfor.xyz/console/#benefits",
+            kind="relayfor_go",
+            sign_selectors=['button:has-text("立即签到")'],
+            already_selectors=["text=已签到", "text=今日已签到"],
+            ready_rounds=10,
+        )
+
+    def test_is_relayfor_go_name(self):
+        f = self.m.is_relayfor_go_name
+        self.assertTrue(f("relayfor-go"))
+        self.assertTrue(f("relayfor_go"))
+        self.assertTrue(f("RelayFor Go · 签到"))
+        self.assertTrue(f("relayfor-会员"))
+        self.assertFalse(f("relayfor"))
+        self.assertFalse(f("newapi"))
+        self.assertFalse(f(""))
+
+    def test_yaml_registers_relayfor_go_entry(self):
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "relayfor-go"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 relayfor-go 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "relayfor_go")
+        self.assertEqual(a.url, "https://relayfor.xyz/console/#benefits")
+
+    def test_dispatch_contains_relayfor_go_branch(self):
+        src = TARGET.read_text(encoding="utf-8")
+        self.assertIn("is_relayfor_go_name", src)
+        self.assertIn("return await relayfor_go_checkin(page, adapter, browser=browser)", src)
+
+    def test_p0_no_clear_cookies_in_relayfor_go_path(self):
+        import inspect
+        src = inspect.getsource(self.m.relayfor_go_checkin)
+        lower = src.lower()
+        self.assertNotIn("clear_cookies", lower)
+        self.assertNotIn("clear_localstorage", lower)
+        self.assertNotIn("clear_all", lower)
+
+    def test_relayfor_go_already_done(self):
+        m = self.m
+
+        class FakePage:
+            async def goto(self, url, **kw):
+                return ""
+            async def evaluate(self, expr):
+                if "classList.contains('active')" in expr:
+                    return True
+                if "aria-busy" in expr:
+                    return "false"
+                if "checkin-user-card" in expr:
+                    return {
+                        "found": True,
+                        "hasBtn": False,
+                        "claimAttr": "",
+                        "isDone": True,
+                        "tagText": "已签到",
+                    }
+                return ""
+
+        async def fake_wait(*a, **k):
+            return None
+        async def fake_cf(*a, **k):
+            return False
+        async def fake_dis(*a, **k):
+            return None
+
+        page = FakePage()
+        with mock.patch.object(m, "wait_text_ready", fake_wait), \
+             mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
+             mock.patch.object(m, "dismiss_obstructing_dialogs", fake_dis):
+            res = self.asyncio.run(m.relayfor_go_checkin(page, self._adapter()))
+
+        self.assertEqual(res.status, "ALREADY")
+        self.assertIn("今日已签到", res.detail)
+
+    def test_relayfor_go_claim_success(self):
+        m = self.m
+        clicks = []
+        eval_call_count = [0]
+
+        class FakeLocator:
+            def __init__(self, sel):
+                self.sel = sel
+            @property
+            def first(self):
+                return self
+            def filter(self, **kw):
+                return self
+            def locator(self, sel):
+                return FakeLocator(sel)
+            async def is_visible(self, timeout=800):
+                return True
+            async def click(self, **kw):
+                clicks.append(self.sel)
+
+        class FakePage:
+            async def goto(self, url, **kw):
+                return ""
+            async def evaluate(self, expr):
+                if "classList.contains('active')" in expr:
+                    return True
+                if "aria-busy" in expr:
+                    return "false"
+                if "checkin-user-card" in expr:
+                    eval_call_count[0] += 1
+                    if eval_call_count[0] == 1:
+                        return {
+                            "found": True,
+                            "hasBtn": True,
+                            "claimAttr": "3|2026-09-26",
+                            "isDone": False,
+                            "tagText": "",
+                        }
+                    elif eval_call_count[0] == 2:
+                        return {
+                            "claimAttr": "3|2026-09-26",
+                            "text": "立即签到",
+                        }
+                    else:
+                        return None
+                return ""
+            def locator(self, sel, **kw):
+                return FakeLocator(sel)
+
+        async def fake_wait(*a, **k):
+            return None
+        async def fake_cf(*a, **k):
+            return False
+        async def fake_dis(*a, **k):
+            return None
+
+        page = FakePage()
+        with mock.patch.object(m, "wait_text_ready", fake_wait), \
+             mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
+             mock.patch.object(m, "dismiss_obstructing_dialogs", fake_dis):
+            res = self.asyncio.run(m.relayfor_go_checkin(page, self._adapter()))
+
+        self.assertEqual(res.status, "OK")
+        self.assertIn("签到成功", res.detail)
+        self.assertTrue(len(clicks) >= 1)
+
+    def test_relayfor_go_card_not_found_returns_fail_no_button(self):
+        m = self.m
+
+        class FakePage:
+            async def goto(self, url, **kw):
+                return ""
+            async def evaluate(self, expr):
+                if "classList.contains('active')" in expr:
+                    return True
+                if "aria-busy" in expr:
+                    return "false"
+                if "checkin-user-card" in expr:
+                    return {"found": False}
+                if "form.login-form" in expr:
+                    return False
+                return ""
+
+        async def fake_wait(*a, **k):
+            return None
+        async def fake_cf(*a, **k):
+            return False
+        async def fake_dis(*a, **k):
+            return None
+
+        page = FakePage()
+        with mock.patch.object(m, "wait_text_ready", fake_wait), \
+             mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
+             mock.patch.object(m, "dismiss_obstructing_dialogs", fake_dis):
+            res = self.asyncio.run(m.relayfor_go_checkin(page, self._adapter()))
+
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_button")
+
 
 class TestDoctorHelpers(unittest.TestCase):
     """--doctor 健康自检的纯函数与接线守卫."""
@@ -4660,8 +5305,9 @@ class TestDarkforgerCheckin(unittest.TestCase):
     def test_yaml_registers_darkforger_entry(self):
         """sites.yaml 的 darkforger 条目解析后 kind=darkforger 且包含相应签名。"""
         import yaml
-        self.assertTrue(os.path.exists("sites.yaml"))
-        with open("sites.yaml", encoding="utf-8") as fh:
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
         entry = next((e for e in data.get("sites", []) if e.get("name") == "darkforger"), None)
         self.assertIsNotNone(entry, "sites.yaml 应有 darkforger 条目")
@@ -4828,8 +5474,9 @@ class TestPoolCheckin(unittest.TestCase):
     def test_yaml_registers_pool_entry(self):
         """sites.yaml 的 pool 条目解析后 kind=pool 且包含商店签到签名。"""
         import yaml
-        self.assertTrue(os.path.exists("sites.yaml"))
-        with open("sites.yaml", encoding="utf-8") as fh:
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
         entry = next((e for e in data.get("sites", []) if e.get("name") == "pool"), None)
         self.assertIsNotNone(entry, "sites.yaml 应有 pool 条目")
@@ -4964,6 +5611,926 @@ class TestPoolCheckin(unittest.TestCase):
             self.assertTrue(any("立即签到" in c for c in clicks))
         finally:
             m.page_text = orig_page_text
+
+
+class TestXmiaomCheckin(unittest.TestCase):
+    """咕嘎咕嘎生图站 (ai.xmiaom.com) —— 2026-09-26 接入.
+
+    React SPA, 签到路径位于 /dashboard/overview (原 /profile 废弃).
+    主 CTA 为 button:has-text("立即签到"), 签到后变为 button:has-text("已签到") (disabled).
+    当会话非当日活跃时,服务端返回 checkin_login_required / "签到需要当天登录的会话",
+    需自动 logout 并重新进行 LinuxDO SSO 登录刷新当日会话.
+    P0 红线: 绝不调用 clear_cookies / clear_localStorage / clear_all (全清 9222 其它域).
+    """
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+        import asyncio as _aio
+        self.asyncio = _aio
+
+    def _adapter(self):
+        return self.m.SiteAdapter(
+            name="咕嘎咕嘎生图站",
+            url="https://ai.xmiaom.com/dashboard/overview",
+            kind="xmiaom",
+            sign_selectors=['button:has-text("立即签到")'],
+            already_selectors=[
+                'button:has-text("已签到")',
+                'text=今日已签到',
+                'text="今日已签到"',
+                'text=已签到',
+                'text="已签到"',
+                'text=签到成功',
+            ],
+            prefer_catalog_url=True,
+            login_url="https://ai.xmiaom.com/sign-in",
+            ready_rounds=6,
+        )
+
+    def test_is_xmiaom_site_positive_negative(self):
+        f = self.m.is_xmiaom_site
+        self.assertTrue(f("https://ai.xmiaom.com/dashboard/overview"))
+        self.assertTrue(f("https://ai.xmiaom.com/profile"))
+        self.assertTrue(f("https://xmiaom.com"))
+        self.assertFalse(f("https://example.com/"))
+        self.assertFalse(f(""))
+
+    def test_is_xmiaom_name_positive_negative(self):
+        f = self.m.is_xmiaom_name
+        self.assertTrue(f("咕嘎咕嘎生图站"))
+        self.assertTrue(f("咕嘎"))
+        self.assertTrue(f("xmiaom"))
+        self.assertTrue(f("xmiaom_ai"))
+        self.assertFalse(f("other_site"))
+
+    def test_kind_in_literal(self):
+        self.assertIn("xmiaom", self.m.AdapterKind.__args__)
+
+    def test_yaml_registers_xmiaom_entry(self):
+        """sites.yaml 的 咕嘎咕嘎生图站 条目解析为 kind=xmiaom 且主路径为 /dashboard/overview。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "咕嘎咕嘎生图站"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 咕嘎咕嘎生图站 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "xmiaom")
+        self.assertEqual(a.url, "https://ai.xmiaom.com/dashboard/overview")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertEqual(a.login_url, "https://ai.xmiaom.com/sign-in")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("已签到", joined_already)
+
+    def test_builtin_entry_xmiaom(self):
+        """_BUILTIN_SITE_ADAPTERS 中的 咕嘎咕嘎生图站 为 xmiaom adapter。"""
+        from stealth_checkin_runner import _BUILTIN_SITE_ADAPTERS
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "咕嘎咕嘎生图站"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 咕嘎咕嘎生图站")
+        self.assertEqual(builtin_entry.kind, "xmiaom")
+        self.assertEqual(builtin_entry.url, "https://ai.xmiaom.com/dashboard/overview")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
+        self.assertEqual(builtin_entry.login_url, "https://ai.xmiaom.com/sign-in")
+
+    def test_dispatch_contains_xmiaom_branch(self):
+        src = TARGET.read_text(encoding="utf-8")
+        self.assertIn("is_xmiaom_site(site_url)", src)
+        self.assertIn("return await xmiaom_checkin(page, adapter, browser=browser)", src)
+
+    def test_p0_no_clear_cookies_in_xmiaom_path(self):
+        """xmiaom 专属流程不得调用 clear_cookies / clear_localstorage / 全清接口."""
+        import inspect
+        src = inspect.getsource(self.m.xmiaom_checkin)
+        lower = src.lower()
+        self.assertNotIn("clear_cookies", lower)
+        self.assertNotIn("clear_localstorage", lower)
+        self.assertNotIn("clear_all", lower)
+
+    def test_xmiaom_already_checked_in(self):
+        """页面显示「已签到」时直接返回 ALREADY。"""
+        m = self.m
+        clicks = []
+
+        class FakeLocator:
+            def __init__(self, sel, text="已签到", visible=True):
+                self.sel = sel
+                self._text = text
+                self._visible = visible
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def inner_text(self):
+                return self._text
+            async def click(self, **kw):
+                clicks.append(self.sel)
+
+        class FakePage:
+            url = "https://ai.xmiaom.com/dashboard/overview"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k): return ""
+            def locator(self, sel):
+                if "已签到" in sel:
+                    return FakeLocator(sel, text="已签到", visible=True)
+                if "立即签到" in sel:
+                    return FakeLocator(sel, text="立即签到", visible=False)
+                return FakeLocator(sel, visible=False)
+
+        async def fake_page_text(p, limit=2000):
+            return "咕嘎咕嘎生图站\n个人中心\n已签到\n今日已签到"
+
+        orig_page_text = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.xmiaom_checkin(FakePage(), self._adapter()))
+            self.assertEqual(res.status, "ALREADY")
+            self.assertIn("已签到", res.detail)
+            self.assertEqual(len(clicks), 0)
+        finally:
+            m.page_text = orig_page_text
+
+    def test_xmiaom_successful_checkin(self):
+        """点击「立即签到」后按钮转为「已签到」返回 OK。"""
+        m = self.m
+        clicks = []
+        state = {"checked": False}
+
+        class FakeLocator:
+            def __init__(self, sel, visible=True, text=""):
+                self.sel = sel
+                self._visible = visible
+                self._text = text
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def inner_text(self):
+                return self._text
+            async def click(self, **kw):
+                clicks.append(self.sel)
+                if "立即签到" in self.sel:
+                    state["checked"] = True
+
+        class FakePage:
+            url = "https://ai.xmiaom.com/dashboard/overview"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k): return ""
+            def locator(self, sel):
+                if "已签到" in sel:
+                    return FakeLocator(sel, visible=state["checked"], text="已签到")
+                if "立即签到" in sel:
+                    return FakeLocator(sel, visible=not state["checked"], text="立即签到")
+                return FakeLocator(sel, visible=False)
+
+        async def fake_page_text(p, limit=2000):
+            if state["checked"]:
+                return "咕嘎咕嘎生图站\n签到成功\n已签到"
+            return "咕嘎咕嘎生图站\n个人中心\n立即签到"
+
+        orig_page_text = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.xmiaom_checkin(FakePage(), self._adapter()))
+            self.assertEqual(res.status, "OK")
+            self.assertEqual(res.action.kind, "dom_click")
+            self.assertTrue(any("立即签到" in c for c in clicks))
+        finally:
+            m.page_text = orig_page_text
+
+
+class GladosCheckinTest(unittest.TestCase):
+    """glados (https://glados.rocks/console/checkin) 专属签到流程单测 (2026-09-30)."""
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+        import asyncio as _aio
+        self.asyncio = _aio
+
+    def _adapter(self):
+        return self.m.SiteAdapter(
+            name="glados",
+            url="https://glados.rocks/console/checkin",
+            kind="glados",
+            sign_selectors=[
+                'button.checkin-cute-btn:not(.is-done)',
+                'button.checkin-cute-btn:has-text("签到")',
+                'button.checkin-cute-btn:has-text("Checkin")',
+            ],
+            already_selectors=[
+                'button.checkin-cute-btn.is-done',
+                'text=Checkin! Got',
+                'text=Please Try Tomorrow',
+            ],
+            prefer_catalog_url=True,
+            login_url="https://glados.rocks/login",
+        )
+
+    def test_is_glados_site_and_name(self):
+        self.assertTrue(self.m.is_glados_site("https://glados.rocks/console/checkin"))
+        self.assertTrue(self.m.is_glados_site("https://glados.network/console/checkin"))
+        self.assertFalse(self.m.is_glados_site("https://example.com"))
+        self.assertTrue(self.m.is_glados_name("glados"))
+        self.assertTrue(self.m.is_glados_name("GLaDOS"))
+        self.assertFalse(self.m.is_glados_name("other"))
+
+    def test_kind_in_literal_and_yaml_and_builtin(self):
+        self.assertIn("glados", self.m.AdapterKind.__args__)
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "glados"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 glados 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "glados")
+        self.assertEqual(a.url, "https://glados.rocks/console/checkin")
+        self.assertTrue(a.prefer_catalog_url)
+        b = next((x for x in _BUILTIN_SITE_ADAPTERS if x.name == "glados"), None)
+        self.assertIsNotNone(b, "内置 adapter 应包含 glados")
+        self.assertEqual(b.kind, "glados")
+
+    def test_p0_no_clear_cookies_in_glados_path(self):
+        import inspect
+        src = inspect.getsource(self.m.glados_checkin)
+        lower = src.lower()
+        self.assertNotIn("clear_cookies", lower)
+        self.assertNotIn("clear_localstorage", lower)
+
+    def test_glados_points_has_today_checkin_helper(self):
+        pts_today = {
+            "code": 0,
+            "history": [
+                {"business": "system:checkin", "detail": "2026-09-30", "change": "10.0"},
+            ],
+        }
+        pts_yesterday = {
+            "code": 0,
+            "history": [
+                {"business": "system:checkin", "detail": "2026-09-29", "change": "10.0"},
+            ],
+        }
+        self.assertTrue(self.m._glados_points_has_today_checkin(pts_today, today_str="2026-09-30"))
+        self.assertFalse(self.m._glados_points_has_today_checkin(pts_yesterday, today_str="2026-09-30"))
+        self.assertFalse(self.m._glados_points_has_today_checkin(None, today_str="2026-09-30"))
+
+    def test_glados_fresh_checkin_returns_ok(self):
+        """今日未签时点击 button.checkin-cute-btn，按钮变为 Checkin! Got 1 Points -> OK."""
+        m = self.m
+        state = {"clicked": False}
+
+        class FakeLocator:
+            def __init__(self, sel):
+                self.sel = sel
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                if "is-done" in self.sel:
+                    return 1 if state["clicked"] else 0
+                return 1
+            async def is_visible(self, timeout=500):
+                if "is-done" in self.sel:
+                    return state["clicked"]
+                return True
+            async def inner_text(self, timeout=500):
+                if "is-done" in self.sel and state["clicked"]:
+                    return "Checkin! Got 1 Points"
+                return "签到"
+            async def click(self, **kw):
+                state["clicked"] = True
+
+        class FakePage:
+            url = "https://glados.rocks/console/checkin"
+            async def goto(self, *a, **k): pass
+            def locator(self, sel):
+                return FakeLocator(sel)
+
+        async def fake_fetch_points(page):
+            return {"code": 0, "history": []}
+
+        async def fake_wait_ready(*a, **k): return True
+        async def fake_cf(*a, **k): return None
+        async def fake_text(page, n=1200): return "GLaDOS Points Daily Punch Checked in Missed"
+        async def fake_url(page): return "https://glados.rocks/console/checkin"
+
+        with mock.patch.object(m, "_glados_fetch_points", fake_fetch_points), \
+             mock.patch.object(m, "wait_text_ready", fake_wait_ready), \
+             mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
+             mock.patch.object(m, "page_text", fake_text), \
+             mock.patch.object(m, "page_url", fake_url):
+            res = self.asyncio.run(m.glados_checkin(FakePage(), self._adapter()))
+            self.assertEqual(res.status, "OK")
+            self.assertIn("Checkin! Got 1 Points", res.detail)
+            self.assertEqual(res.transition, "PENDING_TO_DONE")
+
+    def test_glados_repeat_checkin_returns_already(self):
+        """今日已签或按钮返回 Please Try Tomorrow 时返回 ALREADY."""
+        m = self.m
+        state = {"clicked": False}
+
+        class FakeLocator:
+            def __init__(self, sel):
+                self.sel = sel
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                if "is-done" in self.sel:
+                    return 1 if state["clicked"] else 0
+                return 1
+            async def is_visible(self, timeout=500):
+                if "is-done" in self.sel:
+                    return state["clicked"]
+                return True
+            async def inner_text(self, timeout=500):
+                if "is-done" in self.sel and state["clicked"]:
+                    return "Checkin Repeats! Please Try Tomorrow"
+                return "签到"
+            async def click(self, **kw):
+                state["clicked"] = True
+
+        class FakePage:
+            url = "https://glados.rocks/console/checkin"
+            async def goto(self, *a, **k): pass
+            def locator(self, sel):
+                return FakeLocator(sel)
+
+        async def fake_fetch_points(page):
+            return {"code": 0, "history": []}
+
+        async def fake_wait_ready(*a, **k): return True
+        async def fake_cf(*a, **k): return None
+        async def fake_text(page, n=1200): return "GLaDOS Points Daily Punch Checked in Missed"
+        async def fake_url(page): return "https://glados.rocks/console/checkin"
+
+        with mock.patch.object(m, "_glados_fetch_points", fake_fetch_points), \
+             mock.patch.object(m, "wait_text_ready", fake_wait_ready), \
+             mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
+             mock.patch.object(m, "page_text", fake_text), \
+             mock.patch.object(m, "page_url", fake_url):
+            res = self.asyncio.run(m.glados_checkin(FakePage(), self._adapter()))
+            self.assertEqual(res.status, "ALREADY")
+            self.assertIn("Try Tomorrow", res.detail)
+
+
+class YunzhiCheckinTest(unittest.TestCase):
+    """yunzhi (yunzhi.play.cn 云智手机 云机空间权益) 纯 RPC 签到流程单测 (2026-10-01).
+
+    协议来自 2026-10-01 抓包逆向:
+    - 头签名 HMAC-SHA256("METHOD\\n/yunzhi+path\\nparams\\nbody\\nheaders\\n", 盐 8822FF81...),
+      头规范化排除 Qu 表;30/30 抓包样本离线复算逐字节一致。
+    - 体签名 MD5(除 sign 外参数升序 k=v & 拼接 + 盐 7f9e2d08...),6/6 样本一致。
+    - 流程: home-popups/init → {popupId}/claim → benefit/user/benefit(158)
+      取 userItems + 运行中云机 → benefit/claim → 轮询 claim/status 至 status=1。
+    """
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+        import asyncio as _aio
+        self.asyncio = _aio
+
+    def _adapter(self):
+        return self.m.SiteAdapter(
+            name="yunzhi",
+            url="https://yunzhi.play.cn/ai/?channel_code=00000042",
+            kind="yunzhi",
+            sign_selectors=['text=开心收下', 'text=立即领取'],
+            already_selectors=['text=今日已领取', 'text=明天再来'],
+            prefer_catalog_url=True,
+            login_url="https://yunzhi.play.cn/ai/#/login",
+        )
+
+    def test_is_yunzhi_site_and_name(self):
+        self.assertTrue(self.m.is_yunzhi_site("https://yunzhi.play.cn/ai/?channel_code=00000042"))
+        self.assertTrue(self.m.is_yunzhi_site("https://act.new-gm.cn/hd/t/benefit_detail/?benefit_id=158"))
+        self.assertTrue(self.m.is_yunzhi_site("https://yunzhi.new-gm.cn/yunzhi/api/benefit/user/list"))
+        self.assertFalse(self.m.is_yunzhi_site("https://example.com"))
+        self.assertTrue(self.m.is_yunzhi_name("yunzhi"))
+        self.assertTrue(self.m.is_yunzhi_name("云智手机"))
+        self.assertFalse(self.m.is_yunzhi_name("glados"))
+
+    def test_kind_in_literal_and_yaml_and_builtin(self):
+        self.assertIn("yunzhi", self.m.AdapterKind.__args__)
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "yunzhi"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 yunzhi 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "yunzhi")
+        self.assertEqual(a.url, "https://yunzhi.play.cn/ai/?channel_code=00000042")
+        self.assertTrue(a.prefer_catalog_url)
+        b = next((x for x in _BUILTIN_SITE_ADAPTERS if x.name == "yunzhi"), None)
+        self.assertIsNotNone(b, "内置 adapter 应包含 yunzhi")
+        self.assertEqual(b.kind, "yunzhi")
+        # 字段等价(sites.yaml 与 _BUILTIN_SITE_ADAPTERS 必须同步)
+        for k in vars(b):
+            self.assertEqual(getattr(a, k), getattr(b, k), f"字段 {k} 不等价")
+
+    def test_p0_no_clear_cookies_in_yunzhi_path(self):
+        import inspect
+        for fn_name in ("yunzhi_checkin", "_yunzhi_api", "_yunzhi_build_headers"):
+            src = inspect.getsource(getattr(self.m, fn_name)).lower()
+            self.assertNotIn("clear_cookies", src, f"{fn_name} 不得调用 clear_cookies")
+            self.assertNotIn("clear_localstorage", src, f"{fn_name} 不得清 localStorage")
+
+    def test_yunzhi_md5_sign_captured_vectors(self):
+        """体签名与 2026-10-01 抓包样本逐字节一致(样本为业务 ID,非凭据)."""
+        cases = [
+            ({"benefitConfigId": "158", "timestamp": "1790794831629"},
+             "2164c5c88db4005310250a27f3b7807e"),
+            ({"userItemId": 355236345335936, "timestamp": "1790794843383",
+              "resourceId": "D0026092223823038"},
+             "2536063923750f79cd4677a1f64460b9"),
+            ({"claimId": 2720635, "timestamp": "1790794845048"},
+             "4b0d3010875a47dcda38b1f80861f79a"),
+            ({"resourceType": "LOBSTER", "effectiveSeconds": "86400",
+              "timestamp": 1790794812373},
+             "85c85c16d74699477e9e13deabd01579"),
+        ]
+        for params, want in cases:
+            self.assertEqual(self.m._yunzhi_md5_sign(params), want, f"向量 {params} 不匹配")
+
+    def test_yunzhi_hmac_sign_node_vector(self):
+        """头签名与 Node crypto 独立生成的向量一致(固定时间戳/request_id,假 token)."""
+        headers = {
+            "authorization": "TEST_TOKEN_FAKE_123",
+            "device_type": "3", "client_type": "h5", "channel_code": "00000042",
+            "version": "10310", "api_version": "1", "device_no": "a3eef24f4e96d698",
+            "timestamp": "1790794811525", "request_id": "5d67f86522734bceb951d058e3a7efed",
+            "accept": "application/json", "content-type": "application/json",
+            "cache-control": "no-cache",
+        }
+        got = self.m._yunzhi_hmac_sign("GET", "/yunzhi/api/content/home-popups/init", None, None, headers)
+        self.assertEqual(
+            got,
+            "2ec6f56786c4c0b1b62a517931e98a038b30ae2b6a0f10e429708c14e4695b00",
+        )
+
+    def test_yunzhi_canonical_headers(self):
+        """排除表 + 键小写 + 排序;浏览器自动头(referer/sec-ch-ua)不影响签名."""
+        headers = {
+            "Authorization": "T", "Content-Type": "application/json",
+            "Referer": "https://yunzhi.play.cn/", "sec-ch-ua-platform": '"macOS"',
+            "b-key": "2", "a-key": "1",
+        }
+        self.assertEqual(
+            self.m._yunzhi_canonical_headers(headers),
+            "a-key=1&authorization=T&b-key=2&referer=https://yunzhi.play.cn/&sec-ch-ua-platform=\"macOS\"",
+        )
+
+    def _fake_page(self, responses, state):
+        """FakePage: evaluate 按 creds/fetch 分发;fetch 按 method+path 路由."""
+        m = self.m
+
+        class FakePage:
+            url = "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+            async def goto(self, *a, **k):
+                pass
+
+            async def evaluate(self, js, payload=None):
+                if "cloud_phone_token" in js:
+                    return {"token": "TEST_TOKEN_FAKE_123", "deviceNo": "a3eef24f4e96d698"}
+                # fetch 分发(注意:此处 self 是 FakePage,模块引用走闭包 m)
+                method = payload["method"]
+                path = payload["url"].replace(m.YUNZI_API_BASE, "")
+                handler = responses.get((method, path))
+                if handler is None:
+                    return {"_http_status": 404, "_authorization": "", "_data": None}
+                out = handler(state)
+                if isinstance(out, tuple):
+                    return out[0](state)
+                return out
+
+        return FakePage()
+
+    def test_yunzhi_already_flow(self):
+        """已领态: init popups=[] 且 userItems=[] → ALREADY."""
+        m = self.m
+        responses = {
+            ("GET", "/api/content/home-popups/init"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {"channelCode": "00000042", "popups": []}},
+            },
+            ("POST", "/api/benefit/user/benefit"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {
+                    "benefitConfigId": 158, "remainingQuota": 0, "matchType": "CLOUD_DEVICE",
+                    "userItems": [], "cloudDevices": [
+                        {"flavor": "4C8G128GB", "vendorResourceId": "D0026092223823038",
+                         "status": 2, "expireTime": "2026-10-05 06:25:39"},
+                    ],
+                }},
+            },
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, {}), self._adapter()))
+        self.assertEqual(res.status, "ALREADY")
+        self.assertIn("无待开通权益卡", res.detail)
+        self.assertEqual(res.transition, "NONE")
+
+    def test_yunzhi_fresh_flow_returns_ok(self):
+        """未领态: 弹窗领取 → userItems 1 张卡 → claim → status 轮询至 1 → OK."""
+        m = self.m
+        state = {"claimed": False, "status_calls": 0}
+
+        def popup_init(s):
+            popups = [] if s["claimed"] else [
+                {"popupId": 46, "popupName": "今日登录福利", "benefitType": 1,
+                 "state": "CAN_CLAIM", "canClaim": True},
+            ]
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success",
+                              "data": {"channelCode": "00000042", "popups": popups}}}
+
+        def popup_claim(s):
+            s["claimed"] = True
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success", "data": {
+                        "success": True, "claimed": True,
+                        "claimNo": "CLM17907948158771499554", "benefitType": 1}}}
+
+        def benefit(s):
+            items = [] if not s["claimed"] else [{"userItemId": 355236345335936}]
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success", "data": {
+                        "benefitConfigId": 158, "matchType": "CLOUD_DEVICE",
+                        "remainingQuota": 1 if items else 0,
+                        "userItems": items,
+                        "cloudDevices": [
+                            {"flavor": "4C8G128GB", "vendorResourceId": "D0026092223823038",
+                             "status": 2, "expireTime": "2026-10-05 06:25:39"},
+                        ]}}}
+
+        def claim(s):
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success",
+                              "data": {"claimId": 2720635, "status": 0, "errorMsg": None}}}
+
+        def claim_status(s):
+            s["status_calls"] += 1
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success",
+                              "data": {"claimId": 2720635, "status": 1, "errorMsg": None}}}
+
+        responses = {
+            ("GET", "/api/content/home-popups/init"): popup_init,
+            ("POST", "/api/content/home-popups/46/claim"): popup_claim,
+            ("POST", "/api/benefit/user/benefit"): benefit,
+            ("POST", "/api/benefit/claim"): claim,
+            ("POST", "/api/benefit/claim/status"): claim_status,
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        async def fake_sleep(*a, **k):
+            return None
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass), \
+             mock.patch.object(m.asyncio, "sleep", fake_sleep):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, state), self._adapter()))
+        self.assertEqual(res.status, "OK")
+        self.assertIn("弹窗46福利卡领取成功", res.detail)
+        self.assertIn("D0026092223823038", res.detail)
+        self.assertEqual(res.transition, "PENDING_TO_DONE")
+        self.assertEqual(state["status_calls"], 1)
+
+
+    def test_yunzhi_evaluate_exception_fails_not_already(self):
+        """P1 回归(2026-10-01 review):页面内 fetch 异常必须 FAIL error,禁止穿透成假 ALREADY."""
+        m = self.m
+        state = {"raise": True}
+
+        class DeadPage:
+            url = "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+            async def goto(self, *a, **k):
+                pass
+
+            async def evaluate(self, js, payload=None):
+                if "cloud_phone_token" in js:
+                    return {"token": "TEST_TOKEN_FAKE_123", "deviceNo": "a3eef24f4e96d698"}
+                if state["raise"]:
+                    raise RuntimeError("Execution context was destroyed")
+                return {"_http_status": 200, "_authorization": "", "_data": None}
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass):
+            res = self.asyncio.run(m.yunzhi_checkin(DeadPage(), self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertIn("页面内 fetch 异常", res.detail)
+        self.assertIn("Execution context was destroyed", res.detail)
+
+    def test_yunzhi_anomaly_shape_fails_not_already(self):
+        """异常形状(userItems 空但 remainingQuota 缺失)必须 FAIL,不得假 ALREADY."""
+        m = self.m
+        responses = {
+            ("GET", "/api/content/home-popups/init"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {"channelCode": "00000042", "popups": []}},
+            },
+            ("POST", "/api/benefit/user/benefit"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {"benefitConfigId": 158}},
+            },
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, {}), self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertIn("状态异常", res.detail)
+
+    def test_yunzhi_waf_503_fails_loud(self):
+        """WAF 503(HTTP 非 200)必须显式 FAIL,不得静默穿透."""
+        m = self.m
+        responses = {
+            ("GET", "/api/content/home-popups/init"): lambda s: {
+                "_http_status": 503, "_authorization": "", "_data": None,
+            },
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, {}), self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertIn("HTTP 503", res.detail)
+
+
+    def test_yunzhi_popup_claim_failure_fails_not_already(self):
+        """弹窗领取失败时不得判 ALREADY(claimable 非空 → 显式 FAIL)."""
+        m = self.m
+        responses = {
+            ("GET", "/api/content/home-popups/init"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {"channelCode": "00000042", "popups": [
+                    {"popupId": 46, "popupName": "今日登录福利", "benefitType": 1,
+                     "state": "CAN_CLAIM", "canClaim": True},
+                ]}},
+            },
+            ("POST", "/api/content/home-popups/46/claim"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 500, "message": "系统异常", "data": None},
+            },
+            ("POST", "/api/benefit/user/benefit"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {
+                    "benefitConfigId": 158, "remainingQuota": 0, "matchType": "CLOUD_DEVICE",
+                    "userItems": [], "cloudDevices": []}},
+            },
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, {}), self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertIn("状态异常", res.detail)
+        self.assertIn("系统异常", res.detail)
+
+    def test_yunzhi_claim_already_message_returns_ok(self):
+        """claim 返回「已领取」语义时按已开通计 OK(幂等重复执行保护)."""
+        m = self.m
+        responses = {
+            ("GET", "/api/content/home-popups/init"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {"channelCode": "00000042", "popups": []}},
+            },
+            ("POST", "/api/benefit/user/benefit"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {
+                    "benefitConfigId": 158, "remainingQuota": 1, "matchType": "CLOUD_DEVICE",
+                    "userItems": [{"userItemId": 355236345335936}],
+                    "cloudDevices": [
+                        {"flavor": "4C8G128GB", "vendorResourceId": "D0026092223823038",
+                         "status": 2, "expireTime": "2026-10-05 06:25:39"},
+                    ]}},
+            },
+            ("POST", "/api/benefit/claim"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 500, "message": "今日已领取过该权益", "data": None},
+            },
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, {}), self._adapter()))
+        self.assertEqual(res.status, "OK")
+        self.assertIn("已开通", res.detail)
+
+    def test_yunzhi_no_running_device_fails(self):
+        """有待开通卡但无运行中云机时必须 FAIL,不得盲选或假成功."""
+        m = self.m
+        responses = {
+            ("GET", "/api/content/home-popups/init"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {"channelCode": "00000042", "popups": []}},
+            },
+            ("POST", "/api/benefit/user/benefit"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {
+                    "benefitConfigId": 158, "remainingQuota": 1, "matchType": "CLOUD_DEVICE",
+                    "userItems": [{"userItemId": 355236345335936}],
+                    "cloudDevices": []}},
+            },
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, {}), self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertIn("无可用云机实例", res.detail)
+
+
+    def test_yunzhi_claim_poll_timeout_fails(self):
+        """claim 受理后轮询 claim/status 一直不出终态时,轮询耗尽必须 FAIL."""
+        m = self.m
+        responses = {
+            ("GET", "/api/content/home-popups/init"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {"channelCode": "00000042", "popups": []}},
+            },
+            ("POST", "/api/benefit/user/benefit"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {
+                    "benefitConfigId": 158, "remainingQuota": 1, "matchType": "CLOUD_DEVICE",
+                    "userItems": [{"userItemId": 355236345335936}],
+                    "cloudDevices": [
+                        {"flavor": "4C8G128GB", "vendorResourceId": "D0026092223823038",
+                         "status": 2, "expireTime": "2026-10-05 06:25:39"},
+                    ]}},
+            },
+            ("POST", "/api/benefit/claim"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success",
+                          "data": {"claimId": 2720635, "status": 0, "errorMsg": None}},
+            },
+            ("POST", "/api/benefit/claim/status"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success",
+                          "data": {"claimId": 2720635, "status": 0, "errorMsg": None}},
+            },
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        async def fake_sleep(*a, **k):
+            return None
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass), \
+             mock.patch.object(m.asyncio, "sleep", fake_sleep):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, {}), self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertIn("轮询超时", res.detail)
+
+    def test_yunzhi_multi_card_partial_failure_surfaced(self):
+        """多卡部分成功部分失败时,OK detail 必须透出失败部分(不得静默吞掉)."""
+        m = self.m
+        calls = {"claim": 0}
+
+        def claim(s):
+            calls["claim"] += 1
+            if calls["claim"] == 1:
+                return {"_http_status": 200, "_authorization": "",
+                        "_data": {"code": 0, "message": "success",
+                                  "data": {"claimId": 2720635, "status": 1, "errorMsg": None}}}
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 500, "message": "开通排队超时", "data": None}}
+
+        responses = {
+            ("GET", "/api/content/home-popups/init"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {"channelCode": "00000042", "popups": []}},
+            },
+            ("POST", "/api/benefit/user/benefit"): lambda s: {
+                "_http_status": 200, "_authorization": "",
+                "_data": {"code": 0, "message": "success", "data": {
+                    "benefitConfigId": 158, "remainingQuota": 2, "matchType": "CLOUD_DEVICE",
+                    "userItems": [{"userItemId": 111}, {"userItemId": 222}],
+                    "cloudDevices": [
+                        {"flavor": "4C8G128GB", "vendorResourceId": "D0026092223823038",
+                         "status": 2, "expireTime": "2026-10-05 06:25:39"},
+                    ]}},
+            },
+            ("POST", "/api/benefit/claim"): claim,
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        async def fake_sleep(*a, **k):
+            return None
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass), \
+             mock.patch.object(m.asyncio, "sleep", fake_sleep):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, {}), self._adapter()))
+        self.assertEqual(res.status, "OK")
+        self.assertIn("卡111→D0026092223823038", res.detail)
+        self.assertIn("部分失败", res.detail)
+        self.assertIn("开通排队超时", res.detail)
+
+    def test_yunzhi_no_token_returns_auth_required(self):
+        """9222 profile 无登录态时必须 auth_required(引导用户浏览器登录)."""
+        m = self.m
+
+        class NoLoginPage:
+            url = "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+            async def goto(self, *a, **k):
+                pass
+
+            async def evaluate(self, js, payload=None):
+                if "cloud_phone_token" in js:
+                    return {"token": "", "deviceNo": ""}
+                return {"_http_status": 200, "_authorization": "", "_data": None}
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        async def fake_sleep(*a, **k):
+            return None
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass), \
+             mock.patch.object(m.asyncio, "sleep", fake_sleep):
+            res = self.asyncio.run(m.yunzhi_checkin(NoLoginPage(), self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "auth_required")
+        self.assertIn("cloud_phone_token", res.detail)
 
 
 if __name__ == "__main__":

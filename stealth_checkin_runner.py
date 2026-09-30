@@ -20,8 +20,11 @@ from __future__ import annotations
 import asyncio
 import calendar
 import fcntl
+import hashlib
+import hmac
 import os
 import json
+import random
 import re
 import sys
 import time
@@ -217,6 +220,9 @@ LINUXDO_SELECTORS = [
     'a:has-text("使用 Linux DO")',
     'a:has-text("使用 Linux Do")',
     'a:has-text("使用 Linux.do 登录")',
+    'a:has-text("使用 LinuxDo 登录")',
+    'a:has-text("使用 LinuxDO 登录")',
+    'a:has-text("使用 Linux Do 登录")',
     'a:has-text("使用 Linux.do")',
     'a:has-text("Continue with Linux")',
     'a:has-text("LinuxDO")',
@@ -429,7 +435,7 @@ TERMS_CLICK_SELECTORS = [
 ]
 
 Status = Literal["OK", "ALREADY", "FAIL"]
-AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool"]
+AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool", "sub2api", "xmiaom", "glados", "yunzhi"]
 
 
 @dataclass
@@ -580,6 +586,7 @@ def _N(
     already: list[str] | None = None,
     ready_rounds: int = 15,
     prefer_catalog_url: bool = False,
+    login_url: str = "",
 ) -> SiteAdapter:
     """New-API style personal/check-in page (7x pattern)."""
     return SiteAdapter(
@@ -592,6 +599,7 @@ def _N(
         trusted_sign_selectors=signs is not None,
         trusted_already_selectors=already is not None,
         prefer_catalog_url=prefer_catalog_url,
+        login_url=login_url,
     )
 
 
@@ -669,6 +677,61 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("jiuitj", "https://jiuuij.de5.net/console/personal"),
     _N("afsmc", "https://api.afsmc.cn/profile"),
     _N("zmingu", "https://api.zmingu.app/profile"),
+    _N(
+        "techmob",
+        "https://newapi.do.techmob.net/profile",
+        prefer_catalog_url=True,
+    ),
+    _B(
+        "0api",
+        "https://sub2api.0api.cc.cd/custom/activity",
+        kind="sub2api",
+        prefer_catalog_url=True,
+        login_url="https://sub2api.0api.cc.cd/login",
+    ),
+    _N(
+        "happycoding",
+        "https://happycoding.xyz/profile",
+        prefer_catalog_url=True,
+    ),
+    _N(
+        "nailao",
+        "https://nailao.biz/profile",
+        prefer_catalog_url=True,
+        login_url="https://nailao.biz/sign-in",
+    ),
+    # sub2api(sub2api.0api.cc.cd Sub2API 站)—— 2026-09-25 接入。
+    # 纯账密站(在 签到公益站账密.md 注册),签到位于 /custom/activity 的 iframe 中。
+    _B(
+        "sub2api",
+        "https://sub2api.0api.cc.cd/custom/activity",
+        kind="sub2api",
+        prefer_catalog_url=True,
+        login_url="https://sub2api.0api.cc.cd/login",
+    ),
+    # dygyz(dygyz.pmcat.top, PM订阅公益站)—— 2026-09-25 接入。
+    # LinuxDo OAuth 登录(复用 9222 共享 profile 的 mango 会话)。
+    # 签到入口位于 /dashboard 的「每日签到」卡片,表单 POST /checkin。
+    # 走 browser 流程:未签点击「立即签到领流量」按钮,已签显示 .checkin-done / .flash-ok。
+    _B(
+        "dygyz",
+        "https://dygyz.pmcat.top/dashboard",
+        signs=[
+            'button:has-text("立即签到领流量")',
+            'button:has-text("立即签到")',
+            'form[action="/checkin"] button',
+        ],
+        already=[
+            '.checkin-done',
+            '.flash-ok',
+            'text=今日已签',
+            'text=今日已签到',
+            'text=今天已经签到过了',
+            'text=签到成功',
+        ],
+        prefer_catalog_url=True,
+        login_url="https://dygyz.pmcat.top/login",
+    ),
     # fengwind(Fengwind API 福利站):首页即签到页(非 New API profile)。
     # 有「签到」按钮(在今日福利卡内,button[data-slot/button] 或带签到文案),
     # 已签判据:「今日已签到」/「签到成功」/「已签到」;带 is_fengwind_site 专属
@@ -719,7 +782,22 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("neb公益站", "https://ai.9q.hk/profile"),
     _N("huan", "https://ai.huan666.de/console/personal"),
     _N("ciallo", "https://ioll.pp.ua/profile"),
-    _N("咕嘎咕嘎生图站", "https://ai.xmiaom.com/profile"),
+    _B(
+        "咕嘎咕嘎生图站",
+        "https://ai.xmiaom.com/dashboard/overview",
+        signs=['button:has-text("立即签到")'],
+        already=[
+            'button:has-text("已签到")',
+            'text=今日已签到',
+            'text="今日已签到"',
+            'text=已签到',
+            'text="已签到"',
+            'text=签到成功',
+        ],
+        prefer_catalog_url=True,
+        login_url="https://ai.xmiaom.com/sign-in",
+        kind="xmiaom",
+    ),
     _N("午夜", "https://api.lyjxka.top/profile"),
     _B(
         "abrdns",
@@ -831,19 +909,14 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         already=['text=今日已签到', 'text=签到成功', 'text=已签到', 'text=今天已签到'],
         prefer_catalog_url=True,
     ),
-    # hcnsec(api.hcnsec.cn, 新疆幻城网安公益网关):New API 系纯账密站,登录卡在
-    # /sign-in(/login 404),username/password + legal-consent 条款 checkbox(不勾
-    # submit disabled,且 label.click 不触发——须 JS click 原生 checkbox)。真实
-    # 登录落 /dashboard/overview(非 /console/personal,该路径 SPA 404 shell)。
-    _B(
+    # hcnsec(api.hcnsec.cn, 新疆幻城网安科技公益大模型安全网关)—— 2026-09-24 重构为标准 newapi_profile。
+    # 站点已升级为标准 New API(v1.0.0-rc.40-hc2)，/profile 具有「立即签到」按钮。
+    # 纯账密站(在 签到公益站账密.md 注册)，登录卡在 /sign-in。废弃易 401 的 signin_api 与旧 /dashboard/overview 路径。
+    _N(
         "hcnsec",
-        "https://api.hcnsec.cn/dashboard/overview",
-        signs=['button:has-text("签到")', 'button:has-text("立即签到")', 'button:has-text("今日签到")'],
-        already=['text=今日已签到', 'text=签到成功', 'text=已签到', 'text=今天已签到'],
+        "https://api.hcnsec.cn/profile",
         prefer_catalog_url=True,
         login_url="https://api.hcnsec.cn/sign-in",
-        signin_api="/api/user/checkin",
-        signin_api_uid_header=True,
     ),
     _N("DGB公益站", "https://freeapi.dgbmc.top/console/personal"),
     _N("chengmo", "https://api.chengmo.cc.cd/profile"),
@@ -1134,6 +1207,44 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
             'text=保底进度',
         ],
     ),
+    # glados(glados.rocks/console/checkin, GLaDOS 控制台每日签到)—— 2026-09-30 接入。
+    # 复用 9222 共享 profile 的 gld:sess 会话，走专属 glados_checkin 流程。
+    _B(
+        "glados",
+        "https://glados.rocks/console/checkin",
+        signs=[
+            'button.checkin-cute-btn:not(.is-done)',
+            'button.checkin-cute-btn:has-text("签到")',
+            'button.checkin-cute-btn:has-text("Checkin")',
+        ],
+        already=[
+            'button.checkin-cute-btn.is-done',
+            'text=Checkin! Got',
+            'text=Return tomorrow',
+            'text=Please Try Tomorrow',
+        ],
+        prefer_catalog_url=True,
+        login_url="https://glados.rocks/login",
+        kind="glados",
+    ),
+    # yunzhi(yunzhi.play.cn 云智手机「今日登录福利」赠 2 天云机空间权益)—— 2026-10-01 接入。
+    # 纯 RPC 流程(2026-10-01 抓包逆向):页面内 fetch 调 yunzhi.new-gm.cn API,
+    # HMAC-SHA256 头签名 + MD5 体签名;复用 9222 profile 的 cloud_phone_token 登录态。
+    _B(
+        "yunzhi",
+        "https://yunzhi.play.cn/ai/?channel_code=00000042",
+        signs=[
+            'text=开心收下',
+            'text=立即领取',
+        ],
+        already=[
+            'text=今日已领取',
+            'text=明天再来',
+        ],
+        prefer_catalog_url=True,
+        login_url="https://yunzhi.play.cn/ai/#/login",
+        kind="yunzhi",
+    ),
 ]
 
 
@@ -1266,6 +1377,7 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             already=list(already) if already is not None else None,
             ready_rounds=rr,
             prefer_catalog_url=bool(entry.get("prefer_catalog_url", False)),
+            login_url=str(entry.get("login_url", "") or ""),
         )
     if kind == "abnt":
         # api.abnt.it(Aether API)尊属 abnt_checkin 流程:kind 必须透传,否则落 browser
@@ -1287,6 +1399,15 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             ready_rounds=rr,
             kind="relayfor",
         )
+    if kind == "relayfor_go":
+        # relayfor.xyz (RelayFor Go 会员每日签到) 独立任务流程
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else None,
+            already=list(already) if already is not None else None,
+            ready_rounds=rr,
+            kind="relayfor_go",
+        )
     if kind == "darkforger":
         # welfare.darkforger.com 专属 darkforger_checkin 流程:
         # Turnstile + Web Worker PoW (SHA-256) 验证码求解与签到落账。
@@ -1307,6 +1428,75 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             ready_rounds=rr,
             prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
             kind="pool",
+        )
+    if kind == "sub2api":
+        # sub2api.0api.cc.cd 专属 sub2api_checkin 流程:进入 /custom/activity
+        # 定位 operations-ui iframe 并点击 #checkin 立即签到。
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else None,
+            already=list(already) if already is not None else None,
+            ready_rounds=rr,
+            prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
+            login_url=str(entry.get("login_url", "") or ""),
+            kind="sub2api",
+        )
+    if kind == "xmiaom":
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else ['button:has-text("立即签到")'],
+            already=list(already) if already is not None else [
+                'button:has-text("已签到")',
+                'text=今日已签到',
+                'text="今日已签到"',
+                'text=已签到',
+                'text="已签到"',
+                'text=签到成功',
+            ],
+            ready_rounds=rr,
+            prefer_catalog_url=True,
+            login_url=str(entry.get("login_url", "") or "https://ai.xmiaom.com/sign-in"),
+            kind="xmiaom",
+        )
+    if kind == "glados":
+        # glados.rocks/console/checkin 专属 glados_checkin 流程:
+        # 避免 Daily Punch 日历图例常驻 "Checked in" 触发泛文本假阳性，
+        # 结合 /api/user/points 今日记录与 button.checkin-cute-btn 精准判定。
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else [
+                'button.checkin-cute-btn:not(.is-done)',
+                'button.checkin-cute-btn:has-text("签到")',
+                'button.checkin-cute-btn:has-text("Checkin")',
+            ],
+            already=list(already) if already is not None else [
+                'button.checkin-cute-btn.is-done',
+                'text=Checkin! Got',
+                'text=Return tomorrow',
+                'text=Please Try Tomorrow',
+            ],
+            ready_rounds=rr,
+            prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
+            login_url=str(entry.get("login_url", "") or "https://glados.rocks/login"),
+            kind="glados",
+        )
+    if kind == "yunzhi":
+        # yunzhi.play.cn 云智手机专属 yunzhi_checkin 纯 RPC 流程(2026-10-01):
+        # 「今日登录福利」弹窗领卡 + benefit/claim 开通云机空间,页面内 fetch。
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else [
+                'text=开心收下',
+                'text=立即领取',
+            ],
+            already=list(already) if already is not None else [
+                'text=今日已领取',
+                'text=明天再来',
+            ],
+            ready_rounds=rr,
+            prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
+            login_url=str(entry.get("login_url", "") or "https://yunzhi.play.cn/ai/#/login"),
+            kind="yunzhi",
         )
     # browser (default)
     return _B(
@@ -2506,7 +2696,8 @@ def classify_page_block(text: str, url: str = "") -> tuple[str, str] | None:
     ):
         return "blocked", (text or "access blocked")[:120]
     if re.search(
-        r"error code\s*(?:50[234]|52[124])|bad gateway|service unavailable|"
+        r"error\s*(?:code\s*)?(?:50[234]|52[124]|10\d{2})|cloudflare tunnel error|"
+        r"bad gateway|service unavailable|"
         r"gateway timeout|connection timed out|web server is down",
         blob,
     ):
@@ -3671,6 +3862,11 @@ async def try_linuxdo_sso(page, origin_host: str = "", browser=None) -> str:
                         pass
                 continue
 
+            if hasattr(active, "is_closed") and active.is_closed():
+                if active is not page:
+                    active = page
+                continue
+
             lower_url = url.lower()
             elapsed = time.monotonic() - click_t0
 
@@ -3713,17 +3909,24 @@ async def try_linuxdo_sso(page, origin_host: str = "", browser=None) -> str:
                     return "OK"
                 continue
 
+            parsed_path = ""
+            try:
+                parsed_path = urlparse(lower_url).path
+            except Exception:
+                pass
+            is_login_path = any(s in parsed_path for s in ("/sign-in", "/signin", "/login", "/auth"))
+
             if any(k in text for k in ("退出登录", "退出", "登出", "Logout", "个人中心", "钱包管理")):
-                if not looks_logged_out(text):
+                if text and not looks_logged_out(text) and not is_login_path:
                     remain = MIN_DWELL_AFTER_SSO_CLICK_S - (time.monotonic() - click_t0)
                     if remain > 0:
                         await asyncio.sleep(remain)
                     return "OK"
 
-            if not looks_logged_out(text) and any(
-                k in lower_url for k in ("profile", "console", "personal", "wallet", "check-in", "checkin", "dashboard")
+            if text and not looks_logged_out(text) and not is_login_path and any(
+                k in parsed_path for k in ("profile", "console", "personal", "wallet", "check-in", "checkin", "dashboard")
             ):
-                if saw_linuxdo or authorize_clicks or (_sso_origin_matches(origin_host, lower_url) and "/login" not in lower_url):
+                if saw_linuxdo or authorize_clicks or (_sso_origin_matches(origin_host, lower_url) and not is_login_path):
                     remain = MIN_DWELL_AFTER_SSO_CLICK_S - (time.monotonic() - click_t0)
                     if remain > 0:
                         await asyncio.sleep(remain)
@@ -5608,43 +5811,56 @@ async def ultrarouter_checkin(page, adapter: SiteAdapter, browser=None) -> Check
 
     2026-09-16 更新:该站 GitHub OAuth 已被站方移除(/sign-in 只剩
     「使用 LinuxDo 继续」,/auth/github 返回 404),站点账号 your_github(GitHub)
-    已无法再登录;因此删除双账号流程,只保留唯一入口 LinuxDo -> yourhandle。
+    已无法再登录;因此删除双账号流程,只保留唯一入口 LinuxDo。
 
-    流程:
-      1) 清 session cookie(登出,只清 ultrarouter.org 域,不碰其它站)。
-      2) goto /sign-in -> 点「使用 Linux Do 继续」-> try_linuxdo_sso 回跳 ->
-         /profile 点「立即签到」-> 确认签到 -> OK/ALREADY。
+    2026-09-21:与其它 New API 站对齐——优先复用 9222 已有登录态,直接在
+    /profile 点「立即签到」。强制 CDP 删 cookie 再 SSO 会把已登录会话打到
+    /sign-in(无 LinuxDo 按钮 → NO_BUTTON),且 /profile 现文案是 @mangoqwq
+    不是旧的 @yourhandle(→ WRONG_ACCOUNT(none))。仅确认未登录才走 SSO。
 
-    ⚠️ 登出**只清 ultrarouter.org 域**的 session cookie,绝不用
+    若必须登出,只清 ultrarouter.org 域 cookie,绝不用
      BrowserContext.clear_cookies()(共享 9222 profile,全清会破坏 GitHub + 其他站
      session —— P0 红线,见运维手册「P0:共享 9222 profile 的 Cookie 全清禁令」)。
     """
     kind = adapter.kind or "ultrarouter"
     print(f"  ultrarouter flow: {adapter.name}", flush=True)
 
-    # 清该站 session cookie 落至未登录态(只清本域,P0 红线)。
-    await _ultrarouter_clear_session(page, browser)
+    await _ultrarouter_close_stale_tabs(page, browser)
+    await _ultrarouter_goto_profile(page, adapter)
+    cf = await wait_out_cloudflare(page, CF_WAIT_S)
+    if cf:
+        return fail_result("CLOUDFLARE", adapter=kind, stage="login")
+    await dismiss_obstructing_dialogs(page)
 
-    # 账号 LinuxDo(mango_qwq)：唯一登录入口。
+    if await _ultrarouter_session_ready(page):
+        print("  ultrarouter: reuse existing session, skip SSO", flush=True)
+        return await _ultrarouter_signin_current(page, adapter)
+
     ld_page, g2 = await _ultrarouter_oauth_login(
         page, adapter, browser
     )
+    authed = ld_page or page
     if g2 != "OK":
+        await _ultrarouter_goto_profile(authed, adapter)
+        if await _ultrarouter_session_ready(authed):
+            print(f"  ultrarouter: login {g2} but session ready, sign in", flush=True)
+            return await _ultrarouter_signin_current(authed, adapter)
         return fail_result(
             g2,
             detail=f"ultrarouter linuxdo login {g2}",
             adapter=kind, stage="login",
         )
-    res = await _ultrarouter_signin_current(ld_page or page, adapter)
+    res = await _ultrarouter_signin_current(authed, adapter)
     return res
 
 
 # ---- ultrarouter 专属常量与辅助 ----------------
 ULTRAROUTER_SITE_URL = "https://ultrarouter.org/"
 ULTRAROUTER_SIGNIN_URL = "https://ultrarouter.org/sign-in"
-# 该 clone 实测:登录态 session cookie 名是 session(path=/),非 New API 系通用的
-# new_api_refresh(path=/api/user/auth)。删错名字则登出无效 /sign-in 仍带登录态.
-ULTRAROUTER_SESSION_COOKIE = "session"
+# 2026-09-21 9222 实况:登录态 cookie 是 new_api_has_session(path=/),不是旧的
+# session,也不是 New API 通用的 new_api_refresh(path=/api/user/auth)。
+# 删错名字则登出无效,/sign-in 仍带登录态 → 无 LinuxDo CTA → NO_BUTTON。
+ULTRAROUTER_SESSION_COOKIE = "new_api_has_session"
 ULTRAROUTER_SESSION_COOKIE_PATH = "/"
 ULTRAROUTER_OAUTH_RETURN_S = 2.5
 
@@ -5670,7 +5886,8 @@ async def _ultrarouter_clear_session(page, browser) -> bool:
     """清掉 ultrarouter 域 session cookie → 登出该账号(把 New API 系通用原语换成本 clone 的 cookie 名)。
 
     只清 ultrarouter.org 域这一个 cookie(P0 红线)。用 CDP Network.deleteCookies
-    精确删单条 cookie(本 clone 是 session@/,非 new_api_refresh)。返回是否成功(幂等)。"""
+    精确删单条 cookie(本 clone 是 new_api_has_session@/,非 new_api_refresh)。
+    返回是否成功(幂等)。"""
     return await _clear_newapi_session(
         page, browser, domain="ultrarouter.org", label="ultrarouter",
         cookie_name=ULTRAROUTER_SESSION_COOKIE,
@@ -5848,18 +6065,40 @@ async def _ultrarouter_find_callback_tab(page, browser=None):
 
 
 def _ultrarouter_profile_account_page_text(txt: str) -> str:
-    # 实测 ultrarouter /profile 把绑定信息分行展示:账号名(@yourhandle)单独一行,
-    # 下方「LinuxDO」「已绑定」两行。用子串 + 独立 token 判定:
-    #   linuxdo: @yourhandle / LinuxDO(token, 非 GitHub) 且出现已绑定;
-    #   github: GitHub 绑定相关(该站当前 github_oauth=false,理论上不会命中,
-    #           但若未来重开则能准确识别)。
+    # 实测 ultrarouter /profile 把绑定信息分行展示。
+    # 2026-09-07:@yourhandle + LinuxDO/已绑定 各占一行。
+    # 2026-09-21 9222 实况:不再展示 LinuxDO 字样,账号行是 @mangoqwq。
+    # 旧检测只认 @yourhandle/LinuxDO → SSO 成功后仍 WRONG_ACCOUNT(none)。
     if "privaterelay.linux.do" in txt:
         return "linuxdo"
-    if ("@yourhandle" in txt or "LinuxDO" in txt or "Linux Do" in txt):
+    if "@yourhandle" in txt or "@mangoqwq" in txt or "LinuxDO" in txt or "Linux Do" in txt:
         return "linuxdo"
-    if "GitHub 已绑定" in txt or "GitHub" in txt and "OAuth" in txt:
+    if "GitHub 已绑定" in txt or ("GitHub" in txt and "OAuth" in txt):
         return "github"
+    if re.search(r"@[A-Za-z0-9_.-]+", txt) and any(
+        k in txt for k in ("用户 ID", "立即签到", "累计签到", "已签到")
+    ):
+        return "linuxdo"
     return ""
+
+
+async def _ultrarouter_session_ready(page) -> bool:
+    """9222 已有 ultrarouter 登录态、可直接点签到(对齐其它 New API 站)。"""
+    try:
+        url = (await page_url(page) or "").lower()
+        text = await page_text(page, 4000)
+    except Exception:
+        return False
+    if any(p in url for p in ("/sign-in", "/signin", "/login", "/oauth/")):
+        return False
+    if looks_logged_out(text):
+        return False
+    if _ultrarouter_profile_account_page_text(text):
+        return True
+    if "立即签到" in text or any(ind in text for ind in ULTRAROUTER_DONE_INDICATORS):
+        if any(k in text for k in ("用户 ID", "累计签到", "本月获得", "当前余额")):
+            return True
+    return False
 
 
 async def _ultrarouter_profile_account(page) -> str:
@@ -5888,6 +6127,32 @@ async def _ultrarouter_close_stale_tabs(page, browser=None):
                 except Exception:
                     pass
 
+async def _ultrarouter_wait_hydrated(page, timeout_s: float = 8.0) -> bool:
+    """等 /profile 主栏 hydrate。SPA 壳(侧栏+语言偏好)先出,wait_text_ready 会过早返回。
+
+    2026-09-21 9222 实证:wait_text_ready 后 1s 才出现 @mangoqwq / 立即签到;
+    未等 hydrate 就判未登录,去 /sign-in 会被已登录会话重定向到
+    /dashboard/overview(无 LinuxDo CTA)→ NO_BUTTON。
+    登录卡或 /sign-in 视为终态,立刻返回 False。
+    """
+    deadline = time.monotonic() + float(timeout_s)
+    while True:
+        if await _ultrarouter_session_ready(page):
+            return True
+        try:
+            url = (await page_url(page) or "").lower()
+            text = await page_text(page, 1500)
+        except Exception:
+            url, text = "", ""
+        if any(p in url for p in ("/sign-in", "/signin", "/login", "/oauth/")):
+            return False
+        if looks_logged_out(text):
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.5)
+
+
 async def _ultrarouter_goto_profile(page, adapter) -> bool:
     try:
         await page.goto(ULTRAROUTER_SITE_URL + "profile", wait_until="commit", timeout=GOTO_TIMEOUT_MS)
@@ -5898,6 +6163,7 @@ async def _ultrarouter_goto_profile(page, adapter) -> bool:
     except Exception:
         rnd = 10
     await wait_text_ready(page, 30, rnd)
+    await _ultrarouter_wait_hydrated(page)
     try:
         return "profile" in (await page_url(page)) or "签到" in (await page_text(page, 300))
     except Exception:
@@ -5998,6 +6264,10 @@ async def _abnt_sign_current(page, adapter) -> CheckinResult:
         text0 = await page_text(page, 4000)
     except Exception:
         text0 = ""
+    block0 = classify_page_block(text0, page.url or "")
+    if block0:
+        reason, detail = block0
+        return fail_result(reason, detail=detail, adapter=kind)
     has_done = any(ind in text0 for ind in ABNT_DONE_INDICATORS)
     if has_done:
         return confirmed_done_result("abnt already checked in on /profile", adapter="abnt")
@@ -6075,6 +6345,10 @@ async def abnt_checkin(page, adapter, browser=None) -> CheckinResult:
     await dismiss_obstructing_dialogs(page)
 
     txt0 = await page_text(page, 600)
+    block0 = classify_page_block(txt0, page.url or "")
+    if block0:
+        reason, detail = block0
+        return fail_result(reason, detail=detail, adapter=kind)
     u0 = (page.url or "").lower()
     is_authed = not looks_logged_out(txt0) and not any(s in u0 for s in ("/sign-in", "/signin", "/login"))
 
@@ -6128,23 +6402,42 @@ async def abnt_checkin(page, adapter, browser=None) -> CheckinResult:
 
 RELAYFOR_URL = "https://relayfor.xyz/console/#benefits"
 RELAYFOR_BORROW_SELECTORS = [
+    '[data-token-loan-borrow-form] button[type="submit"]',
     'button:has-text("确认借款")',
     'button:has-text("确认借贷")',
     'button:has-text("立即借款")',
 ]
 RELAYFOR_REPAY_SELECTORS = [
+    'button[data-token-loan-checkin]',
     'button:has-text("今日签到还款")',
     'button:has-text("今日还款")',
     'button:has-text("签到还款")',
 ]
-# 已处理 / 完结态:按钮禁用(disabled)或页面出现这些文案。
-RELAYFOR_DONE_INDICATORS = ("已还清", "今日已处理", "已提完", "已签到", "签到成功")
+RELAYFOR_CAMPAIGN_SELECTORS = [
+    'button[data-checkin-claim]',
+    '[data-user-checkin-section] button:has-text("立即签到")',
+    'button:has-text("立即签到")',
+]
+# 已处理 / 完结态专属文案(严格排除全页宽泛的「已签到/签到成功」,避免活动等卡片污染词元贷状态)
+RELAYFOR_DONE_INDICATORS = ("已还清", "今日已处理", "已提完")
 
 
 def is_relayfor_site(site_url: str) -> bool:
     """relayfor.xyz 专属站判定."""
     u = (site_url or "").lower()
     return "relayfor.xyz" in u
+
+
+def is_relayfor_name(name: str) -> bool:
+    """relayfor 站点名称判定."""
+    n = (name or "").lower()
+    return "relayfor" in n
+
+
+def is_relayfor_go_name(name: str) -> bool:
+    """relayfor-go (RelayFor Go 会员每日签到) 独立任务判定."""
+    n = (name or "").lower()
+    return "relayfor" in n and ("go" in n or "会员" in n)
 
 
 async def _relayfor_pick_visible(page, sel: str):
@@ -6164,16 +6457,17 @@ async def _relayfor_pick_visible(page, sel: str):
     for i in range(min(n, 20)):
         loc = loc_all.nth(i)
         try:
-            if await loc.is_visible(timeout=400) and not await loc.is_disabled():
+            if await loc.is_visible(timeout=300) and not await loc.is_disabled():
                 return loc
         except Exception:
             continue
-    try:
-        loc = page.locator(sel).first
-        if await loc.is_visible(timeout=400) and not await loc.is_disabled():
-            return loc
-    except Exception:
-        return None
+    if n == 0:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=300) and not await loc.is_disabled():
+                return loc
+        except Exception:
+            return None
     return None
 
 
@@ -6205,7 +6499,7 @@ async def _relayfor_today_done(page) -> bool:
     预告),仅按「动作按钮优先」会误点借款。完结态按钮存在时必须先于借/还
     决策返回 ALREADY。
     """
-    for sel in ('button:has-text("今日已签到")', 'button:has-text("已还清")'):
+    for sel in ('button:has-text("今日已签到")', 'button:has-text("已还清")', 'button[data-token-loan-checkin][disabled]'):
         try:
             loc_all = page.locator(sel)
             n = await loc_all.count()
@@ -6214,7 +6508,7 @@ async def _relayfor_today_done(page) -> bool:
         for i in range(min(n, 20)):
             try:
                 loc = loc_all.nth(i)
-                if await loc.is_visible(timeout=300) and await loc.is_disabled():
+                if await loc.is_visible(timeout=200) and await loc.is_disabled():
                     return True
             except Exception:
                 continue
@@ -6222,7 +6516,7 @@ async def _relayfor_today_done(page) -> bool:
         if n == 0:
             try:
                 loc = page.locator(sel).first
-                if await loc.is_visible(timeout=400) and await loc.is_disabled():
+                if await loc.is_visible(timeout=200) and await loc.is_disabled():
                     return True
             except Exception:
                 continue
@@ -6232,10 +6526,36 @@ async def _relayfor_today_done(page) -> bool:
 async def _relayfor_done_state(page) -> str:
     """页面是否呈现"已处理"态;命中返回信号串,否则 ''.
 
-    该信号**只**在借/还两按钮都不可用时才会让 handler 走 ALREADY(见轮询后决策);
-    所以即便页面别处出现「已签到/签到成功」等泛文案,只要真正可借/可还的按钮在,
-    就不会误判已处理。保留 DOM 级文案扫描即够,不需放进计数。
+    针对词元贷卡片与专属文案做精准判据:
+    1. 优先读取 DOM 级 [data-token-loan-card] 的 status/button/remaining;
+    2. 兜底扫描 RELAYFOR_DONE_INDICATORS ("已还清", "今日已处理", "已提完");
+    绝不扫描全页宽泛的「已签到/签到成功」,防限时签到活动卡片引发假阳性。
     """
+    try:
+        card_info = await page.evaluate("""() => {
+            const card = document.querySelector("[data-token-loan-card]");
+            if (!card) return null;
+            const btn = card.querySelector("[data-token-loan-checkin]");
+            const status = card.querySelector("[data-token-loan-status]");
+            const remaining = card.querySelector("[data-token-loan-remaining]");
+            return {
+                hidden: card.classList.contains("hidden"),
+                btn_disabled: btn ? Boolean(btn.disabled) : false,
+                btn_text: btn ? btn.textContent.trim() : "",
+                status_text: status ? status.textContent.trim() : "",
+                remaining_text: remaining ? remaining.textContent.trim() : "",
+            };
+        }""")
+        if card_info and isinstance(card_info, dict):
+            if card_info.get("btn_disabled") and "今日已签到" in card_info.get("btn_text", ""):
+                return "btn:今日已签到"
+            if "今日已签到" in card_info.get("status_text", ""):
+                return "status:今日已签到"
+            if "已还清" in card_info.get("remaining_text", ""):
+                return "remaining:已还清"
+    except Exception:
+        pass
+
     try:
         text = await page_text(page, 1500)
     except Exception:
@@ -6306,8 +6626,47 @@ def _relayfor_confirm_after(which: str, before: str, after: str) -> bool:
     return False
 
 
+async def _ensure_relayfor_benefits_panel(page):
+    """确保处于 #benefits 视图面板(SPA 路由)并等待 resource-loader 完成."""
+    panel_ready = False
+    for _ in range(8):
+        try:
+            active = await page.evaluate(
+                "() => Boolean(document.querySelector('[data-panel=\"benefits\"]')?.classList.contains('active'))"
+            )
+            if active:
+                panel_ready = True
+                break
+        except Exception:
+            panel_ready = True
+            break
+        await asyncio.sleep(0.4)
+
+    if not panel_ready:
+        try:
+            nav_loc = page.locator('.nav-item[data-nav="benefits"], [data-nav="benefits"]:not(.hidden)').first
+            if await nav_loc.is_visible(timeout=800):
+                await nav_loc.click(timeout=1000)
+        except Exception:
+            pass
+
+    try:
+        saw_busy = False
+        for _ in range(16):
+            busy = await page.evaluate(
+                "() => document.querySelector('[data-panel=\"benefits\"]')?.getAttribute('aria-busy')"
+            )
+            if busy == "true":
+                saw_busy = True
+            elif saw_busy and busy != "true":
+                break
+            await asyncio.sleep(0.4)
+    except Exception:
+        pass
+
+
 async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
-    """relayfor.xyz 词元贷每日自动借/还:按 DOM 自判借/还/已处理。复用登录态,不配账密。"""
+    """relayfor.xyz 词元贷每日自动借/还 + 限时签到活动:按 DOM 自判借/还/已处理。复用登录态,不配账密。"""
     kind = adapter.kind or "relayfor"
     print(f"  relayfor flow: {adapter.name}", flush=True)
 
@@ -6325,27 +6684,71 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
         return fail_result("cloudflare", adapter=kind)
     await dismiss_obstructing_dialogs(page)
 
-    # SPA 渲染借/还按钮有一定时延:轮询等待任一动作按钮挂载,不要被「已还清/已签到」等
-    # 既有文案(它们既可能是借款前状态,也可能是已处理态)提前 break——否则借款日第 1 轮
-    # 就可能把尚未渲染出来的「确认借款」当成不存在而误判 ALREADY。因此动作按钮优先,
-    # done 只是 deadline 到来后仍无动作按钮时的兜底(见下)。
-    deadline = time.monotonic() + SIGN_WAIT_S
+    # 1. 确保处于 #benefits 视图面板(SPA 路由)
+    await _ensure_relayfor_benefits_panel(page)
+
+    # 2. 轮询等待动作按钮挂载 (兼顾限时活动签到与词元贷借/还)
+    deadline = time.monotonic() + max(SIGN_WAIT_S, 12.0)
     action_sel = None
+    campaign_sel = None
     done = ""
     while True:
+        if not campaign_sel:
+            campaign_sel = await _relayfor_available_button(page, RELAYFOR_CAMPAIGN_SELECTORS)
         borrow = await _relayfor_available_button(page, RELAYFOR_BORROW_SELECTORS)
         repay = await _relayfor_available_button(page, RELAYFOR_REPAY_SELECTORS)
         if borrow or repay:
             action_sel = borrow or repay
+
+        if campaign_sel or action_sel:
             break
         done = await _relayfor_done_state(page)
+        if await _relayfor_today_done(page):
+            break
         if time.monotonic() >= deadline:
             break
         await asyncio.sleep(0.5)
 
-    # 决策:今日完结态优先(「今日已签到」disabled 按钮在位 → 已处理),
-    # 其次动作按钮(借款 > 还款),都不可见才回退到 done(已处理态)兜底。
-    if await _relayfor_today_done(page):
+    actions_executed = []
+    action_evidence = None
+
+    # 3. 执行限时活动签到 (循环点击所有未领取的活动/会员签到, 覆盖 RelayFor Checkin、RelayFor Go 等多活动)
+    seen_claims = set()
+    for _ in range(5):
+        c_sel = await _relayfor_available_button(page, RELAYFOR_CAMPAIGN_SELECTORS)
+        if not c_sel:
+            break
+        try:
+            loc = await _relayfor_pick_visible(page, c_sel)
+            if loc is None:
+                loc = page.locator(c_sel).first
+            claim_attr = c_sel
+            if hasattr(loc, "get_attribute"):
+                try:
+                    claim_attr = (await loc.get_attribute("data-checkin-claim")) or c_sel
+                except Exception:
+                    pass
+            if claim_attr in seen_claims:
+                break
+            seen_claims.add(claim_attr)
+
+            print(f"  relayfor: clicking campaign claim ({claim_attr})...", flush=True)
+            await loc.click(timeout=5000, force=True)
+            action_evidence = ActionEvidence(
+                kind="native_click" if adapter.use_native_click else "dom_click",
+                target=f"button[data-checkin-claim='{claim_attr}']",
+                attempted_at=datetime.now().isoformat(timespec="seconds"),
+            )
+            await asyncio.sleep(1.5)
+            actions_executed.append("活动签到成功")
+        except Exception as e:
+            print(f"  ! relayfor campaign claim click: {e}", flush=True)
+            break
+
+    # 5. 今日完结态优先:当日还款后页面仍可能预告「确认借款」按钮,
+    # 「今日已签到」disabled 按钮在位时必须先于借款返回(2026-09-19 实证)
+    today_done = await _relayfor_today_done(page)
+    if not actions_executed and today_done:
         return ok_result(
             "ALREADY",
             adapter=kind,
@@ -6357,76 +6760,303 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
             transition="NONE",
             attribution="precheck",
         )
-    if action_sel is None:
-        if done:
-            return ok_result(
-                "ALREADY",
+
+    # 6. 若未完结且有借/还动作按钮未解析,重新抓取一次(可能在活动签到后挂载)
+    if not today_done and not action_sel:
+        borrow = await _relayfor_available_button(page, RELAYFOR_BORROW_SELECTORS)
+        repay = await _relayfor_available_button(page, RELAYFOR_REPAY_SELECTORS)
+        if borrow or repay:
+            action_sel = borrow or repay
+
+    # 7. 执行词元贷借款 / 还款
+    if not today_done and action_sel:
+        is_borrow = any(bs in action_sel for bs in RELAYFOR_BORROW_SELECTORS)
+        which = "借款" if is_borrow else "还款"
+        action = ActionEvidence(
+            kind="native_click" if adapter.use_native_click else "dom_click",
+            target=action_sel,
+            attempted_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        before = await page_text(page, RELAYFOR_TEXT_WINDOW)
+
+        try:
+            target_loc = await _relayfor_pick_visible(page, action_sel)
+            if target_loc is None:
+                target_loc = page.locator(action_sel).first
+            await target_loc.click(timeout=5000, force=True)
+        except Exception as exc:
+            return fail_result("no_click", detail=f"relayfor 点击{which}失败: {exc}", adapter=kind, action=action)
+
+        confirm_deadline = time.monotonic() + 4.0
+        confirmed = False
+        while time.monotonic() < confirm_deadline:
+            await asyncio.sleep(0.8)
+            after = await _try_page_text(page, RELAYFOR_TEXT_WINDOW)
+            if _relayfor_confirm_after(which, before, after):
+                confirmed = True
+                break
+        if not confirmed:
+            return fail_result(
+                "no_confirm",
+                detail=f"relayfor 点击{which}后未见落账变化",
                 adapter=kind,
-                detail=f"relayfor 今日已处理 ({done})",
-                action=ActionEvidence(kind="none"),
-                confirmation=dom_confirmation(done, done_state=True),
-                pre_state="DONE",
-                post_state="DONE",
-                transition="NONE",
-                attribution="precheck",
+                action=action,
             )
+        actions_executed.append(f"{which}成功")
+        action_evidence = action
+
+    # 7. 若执行了任何动作，直接返回 OK
+    if actions_executed:
+        detail_msg = "relayfor " + ", ".join(actions_executed)
+        return ok_result(
+            "OK",
+            adapter=kind,
+            detail=detail_msg,
+            action=action_evidence or ActionEvidence(kind="none"),
+            confirmation=dom_confirmation(detail_msg, done_state=True),
+            pre_state="PENDING",
+            post_state="DONE",
+            transition="PENDING_TO_DONE",
+            attribution="runner",
+        )
+
+    # 8. 没有动作按钮时：检查已处理态
+    if done:
         return ok_result(
             "ALREADY",
-            detail="relayfor 无可借/无待还(词元贷已处理)",
             adapter=kind,
-            confirmation=dom_confirmation("词元贷已处理", done_state=True),
+            detail=f"relayfor 今日已处理 ({done})",
+            action=ActionEvidence(kind="none"),
+            confirmation=dom_confirmation(done, done_state=True),
             pre_state="DONE",
             post_state="DONE",
             transition="NONE",
             attribution="precheck",
         )
-    is_borrow = any(bs in action_sel for bs in RELAYFOR_BORROW_SELECTORS)
-    which = "借款" if is_borrow else "还款"
-    action = ActionEvidence(
-        kind="native_click" if adapter.use_native_click else "dom_click",
-        target=action_sel,
-        attempted_at=datetime.now().isoformat(timespec="seconds"),
-    )
-    # 点击前快照:用于借/还确认做「前后对比」,避免把页面本就存在的待还/还款
-    # 文案当成点击成功的证据(见 P2b)。
-    before = await page_text(page, RELAYFOR_TEXT_WINDOW)
 
+    # 9. 检查词元贷卡片是否已结清或隐藏(通过 DOM 属性与 status)
+    card_settled = False
     try:
-        target_loc = await _relayfor_pick_visible(page, action_sel)
-        if target_loc is None:
-            target_loc = page.locator(action_sel).first
-        await target_loc.click(timeout=5000, force=True)
-    except Exception as exc:
-        return fail_result("no_click", detail=f"relayfor 点击{which}失败: {exc}", adapter=kind, action=action)
+        card_settled = await page.evaluate("""() => {
+            const card = document.querySelector("[data-token-loan-card]");
+            if (!card) return true;
+            if (card.classList.contains("hidden")) return true;
+            const remaining = document.querySelector("[data-token-loan-remaining]")?.textContent || "";
+            return remaining.includes("已还清");
+        }""")
+    except Exception:
+        card_settled = False
 
-    # 等结果落账:借 → 待还金额出现/变化;还 → 已还/还清/待还消失。用「前后对比」
-    # + 有界重试(最多 4s)拿确认,拿不到才判 no_confirm(对齐 abnt 的确认门)。
-    deadline = time.monotonic() + 4.0
-    confirmed = False
-    while time.monotonic() < deadline:
-        await asyncio.sleep(0.8)
-        after = await _try_page_text(page, RELAYFOR_TEXT_WINDOW)
-        if _relayfor_confirm_after(which, before, after):
-            confirmed = True
-            break
-    if not confirmed:
-        return fail_result(
-            "no_confirm",
-            detail=f"relayfor 点击{which}后未见落账变化",
+    if card_settled:
+        return ok_result(
+            "ALREADY",
+            detail="relayfor 无可借/无待还(词元贷已结清)",
             adapter=kind,
-            action=action,
+            confirmation=dom_confirmation("词元贷已结清", done_state=True),
+            pre_state="DONE",
+            post_state="DONE",
+            transition="NONE",
+            attribution="precheck",
         )
 
-    return ok_result(
-        "OK",
+    # 10. 既无可操作按钮，又无任何已处理/结清证据 → 判定为 no_button，不再静默假阳性 ALREADY
+    return fail_result(
+        "no_button",
+        detail="relayfor 未找到借/还按钮且未见已处理证据",
         adapter=kind,
-        detail=f"relayfor {which}成功",
-        action=action,
-        confirmation=dom_confirmation(f"{which}成功", done_state=True),
-        pre_state="PENDING",
-        post_state="DONE",
-        transition="PENDING_TO_DONE",
-        attribution="runner",
+    )
+
+
+async def relayfor_go_checkin(page, adapter, browser=None) -> CheckinResult:
+    """RelayFor Go 会员限时活动专属签到 (每天领取 1 天 Go 套餐会员).
+
+    页面: https://relayfor.xyz/console/#benefits
+    卡片: .checkin-user-card (标题含 Go / 会员)
+    按钮: button[data-checkin-claim] (立即签到)
+    完结态: .tag.success / 包含「已签到」「已补签」
+    """
+    kind = adapter.kind or "relayfor_go"
+    print(f"  relayfor-go flow: {adapter.name}", flush=True)
+
+    try:
+        await page.goto(RELAYFOR_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception:
+        pass
+    try:
+        await wait_text_ready(page, 30, max(adapter.ready_rounds, 10))
+    except Exception:
+        pass
+
+    cf = await wait_out_cloudflare(page, CF_WAIT_S)
+    if cf:
+        return fail_result("cloudflare", adapter=kind)
+    await dismiss_obstructing_dialogs(page)
+
+    # 1. 确保处于 #benefits 视图面板
+    await _ensure_relayfor_benefits_panel(page)
+
+    # 2. 轮询查找 Go 会员活动卡片与状态
+    deadline = time.monotonic() + max(SIGN_WAIT_S, 10.0)
+    go_status = None
+    while time.monotonic() < deadline:
+        try:
+            go_status = await page.evaluate("""() => {
+                const cards = Array.from(document.querySelectorAll('.checkin-user-card'));
+                const goCard = cards.find(c => {
+                    const title = c.querySelector('.md-card-title')?.textContent || '';
+                    return title.includes('Go') || title.includes('会员');
+                });
+                if (!goCard) return { found: false };
+                const claimBtns = Array.from(goCard.querySelectorAll('button[data-checkin-claim], button.md-btn'))
+                    .filter(b => !b.disabled && (b.textContent.includes('立即签到') || b.textContent.includes('补签') || b.hasAttribute('data-checkin-claim')));
+                const successTags = Array.from(goCard.querySelectorAll('.tag.success'))
+                    .map(t => t.textContent.trim());
+                const isDone = claimBtns.length === 0 && successTags.some(t => t.includes('已签到') || t.includes('已补签'));
+                return {
+                    found: true,
+                    hasBtn: claimBtns.length > 0,
+                    btnCount: claimBtns.length,
+                    isDone: isDone,
+                    tagText: successTags.join(', ') || '',
+                };
+            }""")
+            if go_status and (go_status.get("hasBtn") or go_status.get("isDone")):
+                break
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
+    if not go_status or not go_status.get("found"):
+        # 检查是否因未登录
+        try:
+            is_login = await page.evaluate("() => Boolean(document.querySelector('form.login-form, input[type=\"password\"]'))")
+            if is_login:
+                return fail_result("login_required", detail="relayfor 登录失效，需重新登录", adapter=kind)
+        except Exception:
+            pass
+        return fail_result(
+            "no_button",
+            detail="relayfor-go 未找到 Go 会员签到卡片",
+            adapter=kind,
+        )
+
+    # 3. 完结态优先 (无待领按钮且存在已签到/已补签标识)
+    if go_status.get("isDone") and not go_status.get("hasBtn"):
+        return ok_result(
+            "ALREADY",
+            adapter=kind,
+            detail=f"relayfor-go 今日已签到 ({go_status.get('tagText') or '已签到'})",
+            action=ActionEvidence(kind="none"),
+            confirmation=dom_confirmation("已签到", done_state=True),
+            pre_state="DONE",
+            post_state="DONE",
+            transition="NONE",
+            attribution="precheck",
+        )
+
+    # 4. 执行签到点击 (循环领取卡片内所有未领取的日期按钮, 如补签 + 今日签到)
+    actions_executed = []
+    action_evidence = None
+    seen_claims = set()
+
+    for _ in range(5):
+        btn_info = None
+        try:
+            btn_info = await page.evaluate("""() => {
+                const cards = Array.from(document.querySelectorAll('.checkin-user-card'));
+                const goCard = cards.find(c => {
+                    const title = c.querySelector('.md-card-title')?.textContent || '';
+                    return title.includes('Go') || title.includes('会员');
+                });
+                if (!goCard) return null;
+                const btn = goCard.querySelector('button[data-checkin-claim], button.md-btn:not([disabled])');
+                if (!btn || btn.disabled) return null;
+                return {
+                    claimAttr: btn.getAttribute('data-checkin-claim') || '',
+                    text: btn.textContent.trim(),
+                };
+            }""")
+        except Exception:
+            break
+
+        if not btn_info:
+            break
+
+        claim_attr = btn_info.get("claimAttr") or ""
+        claim_key = claim_attr or btn_info.get("text") or "go"
+        if claim_key in seen_claims:
+            break
+        seen_claims.add(claim_key)
+
+        btn_loc = None
+        if claim_attr:
+            btn_loc = page.locator(f'button[data-checkin-claim="{claim_attr}"]').first
+        else:
+            card_loc = page.locator('.checkin-user-card:has(.md-card-title:has-text("Go"))')
+            btn_loc = card_loc.locator('button[data-checkin-claim], button:has-text("立即签到"), button.md-btn').first
+
+        action = ActionEvidence(
+            kind="native_click" if adapter.use_native_click else "dom_click",
+            target=f"button[data-checkin-claim='{claim_attr}']" if claim_attr else "button:has-text('立即签到')",
+            attempted_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        action_evidence = action
+
+        try:
+            print(f"  relayfor-go: clicking claim ({claim_attr})...", flush=True)
+            await btn_loc.click(timeout=5000, force=True)
+            actions_executed.append(f"签到成功({claim_attr})" if claim_attr else "签到成功")
+            await asyncio.sleep(2.0)
+        except Exception as exc:
+            if not actions_executed:
+                return fail_result("no_click", detail=f"relayfor-go 点击立即签到失败: {exc}", adapter=kind, action=action)
+            break
+
+    # 5. 校验落账状态
+    if actions_executed:
+        detail_msg = f"relayfor-go {', '.join(actions_executed)}"
+        return ok_result(
+            "OK",
+            adapter=kind,
+            detail=detail_msg,
+            action=action_evidence or ActionEvidence(kind="none"),
+            confirmation=dom_confirmation("已签到", done_state=True),
+            pre_state="PENDING",
+            post_state="DONE",
+            transition="PENDING_TO_DONE",
+            attribution="runner",
+        )
+
+    # 6. 未执行任何动作且无按钮时确认已完成
+    try:
+        final_check = await page.evaluate("""() => {
+            const cards = Array.from(document.querySelectorAll('.checkin-user-card'));
+            const goCard = cards.find(c => c.querySelector('.md-card-title')?.textContent?.includes('Go'));
+            if (!goCard) return null;
+            const successTags = Array.from(goCard.querySelectorAll('.tag.success')).map(t => t.textContent.trim());
+            const hasBtn = Boolean(goCard.querySelector('button[data-checkin-claim]'));
+            return { hasBtn, successTags };
+        }""")
+        if final_check and not final_check.get("hasBtn") and final_check.get("successTags"):
+            return ok_result(
+                "ALREADY",
+                adapter=kind,
+                detail=f"relayfor-go 今日已签到 ({', '.join(final_check['successTags'])})",
+                action=ActionEvidence(kind="none"),
+                confirmation=dom_confirmation("已签到", done_state=True),
+                pre_state="DONE",
+                post_state="DONE",
+                transition="NONE",
+                attribution="precheck",
+            )
+    except Exception:
+        pass
+
+    return fail_result(
+        "no_confirm",
+        detail="relayfor-go 点击后未见已签到状态更新",
+        adapter=kind,
+        action=action_evidence,
     )
 
 
@@ -7293,6 +7923,12 @@ async def darkforger_checkin(page, adapter: SiteAdapter, browser=None) -> Checki
     await bypass_chrome_interstitial_if_needed(page)
     await wait_text_ready(page, 30, adapter.ready_rounds)
 
+    initial_text = await page_text(page, 2000)
+    block = classify_page_block(initial_text, page.url or "")
+    if block:
+        reason, detail = block
+        return fail_result(reason, detail=detail, adapter=kind)
+
     # 1. 检查是否未登录
     login_btn = page.locator('button:has-text("使用 Linux.do 登录"), a:has-text("使用 Linux.do 登录"), button:has-text("使用 Linux.do 开始")').first
     if await login_btn.count() > 0 and await login_btn.is_visible(timeout=1000):
@@ -7553,6 +8189,169 @@ async def pool_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResul
     )
 
 
+def is_sub2api_site(site_url: str) -> bool:
+    """sub2api.0api.cc.cd 专属站判定."""
+    u = (site_url or "").lower()
+    return "sub2api.0api.cc.cd" in u or ("sub2api" in u and "0api" in u)
+
+
+def is_sub2api_name(name: str) -> bool:
+    """sub2api 站点名称判定."""
+    return "sub2api" in (name or "").lower()
+
+
+async def sub2api_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """sub2api (sub2api.0api.cc.cd) 专属签到流程.
+
+    2026-09-25 接入:
+    纯账号密码站(在 签到公益站账密.md 注册)。
+    签到入口从 /profile 迁移至 /custom/activity，主页面通过 iframe 嵌入 /operations-ui/。
+    Playwright 顶层 locator 无法穿透 child iframe，因此必须:
+      1) 确保登录态(若未登录去 /login 执行纯账密登录，再前往 /custom/activity)。
+      2) 轮询等待 operations-ui iframe 加载完毕。
+      3) 在 iframe 内部定位 #checkin-badge 与 #checkin 按钮。
+      4) 判定已签态：badge 为「今日已签」或 #checkin 为 disabled 且文本含「今日已签到」-> ALREADY。
+      5) 未签：点击 #checkin「立即签到」，等待 toast 出现「签到成功」或 badge/button 状态变为「今日已签」-> OK。
+    严格遵守 P0: 复用 9222 共享 profile 登录态，禁止全清 Cookie。
+    """
+    kind = adapter.kind or "sub2api"
+    site_url = adapter.url or "https://sub2api.0api.cc.cd/custom/activity"
+    print(f"  sub2api flow: {adapter.name}", flush=True)
+
+    # 1. 确保登录态
+    if get_account_credential(adapter.name):
+        await _ensure_account_logged_in(page, adapter)
+
+    try:
+        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception:
+        pass
+    await bypass_chrome_interstitial_if_needed(page)
+    await wait_text_ready(page, 30, adapter.ready_rounds)
+
+    cur_url = (await page_url(page) or "").lower()
+    if "/login" in cur_url or await page.locator("input[type='password']").count() > 0:
+        print("  sub2api: redirected to login or password input visible, attempting login...", flush=True)
+        login_status = await try_account_login_if_needed(page, adapter)
+        if login_status != "OK":
+            return fail_result("auth_required", detail=f"sub2api login {login_status}", adapter=kind, stage="login")
+        try:
+            await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+        except Exception:
+            pass
+        await wait_text_ready(page, 30, adapter.ready_rounds)
+
+    cf = await wait_out_cloudflare(page, CF_WAIT_S)
+    if cf:
+        return fail_result("cloudflare", adapter=kind)
+
+    # 2. 定位 operations-ui iframe
+    target_frame = None
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        for f in page.frames:
+            if "operations-ui" in (f.url or "").lower():
+                target_frame = f
+                break
+        if target_frame is not None:
+            break
+        await asyncio.sleep(0.5)
+
+    if target_frame is None:
+        return fail_result("no_frame", detail="sub2api operations-ui iframe not found", adapter=kind, stage="action")
+
+    # 等待 iframe 内 #checkin 元素就绪
+    btn = target_frame.locator("#checkin").first
+    badge = target_frame.locator("#checkin-badge").first
+
+    try:
+        await btn.wait_for(state="attached", timeout=10000)
+    except Exception as e:
+        return fail_result("no_button", detail=f"#checkin button not attached: {e}", adapter=kind, stage="action")
+
+    # 3. 判定已签态 (幂等)
+    btn_text = ""
+    badge_text = ""
+    try:
+        btn_text = (await btn.inner_text(timeout=2000) or "").strip()
+        badge_text = (await badge.inner_text(timeout=2000) or "").strip() if await badge.count() > 0 else ""
+    except Exception:
+        pass
+
+    if "今日已签" in badge_text or "今日已签到" in btn_text:
+        return confirmed_done_result(f"sub2api 已签到 (badge={badge_text}, btn={btn_text})", adapter=kind)
+
+    if "未开放" in badge_text:
+        return fail_result("not_enabled", detail=f"sub2api 签到未开放 (badge={badge_text})", adapter=kind, stage="action")
+
+    # 4. 点击「立即签到」
+    action = ActionEvidence(
+        kind="dom_click",
+        target="iframe#checkin",
+        attempted_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    print(f"  sub2api: clicking #checkin (current btn='{btn_text}', badge='{badge_text}')...", flush=True)
+    try:
+        await btn.click()
+    except Exception as e:
+        return fail_result("click_failed", detail=f"click #checkin failed: {e}", adapter=kind, action=action, stage="action")
+
+    # 5. 轮询确认签到回执 (15s)
+    confirm_started = time.monotonic()
+    confirmed = False
+    confirm_detail = ""
+
+    while time.monotonic() - confirm_started < 15.0:
+        await asyncio.sleep(0.8)
+        # 检查 toast 提示
+        try:
+            toast_text = await target_frame.evaluate('''() => {
+                const el = document.querySelector("#toast");
+                return el ? (el.textContent || "") : "";
+            }''')
+        except Exception:
+            toast_text = ""
+
+        if "今天已经签到过了" in toast_text:
+            return confirmed_done_result(f"sub2api 今天已经签到过了 ({toast_text})", adapter=kind)
+        if "签到成功" in toast_text:
+            confirmed = True
+            confirm_detail = toast_text[:120]
+            break
+
+        # 检查 badge 与 button
+        try:
+            cur_badge = (await badge.inner_text(timeout=500) or "").strip() if await badge.count() > 0 else ""
+            cur_btn = (await btn.inner_text(timeout=500) or "").strip()
+            if "今日已签" in cur_badge or "今日已签到" in cur_btn:
+                confirmed = True
+                confirm_detail = f"badge={cur_badge}, btn={cur_btn}"
+                break
+        except Exception:
+            pass
+
+    if not confirmed:
+        return fail_result("no_confirm", detail=f"clicked #checkin but no confirm (toast={toast_text})", adapter=kind, action=action, stage="confirm")
+
+    return confirmed_done_result(
+        f"sub2api 签到成功 ({confirm_detail})",
+        adapter=kind,
+        action=action,
+    )
+
+
+def is_dygyz_site(site_url: str) -> bool:
+    """dygyz.pmcat.top 专属站判定."""
+    u = (site_url or "").lower()
+    return "dygyz.pmcat.top" in u or "pmcat.top" in u
+
+
+def is_dygyz_name(name: str) -> bool:
+    """dygyz 站点名称判定."""
+    n = (name or "").lower()
+    return "dygyz" in n or "pmcat" in n
+
+
 def is_mulink_site(site_url: str) -> bool:
     """demo.dev2.mulink.top 专属站判定."""
     u = (site_url or "").lower()
@@ -7690,6 +8489,908 @@ async def mulink_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
         )
     # 按钮变「签到」或额度池显示成功
     return fail_result("no_confirm", detail=(wtext2[:80] if "额度池" not in wtext2 else wtext2[wtext2.find("额度池"):wtext2.find("额度池")+200]), adapter=kind)
+
+
+def is_xmiaom_site(site_url: str) -> bool:
+    """咕嘎咕嘎 (ai.xmiaom.com) 专属站判定."""
+    u = (site_url or "").lower()
+    return "xmiaom.com" in u
+
+
+def is_xmiaom_name(name: str) -> bool:
+    """咕嘎咕嘎名称判定."""
+    n = (name or "").lower()
+    return "咕嘎" in n or "xmiaom" in n
+
+
+async def xmiaom_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """咕嘎咕嘎生图站 (ai.xmiaom.com) 专用签到流程.
+
+    架构与业务特征:
+    1. 签到页位于 /dashboard/overview (原 /profile 不再提供签到功能).
+    2. 主 CTA 按钮: button:has-text("立即签到").
+    3. 已签到态: button:has-text("已签到") (处于 disabled 状态) 或页面文本包含「已签到」.
+    4. 会话新鲜度要求 (checkin_login_required):
+       服务端 POST /api/user/daily-reward 强制校验当日前置会话:
+       若会话非当日登录 (或服务端返回 checkin_login_required / "签到需要当天登录的会话"),
+       需先通过 GET /api/user/logout 注销旧会话,再走 LinuxDO OAuth 重新登录获取新会话.
+    5. LinuxDO 登录要求:
+       在 /sign-in 页面必须先勾选服务协议复选框 (span[role=checkbox]),再点击「使用 LinuxDO 继续」.
+    """
+    kind = adapter.kind or "xmiaom"
+    site_url = adapter.url or "https://ai.xmiaom.com/dashboard/overview"
+    if "/profile" in site_url:
+        site_url = "https://ai.xmiaom.com/dashboard/overview"
+
+    print(f"  xmiaom flow: {adapter.name} ({site_url})", flush=True)
+
+    async def _ensure_sso():
+        if "/sign-in" not in (page.url or ""):
+            try:
+                await page.goto("https://ai.xmiaom.com/sign-in?redirect=%2Fdashboard%2Foverview", wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+                await asyncio.sleep(1.0)
+            except Exception:
+                pass
+        await check_terms(page)
+        await asyncio.sleep(0.3)
+        sso_status = await try_linuxdo_sso(page, origin_host="ai.xmiaom.com", browser=browser)
+        return sso_status
+
+    # 1. 访问 /dashboard/overview
+    try:
+        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception:
+        pass
+    await bypass_chrome_interstitial_if_needed(page)
+    await wait_text_ready(page, 30, adapter.ready_rounds)
+
+    cur_url = await page_url(page)
+    cur_text = await page_text(page, 600)
+
+    # 2. 检查未登录态 (落到 /sign-in 或页面出现登录特征)
+    if is_auth_page_url(cur_url) or looks_logged_out(cur_text):
+        print("  xmiaom: unauthenticated, performing LinuxDO SSO...", flush=True)
+        sso_res = await _ensure_sso()
+        if sso_res not in ("OK", "ALREADY"):
+            return fail_result("auth_failed", detail=f"SSO: {sso_res}", adapter=kind)
+        try:
+            await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+            await wait_text_ready(page, 30, adapter.ready_rounds)
+        except Exception:
+            pass
+
+    # 3. 检查是否今日已签 (幂等性判断)
+    done_btn = page.locator('button:has-text("已签到"), button[data-disabled]:has-text("签到")').first
+    if await done_btn.count() > 0 and await done_btn.is_visible(timeout=1000):
+        btn_txt = (await done_btn.inner_text()).strip()
+        if "已签到" in btn_txt:
+            print(f"  xmiaom: already checked in ({btn_txt})", flush=True)
+            return confirmed_done_result("已签到", adapter=kind)
+
+    already_sig = await already_done(
+        page, adapter.already_selectors, trusted_already=adapter.trusted_already_selectors
+    )
+    if already_sig:
+        print(f"  xmiaom: already checked in ({already_sig})", flush=True)
+        return confirmed_done_result(already_sig, adapter=kind)
+
+    # 4. 查找立即签到 CTA
+    cta_btn = page.locator('button:has-text("立即签到")').first
+    if await cta_btn.count() == 0 or not await cta_btn.is_visible(timeout=3000):
+        text_now = await page_text(page, 500)
+        if "已签到" in text_now:
+            return confirmed_done_result("已签到", adapter=kind)
+        return fail_result("no_button", detail="button:has-text('立即签到') not found", adapter=kind)
+
+    action = ActionEvidence(
+        kind="dom_click",
+        target='button:has-text("立即签到")',
+        attempted_at=datetime.now().isoformat(timespec="seconds"),
+    )
+
+    # 5. 点击立即签到
+    print("  xmiaom: clicking 立即签到...", flush=True)
+    try:
+        await cta_btn.click(timeout=3000)
+    except Exception as click_err:
+        print(f"  xmiaom click fallback force: {click_err}", flush=True)
+        await cta_btn.click(timeout=3000, force=True)
+
+    await asyncio.sleep(1.0)
+    await handle_post_click_dialogs_if_needed(page)
+
+    # 6. 轮询签到确认及当日前置会话异常 (checkin_login_required)
+    for _ in range(12):
+        await asyncio.sleep(0.8)
+        text_poll = await page_text(page, 900)
+
+        # 6.1 检查当日前置会话校验失败 (checkin_login_required)
+        if "签到需要当天登录的会话" in text_poll or "checkin_login_required" in text_poll:
+            print("  xmiaom: stale session detected (checkin_login_required), re-authenticating...", flush=True)
+            try:
+                await page.evaluate("""async () => {
+                    try { await fetch('/api/user/logout'); } catch (e) {}
+                }""")
+            except Exception:
+                pass
+            sso_res = await _ensure_sso()
+            if sso_res not in ("OK", "ALREADY"):
+                return fail_result("auth_failed", detail=f"SSO refresh: {sso_res}", adapter=kind, action=action)
+            try:
+                await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+                await wait_text_ready(page, 30, adapter.ready_rounds)
+            except Exception:
+                pass
+            cta_btn2 = page.locator('button:has-text("立即签到")').first
+            if await cta_btn2.count() > 0 and await cta_btn2.is_visible(timeout=3000):
+                await cta_btn2.click(timeout=3000)
+                await asyncio.sleep(1.0)
+                await handle_post_click_dialogs_if_needed(page)
+
+        # 6.2 检查成功标志
+        if is_valid_checkin_confirm(text_poll):
+            sig = confirm_signal(text_poll) or "签到成功"
+            print(f"  xmiaom confirm: {sig}", flush=True)
+            return ok_result(
+                "OK", adapter=kind, detail=sig, action=action,
+                confirmation=dom_confirmation(sig),
+                pre_state="PENDING", post_state="DONE",
+                transition="PENDING_TO_DONE", attribution="runner",
+            )
+
+        done_btn2 = page.locator('button:has-text("已签到"), button[data-disabled]:has-text("签到")').first
+        if await done_btn2.count() > 0 and await done_btn2.is_visible(timeout=500):
+            print("  xmiaom confirm: button turned to 已签到", flush=True)
+            return ok_result(
+                "OK", adapter=kind, detail="已签到", action=action,
+                confirmation=dom_confirmation("已签到"),
+                pre_state="PENDING", post_state="DONE",
+                transition="PENDING_TO_DONE", attribution="runner",
+            )
+
+    # 兜底再次判断
+    already_final = await already_done(
+        page, adapter.already_selectors, trusted_already=adapter.trusted_already_selectors
+    )
+    if already_final:
+        return confirmed_done_result(already_final, adapter=kind, action=action)
+
+    text_final = await page_text(page, 900)
+    if "签到成功" in text_final or "已获得" in text_final:
+        return ok_result(
+            "OK", adapter=kind, detail="签到成功", action=action,
+            confirmation=dom_confirmation("签到成功"),
+            pre_state="PENDING", post_state="DONE",
+            transition="PENDING_TO_DONE", attribution="runner",
+        )
+
+    return fail_result("no_confirm", detail=text_final[:100], adapter=kind, action=action)
+
+
+def is_glados_site(site_url: str) -> bool:
+    """glados.rocks 专属站判定."""
+    u = (site_url or "").lower()
+    return "glados.rocks" in u or "glados.network" in u or "glados.space" in u
+
+
+def is_glados_name(name: str) -> bool:
+    """glados 站点名称判定."""
+    return "glados" in (name or "").lower()
+
+
+def _glados_points_has_today_checkin(points_data: dict | None, today_str: str | None = None) -> bool:
+    """检查 /api/user/points 返回的 history 中是否已有今日 system:checkin 记录."""
+    if not isinstance(points_data, dict) or points_data.get("code") != 0:
+        return False
+    beijing_tz = timezone(timedelta(hours=8))
+    day = today_str or datetime.now(beijing_tz).strftime("%Y-%m-%d")
+    history = points_data.get("history")
+    if not isinstance(history, list):
+        return False
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        biz = str(item.get("business") or "").lower()
+        if "checkin" not in biz:
+            continue
+        detail = str(item.get("detail") or "").strip()
+        if detail == day:
+            return True
+        ts = item.get("time")
+        if isinstance(ts, (int, float)) and ts > 0:
+            try:
+                dt_str = datetime.fromtimestamp(ts / 1000.0, tz=beijing_tz).strftime("%Y-%m-%d")
+                if dt_str == day:
+                    return True
+            except Exception:
+                pass
+    return False
+
+
+async def _glados_fetch_points(page) -> dict | None:
+    """在 glados 页面内拉取 /api/user/points JSON."""
+    try:
+        data = await page.evaluate(
+            """async () => {
+                try {
+                    const r = await fetch('/api/user/points', { credentials: 'include' });
+                    if (!r.ok) return { _http_status: r.status };
+                    return await r.json();
+                } catch (e) {
+                    return { _err: String(e) };
+                }
+            }"""
+        )
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+async def glados_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """GLaDOS (https://glados.rocks/console/checkin) 专属签到流程.
+
+    2026-09-30 接入:
+    1. 复用 9222 共享 profile 的 gld:sess 会话 Cookie，严守 P0 禁止全清 Cookie。
+    2. 页面内含慢速第三方统计脚本 (deepshark.net)，必须使用 wait_until="commit" 导航并轮询等待主组件渲染。
+    3. Daily Punch 卡片下方的 30 天日历图例常驻 "Checked in" 与 "Missed" 静态说明，
+       不可用泛文本 "Checked in" 直接判已签；本函数结合：
+       - button.checkin-cute-btn.is-done 按钮完成态及按钮内反馈文案 (Checkin! Got / Please Try Tomorrow)
+       - 按钮点击触发 POST /api/user/checkin ({token: window.location.hostname})
+       - /api/user/points 历史记录中的今日 checkin 明细 (business="system:checkin", detail=YYYY-MM-DD)
+       需要注意的是，GLaDOS 前端刷新页面后 state.checkin 重置为 false，按钮恢复显示「签到」，
+       若 /api/user/points 已含今日签到记录，仍点击一次按钮让前端变为 .is-done ("Please Try Tomorrow")，
+       并按 pre_done 状态准确返回 ALREADY（首次当日签成则返回 OK）。
+    """
+    kind = adapter.kind or "glados"
+    site_url = adapter.url or "https://glados.rocks/console/checkin"
+    print(f"  glados flow: {adapter.name} -> {site_url}", flush=True)
+
+    try:
+        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception as e:
+        print(f"  glados goto warning (continuing): {e}", flush=True)
+
+    await bypass_chrome_interstitial_if_needed(page)
+    await wait_text_ready(page, 30, adapter.ready_rounds)
+
+    cf = await wait_out_cloudflare(page, CF_WAIT_S)
+    if cf:
+        return fail_result("cloudflare", adapter=kind)
+
+    cur_url = (await page_url(page) or "").lower()
+    body_init = await page_text(page, 1200)
+    if "/login" in cur_url or "login to glados" in body_init.lower():
+        return fail_result("auth_required", detail="redirected to /login (session expired)", adapter=kind, stage="auth")
+
+    # 等待 checkin-cute-btn 挂载 (SPA 异步加载组件)
+    btn_loc = page.locator("button.checkin-cute-btn").first
+    for _ in range(16):
+        try:
+            if await btn_loc.count() > 0 and await btn_loc.is_visible(timeout=500):
+                break
+        except Exception:
+            pass
+        cur_url = (await page_url(page) or "").lower()
+        if "/login" in cur_url:
+            return fail_result("auth_required", detail="redirected to /login", adapter=kind, stage="auth")
+        await asyncio.sleep(0.6)
+
+    # 先通过 /api/user/points 判断今日是否已有签到落账记录
+    pts_before = await _glados_fetch_points(page)
+    if isinstance(pts_before, dict) and pts_before.get("_http_status") in (401, 403):
+        return fail_result("auth_required", detail=f"/api/user/points HTTP {pts_before.get('_http_status')}", adapter=kind, stage="auth")
+    if isinstance(pts_before, dict) and pts_before.get("code") in (-1, -2):
+        msg = str(pts_before.get("message") or "unauthenticated")
+        if "login" in msg.lower() or "auth" in msg.lower() or "session" in msg.lower():
+            return fail_result("auth_required", detail=f"/api/user/points: {msg}", adapter=kind, stage="auth")
+
+    pre_checked_today = _glados_points_has_today_checkin(pts_before)
+
+    # 检查按钮是否已处于 is-done 状态
+    done_btn = page.locator("button.checkin-cute-btn.is-done").first
+    try:
+        if await done_btn.count() > 0 and await done_btn.is_visible(timeout=500):
+            done_txt = (await done_btn.inner_text(timeout=500) or "").strip()
+            return confirmed_done_result(done_txt or "button.checkin-cute-btn.is-done", adapter=kind)
+    except Exception:
+        pass
+
+    if await btn_loc.count() == 0 or not await btn_loc.is_visible(timeout=1500):
+        if pre_checked_today:
+            return confirmed_done_result("api/user/points history confirmed today", adapter=kind)
+        return fail_result("no_button", detail="button.checkin-cute-btn not visible", adapter=kind, stage="action")
+
+    # 点击 button.checkin-cute-btn 触发签到 (或触发前端切换为 Please Try Tomorrow)
+    action = ActionEvidence(
+        kind="dom_click",
+        target="button.checkin-cute-btn",
+        attempted_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    print("  glados: clicking button.checkin-cute-btn...", flush=True)
+    try:
+        await btn_loc.click(timeout=3000)
+    except Exception as click_err:
+        print(f"  glados click fallback force: {click_err}", flush=True)
+        await btn_loc.click(timeout=3000, force=True)
+
+    # 轮询等待前端状态更新 (checkin() 内含 1s 延迟后 setState({checkin: true, message: a.message}))
+    for _ in range(15):
+        await asyncio.sleep(0.7)
+        text_poll = await page_text(page, 1200)
+        if "device-mismatch" in text_poll.lower() or "login device" in text_poll.lower():
+            return fail_result("auth_required", detail="GLaDOS checkin device-mismatch; relogin required", adapter=kind, action=action, stage="auth")
+
+        try:
+            if await done_btn.count() > 0 and await done_btn.is_visible(timeout=400):
+                btn_msg = (await done_btn.inner_text(timeout=400) or "").strip()
+                print(f"  glados button is-done: {btn_msg!r}", flush=True)
+                msg_low = btn_msg.lower()
+                if (
+                    "try tomorrow" in msg_low
+                    or "return tomorrow" in msg_low
+                    or "repeat" in msg_low
+                    or pre_checked_today
+                ):
+                    return ok_result(
+                        "ALREADY",
+                        adapter=kind,
+                        detail=btn_msg or "Return tomorrow for more points",
+                        action=action,
+                        confirmation=dom_confirmation(btn_msg or "Return tomorrow", done_state=True),
+                        pre_state="DONE",
+                        post_state="DONE",
+                        transition="NONE",
+                        attribution="precheck",
+                    )
+                if "checkin! got" in msg_low or "got" in msg_low or "points" in msg_low:
+                    return ok_result(
+                        "OK",
+                        adapter=kind,
+                        detail=btn_msg,
+                        action=action,
+                        confirmation=dom_confirmation(btn_msg, done_state=True),
+                        pre_state="PENDING",
+                        post_state="DONE",
+                        transition="PENDING_TO_DONE",
+                        attribution="runner",
+                    )
+                # 其它 is-done 消息，复查 /api/user/points 今日记录
+                pts_after = await _glados_fetch_points(page)
+                if _glados_points_has_today_checkin(pts_after):
+                    status_val: Status = "ALREADY" if pre_checked_today else "OK"
+                    return ok_result(
+                        status_val,
+                        adapter=kind,
+                        detail=btn_msg or "glados checked in today",
+                        action=action,
+                        confirmation=dom_confirmation(btn_msg or "glados checked in today", done_state=True),
+                        pre_state="DONE" if pre_checked_today else "PENDING",
+                        post_state="DONE",
+                        transition="NONE" if pre_checked_today else "PENDING_TO_DONE",
+                        attribution="precheck" if pre_checked_today else "runner",
+                    )
+        except Exception:
+            pass
+
+    # 兜底核对 /api/user/points 今日是否已落账
+    pts_final = await _glados_fetch_points(page)
+    if _glados_points_has_today_checkin(pts_final):
+        status_val = "ALREADY" if pre_checked_today else "OK"
+        detail_msg = "api/user/points confirmed today checkin"
+        return ok_result(
+            status_val,
+            adapter=kind,
+            detail=detail_msg,
+            action=action,
+            confirmation=dom_confirmation(detail_msg, done_state=True),
+            pre_state="DONE" if pre_checked_today else "PENDING",
+            post_state="DONE",
+            transition="NONE" if pre_checked_today else "PENDING_TO_DONE",
+            attribution="precheck" if pre_checked_today else "runner",
+        )
+
+    text_final = await page_text(page, 600)
+    return fail_result("no_confirm", detail=text_final[:100], adapter=kind, action=action, stage="confirm")
+
+
+# ===================== yunzhi (云智手机 云机空间权益 纯 RPC 签到) =====================
+# 2026-10-01 接入(抓包逆向实证)。业务流程:
+#   1. 入口 https://yunzhi.play.cn/ai/?channel_code=00000042 登录后每日弹「今日登录福利」,
+#      POST /api/content/home-popups/{popupId}/claim 领取 2 天云机空间权益卡;
+#   2. POST /api/benefit/user/benefit {benefitConfigId:"158"} 返回 userItems(待开通卡)
+#      与 cloudDevices(云机列表,status=2 运行中);
+#   3. POST /api/benefit/claim {userItemId, resourceId:运行中云机} → claimId;
+#   4. 轮询 POST /api/benefit/claim/status {claimId} 至 status=1(成功)/2(失败)。
+# 鉴权与签名(与前端 bundle 逐字节核对通过):
+#   - Authorization: JWT,持久化于 yunzhi.play.cn localStorage["cloud_phone_token"]
+#     并镜像 Cookie CG_CLINET_USER_TOKEN_YUN(domain=.play.cn);
+#   - 头签名 sign = HMAC-SHA256("METHOD\n/yunzhi+path\nparams\nbody\nheaders\n",
+#     "8822FF81B6623e6f338d6F2A7F49DA83"),headers 规范化排除 Qu 表且键小写排序;
+#   - 体签名 sign = MD5(除 sign 外参数按 key 升序 "k=v" & 拼接 + 盐
+#     "7f9e2d08c1b5a3709e4f6d2a8c0e1b3f")。
+# 网络:直连 urllib 会被边缘 WAF 503(content/* 路由),必须经 9222 页面内 fetch。
+# ALREADY 判据(2026-10-01 实测已领态):init popups=[] 且 benefit userItems=[]。
+
+YUNZI_API_BASE = "https://yunzhi.new-gm.cn/yunzhi"
+YUNZI_ENTRY_URL = "https://yunzhi.play.cn/ai/?channel_code=00000042"
+YUNZI_BENEFIT_ID = "158"  # 云机空间服务（新开）
+_YUNZI_SIGN_SALT = "7f9e2d08c1b5a3709e4f6d2a8c0e1b3f"
+_YUNZI_HMAC_KEY = "8822FF81B6623e6f338d6F2A7F49DA83"
+_YUNZI_VERSION = "10310"
+_YUNZI_CHANNEL_CODE = "00000042"
+# h5 axios 头签名排除表(与前端 bundle Qu 完全一致);这些头不参与 HMAC 输入。
+_YUNZI_HMAC_EXCLUDED_HEADERS = frozenset({
+    "content-length", "host", "connection", "accept-encoding", "user-agent",
+    "sign", "content-type", "accept", "device_code", "model", "api_level",
+    "cache-control",
+})
+# 页面内 fetch;CORS 由服务端对 yunzhi.play.cn / act.new-gm.cn 放行。
+_YUNZI_FETCH_JS = """
+async (p) => {
+    try {
+        const opt = { method: p.method, headers: p.headers, credentials: 'omit' };
+        if (p.body !== null && p.body !== undefined) opt.body = p.body;
+        const r = await fetch(p.url, opt);
+        let data = null;
+        try { data = await r.json(); } catch (e) { data = null; }
+        let auth = '';
+        try { auth = r.headers.get('authorization') || ''; } catch (e) {}
+        return { _http_status: r.status, _authorization: auth, _data: data };
+    } catch (e) {
+        return { _http_status: 0, _authorization: '', _data: null, _err: String(e) };
+    }
+}
+"""
+# 从页面读取持久化登录态(勿写入任何笔记/日志,凭据只留在浏览器 profile 内)。
+_YUNZI_CREDS_JS = """
+() => {
+    let token = '';
+    try { token = localStorage.getItem('cloud_phone_token') || ''; } catch (e) {}
+    if (!token) {
+        try {
+            const m = document.cookie.match(/(?:^|; )CG_CLINET_USER_TOKEN_YUN=([^;]*)/);
+            if (m) token = decodeURIComponent(m[1]);
+        } catch (e) {}
+    }
+    let deviceNo = '';
+    try { deviceNo = localStorage.getItem('cloud_phone_device_no') || ''; } catch (e) {}
+    return { token: token, deviceNo: deviceNo };
+}
+"""
+
+
+def is_yunzhi_site(site_url: str) -> bool:
+    """云智手机(yunzhi.play.cn / yunzhi.new-gm.cn / act.new-gm.cn)站判定."""
+    u = (site_url or "").lower()
+    return "yunzhi.play.cn" in u or "yunzhi.new-gm.cn" in u or "act.new-gm.cn" in u
+
+
+def is_yunzhi_name(name: str) -> bool:
+    """yunzhi 站点名称判定."""
+    n = (name or "").lower()
+    return "yunzhi" in n or "云智" in n
+
+
+def _yunzhi_request_id() -> str:
+    """32 位无横线 hex(与前端模板 'xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx' 一致)."""
+    tpl = "xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx"
+    hexch = "0123456789abcdef"
+    out = []
+    for ch in tpl:
+        if ch == "x":
+            out.append(random.choice(hexch))
+        elif ch == "y":
+            out.append(random.choice("89ab"))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _yunzhi_md5_sign(params: dict) -> str:
+    """体签名 = MD5(除 sign 外非 null 参数 key 升序 k=v & 拼接 + 盐).
+
+    与前端 ua()/Le() 逐字节一致(2026-10-01 用 6 个抓包样本验证全通过)。
+    """
+    items = {k: v for k, v in (params or {}).items() if k != "sign" and v is not None}
+    qs = "&".join(f"{k}={items[k]}" for k in sorted(items))
+    return hashlib.md5((qs + _YUNZI_SIGN_SALT).encode("utf-8")).hexdigest()
+
+
+def _yunzhi_canonical_headers(headers: dict) -> str:
+    """头规范化:键小写、剔除 Qu 排除表、按 key 升序 'k=v' & 拼接."""
+    n = {}
+    for k, v in (headers or {}).items():
+        if v is None:
+            continue
+        o = str(k).lower()
+        if o in _YUNZI_HMAC_EXCLUDED_HEADERS:
+            continue
+        n[o] = str(v)
+    return "&".join(f"{k}={n[k]}" for k in sorted(n))
+
+
+def _yunzhi_hmac_sign(method: str, sign_path: str, params: dict | None,
+                      body: dict | None, headers: dict) -> str:
+    """头签名 = HMAC-SHA256("METHOD\\npath\\nparams\\nbody\\nheaders\\n", key).
+
+    sign_path 必须以 /yunzhi 开头(如 /yunzhi/api/content/home-popups/init,
+    漏 /api 段会被服务端判签名失败)。body 为 dict 时按 key 升序 k=v 拼接,
+    dict/list 值 JSON 序列化(与前端 Xu() 一致)。
+    """
+    def zu(p):
+        if not p:
+            return ""
+        return "&".join(f"{k}={p[k]}" for k in sorted(p) if p[k] is not None)
+
+    def xu(d):
+        if not d:
+            return ""
+        if isinstance(d, str):
+            try:
+                d = json.loads(d)
+            except Exception:
+                return d
+        if not isinstance(d, dict):
+            return str(d)
+        out = []
+        for k in sorted(d.keys()):
+            v = d[k]
+            if v is None:
+                continue
+            if isinstance(v, (dict, list)):
+                out.append(f"{k}={json.dumps(v, separators=(',', ':'), ensure_ascii=False)}")
+            else:
+                out.append(f"{k}={v}")
+        return "&".join(out)
+
+    raw = (
+        f"{(method or 'get').upper()}\n{sign_path}\n{zu(params or {})}\n"
+        f"{xu(body or {})}\n{_yunzhi_canonical_headers(headers)}\n"
+    )
+    return hmac.new(_YUNZI_HMAC_KEY.encode("utf-8"), raw.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _yunzhi_build_headers(token: str, device_no: str, method: str,
+                          api_path: str, body: dict | None) -> dict:
+    """构造 h5 风格请求头并计算头签名.
+
+    body 必须是「最终请求体」(业务参数 + timestamp + 体签名 sign),与前端一致:
+    拦截器在 e.data 已含 sign 后才计算头签名(ed(..., o=e.data, ...))。
+    """
+    headers = {
+        "authorization": token or "",
+        "device_type": "3",
+        "client_type": "h5",
+        "channel_code": _YUNZI_CHANNEL_CODE,
+        "version": _YUNZI_VERSION,
+        "api_version": "1",
+        "device_no": device_no or "0123456789abcdef",
+        "accept": "application/json",
+        "content-type": "application/json",
+        "cache-control": "no-cache",
+        "timestamp": str(int(time.time() * 1000)),
+        "request_id": _yunzhi_request_id(),
+    }
+    headers["sign"] = _yunzhi_hmac_sign(method, "/yunzhi" + api_path, None, body, headers)
+    return headers
+
+
+async def _yunzhi_api(page, method: str, api_path: str, token: str, device_no: str,
+                      body_params: dict | None = None) -> dict:
+    """经 9222 页面内 fetch 调用 yunzhi API(直连会被 WAF 503).
+
+    返回 {_http_status, _authorization, _data};_data 为业务 JSON {code,message,data}。
+    有 body_params 时先拼最终请求体(业务参数 + timestamp + MD5 体签名),
+    再对最终体计算头签名 —— 与前端「调用方先加 sign、拦截器后算头签名」时序一致。
+    """
+    body = None
+    if body_params:
+        body = dict(body_params)
+        body["timestamp"] = int(time.time() * 1000)
+        body["sign"] = _yunzhi_md5_sign(body)
+    headers = _yunzhi_build_headers(token, device_no, method, api_path, body)
+    payload = {
+        "method": (method or "GET").upper(),
+        "url": YUNZI_API_BASE + api_path,
+        "headers": headers,
+        # 以 Python 预序列化 JSON 字符串直传 fetch,避免 Playwright→JS 序列化
+        # 对 >2^53 大整型(如未来 16 位以上 userItemId)丢精度
+        "body": json.dumps(body, separators=(",", ":"), ensure_ascii=False) if body else None,
+    }
+    try:
+        resp = await page.evaluate(_YUNZI_FETCH_JS, payload)
+    except Exception as e:
+        return {"_http_status": 0, "_authorization": "", "_data": None, "_err": str(e)}
+    if not isinstance(resp, dict):
+        return {"_http_status": 0, "_authorization": "", "_data": None}
+    resp.setdefault("_authorization", "")
+    resp.setdefault("_data", None)
+    return resp
+
+
+def _yunzhi_pick_running_device(devices: list) -> dict | None:
+    """优先取运行中(status=2)云机;退化取首个."""
+    if not isinstance(devices, list):
+        return None
+    for d in devices:
+        if isinstance(d, dict) and d.get("status") == 2:
+            return d
+    for d in devices:
+        if isinstance(d, dict):
+            return d
+    return None
+
+
+def _yunzhi_is_auth_err(msg: str) -> bool:
+    """错误信息是否指向登录态失效(引导 auth_required).
+
+    只认语义关键词;HTTP 401/403 由调用点按状态码单独判断,
+    此处不做数字子串匹配(避免命中「错误码 40102」之类误判)。
+    """
+    low = (msg or "").lower()
+    return "登录" in msg or "login" in low or "token" in low or "auth" in low
+
+
+def _yunzhi_check_business(resp: dict, what: str) -> tuple[dict, str]:
+    """严格校验 _yunzhi_api 响应:HTTP 200 + 业务 code ∈ (0,200) 才放行.
+
+    返回 (data, err);err 非空即失败。防御假 ALREADY(2026-10-01 review):
+    evaluate 异常(_http_status=0)、WAF 503、业务错误码都必须显式失败,
+    不允许 lenient 判定把异常穿透成「今日无可领项」。
+    """
+    if not isinstance(resp, dict):
+        return {}, f"{what}: 响应类型异常"
+    status = resp.get("_http_status")
+    data = resp.get("_data") if isinstance(resp.get("_data"), dict) else {}
+    if status == 0:
+        return {}, f"{what}: 页面内 fetch 异常 {str(resp.get('_err') or '')[:120]}"
+    if status != 200:
+        return {}, f"{what}: HTTP {status}"
+    code = data.get("code")
+    if code not in (0, 200):
+        msg = str(data.get("message") or f"code={code}")
+        return data, f"{what}: {msg}"
+    return data.get("data") or {}, ""
+
+
+async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """云智手机(yunzhi.play.cn)「今日登录福利」纯 RPC 签到流程 (2026-10-01 接入).
+
+    流程:领每日弹窗福利卡(如可领) → 查 benefit 158 待开通 userItems →
+    对运行中云机(status=2)发起 benefit/claim → 轮询 claim/status 至成功。
+    P0:凭据只读自 9222 profile(localStorage/Cookie),严禁任何清空 Cookie/Storage
+    的操作;全部 API 走页面内 fetch,不做任何 UI 点击。
+    """
+    kind = adapter.kind or "yunzhi"
+    site_url = adapter.url or YUNZI_ENTRY_URL
+    print(f"  yunzhi flow: {adapter.name} -> {site_url}", flush=True)
+
+    try:
+        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception as e:
+        print(f"  yunzhi goto warning (continuing): {e}", flush=True)
+
+    await bypass_chrome_interstitial_if_needed(page)
+
+    # 轮询读取 localStorage 登录态(SPA commit 后立即可读)
+    token = ""
+    device_no = ""
+    eval_errors = 0
+    for _ in range(12):
+        try:
+            creds = await page.evaluate(_YUNZI_CREDS_JS)
+        except Exception:
+            creds = None
+            eval_errors += 1
+        if isinstance(creds, dict):
+            token = str(creds.get("token") or "")
+            device_no = str(creds.get("deviceNo") or "")
+        if token:
+            break
+        try:
+            cur_url = (await page_url(page) or "").lower()
+        except Exception:
+            cur_url = ""
+        if "login" in cur_url:
+            break
+        await asyncio.sleep(0.8)
+    if not token:
+        # 区分「真未登录」与「页面持续异常」:后者不是登录态问题,
+        # 报 auth_required 会误导排障方向(2026-10-01 review P3)
+        if eval_errors >= 12:
+            return fail_result(
+                "error",
+                detail=f"yunzhi 页面 evaluate 持续异常 {eval_errors} 次,登录态无法读取(页面可能已崩溃/被导航)",
+                adapter=kind, stage="auth",
+            )
+        return fail_result(
+            "auth_required",
+            detail="yunzhi 未登录: 9222 profile 无 cloud_phone_token (请在浏览器登录云智手机)",
+            adapter=kind, stage="auth",
+        )
+
+    # ---- Step 1: 每日弹窗福利(home-popups/init → {id}/claim) ----
+    init = await _yunzhi_api(page, "GET", "/api/content/home-popups/init", token, device_no)
+    token = init.get("_authorization") or token
+    init_data, init_err = _yunzhi_check_business(init, "home-popups/init")
+    if init_err:
+        if _yunzhi_is_auth_err(init_err) or init.get("_http_status") in (401, 403):
+            return fail_result("auth_required", detail=init_err, adapter=kind, stage="auth")
+        return fail_result("error", detail=init_err, adapter=kind)
+
+    popups = init_data.get("popups") or []
+    claimable = [
+        p for p in popups
+        if isinstance(p, dict) and (p.get("canClaim") is True or str(p.get("state") or "") == "CAN_CLAIM")
+    ]
+    popup_note = ""
+    if claimable:
+        pid = claimable[0].get("popupId")
+        if pid is not None:
+            r = await _yunzhi_api(page, "POST", f"/api/content/home-popups/{pid}/claim", token, device_no)
+            token = r.get("_authorization") or token
+            rd, rd_err = _yunzhi_check_business(r, f"home-popups/{pid}/claim")
+            if rd_err:
+                popup_note = rd_err
+            else:
+                if rd.get("claimed") or rd.get("success"):
+                    popup_note = f"弹窗{pid}福利卡领取成功"
+                else:
+                    popup_note = f"弹窗{pid}:{rd.get('failReason') or '未领取'}"
+            print(f"  yunzhi popup claim: {popup_note}", flush=True)
+    else:
+        popup_note = "今日弹窗无可领项"
+
+    # ---- Step 2: 查询 benefit 158 待开通权益卡 ----
+    async def _fetch_benefit():
+        return await _yunzhi_api(
+            page, "POST", "/api/benefit/user/benefit", token, device_no,
+            body_params={"benefitConfigId": YUNZI_BENEFIT_ID},
+        )
+
+    det = await _fetch_benefit()
+    token = det.get("_authorization") or token
+    bd, det_err = _yunzhi_check_business(det, "benefit/user/benefit")
+    if det_err:
+        if _yunzhi_is_auth_err(det_err) or det.get("_http_status") in (401, 403):
+            return fail_result("auth_required", detail=det_err, adapter=kind, stage="auth")
+        return fail_result("error", detail=det_err, adapter=kind)
+
+    user_items = bd.get("userItems") or []
+    devices = bd.get("cloudDevices") or []
+
+    # 弹窗刚领成功但卡片可能异步入账,补查几次
+    if not user_items and "领取成功" in popup_note:
+        for _ in range(3):
+            await asyncio.sleep(1.5)
+            det = await _fetch_benefit()
+            token = det.get("_authorization") or token
+            bd_retry, retry_err = _yunzhi_check_business(det, "benefit/user/benefit")
+            if not retry_err:
+                bd = bd_retry
+                user_items = bd.get("userItems") or []
+                devices = bd.get("cloudDevices") or devices
+                if user_items:
+                    break
+
+    if not user_items:
+        # ALREADY 必须有正向证据:无可领弹窗 + remainingQuota==0 双确认;
+        # 其余形状(字段缺失/领取成功但卡未入账)一律显式失败,禁止假已领。
+        if not claimable and bd.get("remainingQuota") == 0:
+            detail = f"{popup_note}; 无待开通权益卡(remainingQuota=0)"
+            return ok_result(
+                "ALREADY", adapter=kind, detail=detail,
+                confirmation=dom_confirmation(detail, done_state=True),
+                pre_state="DONE", post_state="DONE", transition="NONE", attribution="precheck",
+            )
+        return fail_result(
+            "no_confirm",
+            detail=f"{popup_note}; userItems 空但状态异常(remainingQuota={bd.get('remainingQuota')})",
+            adapter=kind, stage="confirm",
+        )
+
+    device = _yunzhi_pick_running_device(devices)
+    if not device or not device.get("vendorResourceId"):
+        return fail_result(
+            "no_confirm",
+            detail="有权益卡但无可用云机实例(cloudDevices 为空或缺 vendorResourceId)",
+            adapter=kind, stage="action",
+        )
+    resource_id = str(device.get("vendorResourceId"))
+
+    # ---- Step 3+4: 逐卡开通(benefit/claim → 轮询 claim/status) ----
+    action = ActionEvidence(
+        kind="api_call",
+        target="POST /benefit/claim",
+        attempted_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    activated: list[str] = []
+    failures: list[str] = []
+    for item in user_items:
+        if not isinstance(item, dict):
+            continue
+        uid = item.get("userItemId")
+        if uid is None:
+            continue
+        claim = await _yunzhi_api(
+            page, "POST", "/api/benefit/claim", token, device_no,
+            body_params={"userItemId": uid, "resourceId": resource_id},
+        )
+        token = claim.get("_authorization") or token
+        cd, claim_err = _yunzhi_check_business(claim, "benefit/claim")
+        if claim_err:
+            # 仅匹配明确的「已领取」语义;过宽的 "已" 会把「已过期」等
+            # 非已领错误误判成已开通(2026-10-01 review P2 修复)
+            if (any(w in claim_err for w in ("已领取", "已开通", "已使用", "重复领取"))
+                    or "already" in claim_err.lower() or "repeat" in claim_err.lower()):
+                activated.append(f"卡{uid}:已开通")
+            else:
+                failures.append(claim_err)
+            continue
+        claim_id = cd.get("claimId")
+        st = cd.get("status")
+        if claim_id is None:
+            failures.append(f"卡{uid}: claim 响应缺 claimId({str(cd)[:80]})")
+            continue
+        done = False
+        for _ in range(10):
+            if st == 1:
+                activated.append(f"卡{uid}→{resource_id}")
+                done = True
+                break
+            if st == 2:
+                failures.append(str(cd.get("errorMsg") or f"claim {claim_id} 领取失败"))
+                done = True
+                break
+            await asyncio.sleep(2)
+            ps = await _yunzhi_api(
+                page, "POST", "/api/benefit/claim/status", token, device_no,
+                body_params={"claimId": claim_id},
+            )
+            token = ps.get("_authorization") or token
+            pd, ps_err = _yunzhi_check_business(ps, "benefit/claim/status")
+            if ps_err:
+                failures.append(ps_err)
+                done = True
+                break
+            st = pd.get("status")
+            cd = pd
+        if not done:
+            failures.append(f"claim {claim_id} 轮询超时(status={st})")
+
+    if activated:
+        detail = "; ".join(activated)
+        if popup_note:
+            detail = f"{popup_note}; " + detail
+        if failures:
+            detail += "; 部分失败: " + "; ".join(failures)
+        # 二次确认:复查 remainingQuota 归零与云机有效期
+        try:
+            det2 = await _fetch_benefit()
+            bd2 = ((det2.get("_data") or {}).get("data") or {}) if isinstance(det2.get("_data"), dict) else {}
+            exp = ""
+            for d in (bd2.get("cloudDevices") or []):
+                if isinstance(d, dict) and d.get("expireTime"):
+                    exp = str(d.get("expireTime"))
+                    break
+            if exp:
+                detail += f"; 有效期至 {exp}"
+            quota = bd2.get("remainingQuota")
+            if quota not in (None, ""):
+                detail += f"; remainingQuota={quota}"
+        except Exception:
+            pass
+        return ok_result(
+            "OK", adapter=kind, detail=detail, action=action,
+            confirmation=dom_confirmation(detail, done_state=True),
+            pre_state="PENDING", post_state="DONE", transition="PENDING_TO_DONE",
+            attribution="runner",
+        )
+    return fail_result(
+        "no_confirm", detail="; ".join(failures) or "无开通结果", adapter=kind,
+        action=action, stage="confirm",
+    )
+
 
 
 def is_fengwind_site(site_url: str) -> bool:
@@ -8386,12 +10087,22 @@ async def legacy_checkin_on_page(
             return await mulink_checkin(page, adapter, browser=browser)
         if kind == "abnt" or is_abnt_site(site_url):
             return await abnt_checkin(page, adapter, browser=browser)
+        if kind == "relayfor_go" or is_relayfor_go_name(adapter.name):
+            return await relayfor_go_checkin(page, adapter, browser=browser)
         if kind == "relayfor" or is_relayfor_site(site_url):
             return await relayfor_checkin(page, adapter, browser=browser)
         if kind == "darkforger" or is_darkforger_site(site_url):
             return await darkforger_checkin(page, adapter, browser=browser)
         if kind == "pool" or is_pool_site(site_url):
             return await pool_checkin(page, adapter, browser=browser)
+        if kind == "sub2api" or is_sub2api_site(site_url) or is_sub2api_name(adapter.name):
+            return await sub2api_checkin(page, adapter, browser=browser)
+        if kind == "xmiaom" or is_xmiaom_site(site_url) or is_xmiaom_name(adapter.name):
+            return await xmiaom_checkin(page, adapter, browser=browser)
+        if kind == "glados" or is_glados_site(site_url) or is_glados_name(adapter.name):
+            return await glados_checkin(page, adapter, browser=browser)
+        if kind == "yunzhi" or is_yunzhi_site(site_url) or is_yunzhi_name(adapter.name):
+            return await yunzhi_checkin(page, adapter, browser=browser)
         # fengwind 专属窗口守卫(业务根因,2026-09-07):读服务端 /api/checkin/status 的
         # next_reset_at。今日新周期未开时页面残留昨日「已签到」,通用 already 会误判
         # ALREADY 并把 daily_tasks 标 done,使 cron 跳过真实可签时段。本轮守卫只作用于
@@ -9093,7 +10804,13 @@ def get_account_credential(site_name: str) -> tuple[str, str] | None:
             # credential doc unavailable → password-login disabled, never crash the batch
             print(f"  accounts file unavailable; password-login disabled: {exc}", flush=True)
             _ACCOUNTS_CACHE = {}
-    return _ACCOUNTS_CACHE.get(site_name)
+    res = _ACCOUNTS_CACHE.get(site_name)
+    if not res:
+        if site_name == "0api":
+            res = _ACCOUNTS_CACHE.get("sub2api")
+        elif site_name == "sub2api":
+            res = _ACCOUNTS_CACHE.get("0api")
+    return res
 
 
 def mark_task_done(tasks_content: str, name: str) -> tuple[str, bool]:
@@ -9467,6 +11184,63 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
                 already_selectors=['text=今日已签到', 'text=签到成功', 'text=今日已签'],
                 trusted_sign_selectors=True,
                 trusted_already_selectors=True,
+            )
+        if is_sub2api_site(url_from_note) or is_sub2api_name(name):
+            # sub2api.0api.cc.cd(Sub2API 站):纯账密登录,签到位于 /custom/activity 的 iframe 中。
+            return SiteAdapter(
+                name=name,
+                url="https://sub2api.0api.cc.cd/custom/activity",
+                kind="sub2api",
+                sign_selectors=['#checkin', 'button:has-text("立即签到")'],
+                already_selectors=['#checkin-badge:has-text("今日已签")', 'text=今日已签到', 'text=今天已经签到过了', 'text=签到成功'],
+                trusted_sign_selectors=True,
+                trusted_already_selectors=True,
+                prefer_catalog_url=True,
+                login_url="https://sub2api.0api.cc.cd/login",
+            )
+        if is_dygyz_site(url_from_note) or is_dygyz_name(name):
+            # dygyz.pmcat.top(PM订阅公益站):LinuxDo 登录,签到位于 /dashboard 的「每日签到」卡片。
+            return SiteAdapter(
+                name=name,
+                url="https://dygyz.pmcat.top/dashboard",
+                kind="browser",
+                sign_selectors=[
+                    'button:has-text("立即签到领流量")',
+                    'button:has-text("立即签到")',
+                    'form[action="/checkin"] button',
+                ],
+                already_selectors=[
+                    '.checkin-done',
+                    '.flash-ok',
+                    'text=今日已签',
+                    'text=今日已签到',
+                    'text=今天已经签到过了',
+                    'text=签到成功',
+                ],
+                trusted_sign_selectors=True,
+                trusted_already_selectors=True,
+                prefer_catalog_url=True,
+                login_url="https://dygyz.pmcat.top/login",
+            )
+        if is_xmiaom_site(url_from_note) or is_xmiaom_name(name):
+            # 咕嘎咕嘎生图站 (ai.xmiaom.com):LinuxDO SSO 登录,签到位于 /dashboard/overview.
+            return SiteAdapter(
+                name=name,
+                url="https://ai.xmiaom.com/dashboard/overview",
+                kind="xmiaom",
+                sign_selectors=['button:has-text("立即签到")'],
+                already_selectors=[
+                    'button:has-text("已签到")',
+                    'text=今日已签到',
+                    'text="今日已签到"',
+                    'text=已签到',
+                    'text="已签到"',
+                    'text=签到成功',
+                ],
+                trusted_sign_selectors=True,
+                trusted_already_selectors=True,
+                prefer_catalog_url=True,
+                login_url="https://ai.xmiaom.com/sign-in",
             )
         u = (url_from_note or "").lower()
         if any(x in u for x in ("/profile", "/console/personal", "/check-in", "/checkin")):
