@@ -1276,6 +1276,34 @@ class FrontendStaticAssetIntegrityTests(unittest.TestCase):
         self.assertIn("site-drawer-delete-site-btn", self.app_js)
         self.assertIn(".danger-zone-card", self.style_css)
 
+    def test_credential_deletion_delegation_and_clean_render(self):
+        """Ensure credential deletion is handled by event delegation with data-del-cred and no redundant querySelectorAll."""
+        self.assertIn('data-del-cred="${esc(c.ref)}"', self.app_js)
+        self.assertIn('const delCredBtn = e.target.closest("[data-del-cred]");', self.app_js)
+        self.assertNotIn('credsTbody.querySelectorAll("[data-del-cred]")', self.app_js)
+
+    def test_tags_picker_idempotency_guard(self):
+        """Ensure tag picker inputs and buttons use _pickerBound to prevent listener accumulation on view switches."""
+        self.assertIn("_pickerBound", self.app_js)
+        self.assertIn("container._currentAddCustomTag = addCustomTag;", self.app_js)
+
+    def test_modular_rendering_and_debounced_scoped_updates(self):
+        """Ensure render pipeline supports scoped renders and search input uses debounce."""
+        self.assertIn('render("tasks")', self.app_js)
+        self.assertIn('render("manual")', self.app_js)
+        self.assertIn("function computeTaskStats()", self.app_js)
+        self.assertIn("function renderTasksView(", self.app_js)
+        self.assertIn("function renderManualView()", self.app_js)
+
+    def test_clean_custom_elements_and_no_phantom_definitions(self):
+        """Ensure valid custom elements exist and phantom unrendered classes are removed."""
+        self.assertIn('customElements.define("ui-icon"', self.app_js)
+        self.assertIn('customElements.define("status-indicator"', self.app_js)
+        self.assertIn('customElements.define("theme-toggle"', self.app_js)
+        self.assertIn('customElements.define("prompt-chips"', self.app_js)
+        self.assertNotIn("class KpiCardElement", self.app_js)
+        self.assertNotIn("class SiteTileElement", self.app_js)
+
 
 
 class SiteConfigUpdateApiTests(unittest.TestCase):

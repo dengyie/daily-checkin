@@ -177,15 +177,20 @@ class StatusIndicator extends HTMLElement {
   attributeChangedCallback() { this.render(); }
   render() {
     const status = this.getAttribute("status") || "online";
-    const label = esc(this.getAttribute("label") || (status === "busy" ? "Busy" : status === "error" ? "Error" : status === "offline" ? "Offline" : "Online"));
+    const label = esc(this.getAttribute("label") || (status === "busy" ? "Busy" : status === "error" ? "Error" : status === "offline" ? "Offline" : status === "connecting" ? "Connecting" : "Online"));
     const pingMs = this.getAttribute("ping-ms");
     const showDot = this.getAttribute("show-dot") !== "false";
 
     this.innerHTML = `
       <div class="ui-status-indicator ${esc(status)}">
-        ${showDot ? `<span class="ui-status-dot ${esc(status)}"></span>` : ""}
-        <span>${label}</span>
-        ${pingMs !== null && pingMs !== undefined ? `<span class="ui-status-ping">(${esc(pingMs)}ms)</span>` : ""}
+        ${showDot ? `
+          <span class="ui-status-dot-wrap">
+            <span class="ui-status-ping ${esc(status)}"></span>
+            <span class="ui-status-dot ${esc(status)}"></span>
+          </span>
+        ` : ""}
+        <span class="ui-status-label">${label}</span>
+        ${pingMs !== null && pingMs !== undefined ? `<span class="ui-status-ping-text font-mono">(${esc(pingMs)}ms)</span>` : ""}
       </div>
     `;
   }
@@ -215,6 +220,7 @@ class ThemeToggle extends HTMLElement {
     document.documentElement.classList.toggle("dark", resolved === "dark");
     localStorage.setItem(this.storageKey, nextMode);
     this.updateActiveButtons();
+    this.dispatchEvent(new CustomEvent("change", { detail: { mode: nextMode, resolved }, bubbles: true }));
   }
   updateActiveButtons() {
     this.querySelectorAll("[data-mode]").forEach((btn) => {
@@ -243,19 +249,30 @@ if (!customElements.get("theme-toggle")) customElements.define("theme-toggle", T
 
 class PromptChips extends HTMLElement {
   static get observedAttributes() { return ["suggestions", "active"]; }
-  connectedCallback() { this.render(); this.bindEvents(); }
+  connectedCallback() {
+    this.render();
+    if (!this._eventsBound) {
+      this._eventsBound = true;
+      this.bindEvents();
+    }
+  }
   attributeChangedCallback() { this.render(); }
   render() {
     let items = [];
     try { items = JSON.parse(this.getAttribute("suggestions") || "[]"); } catch { items = []; }
     const active = this.getAttribute("active") || "";
+    const activeClean = active.replace(/\s*\(\d+\)$/, "").trim();
     this.innerHTML = `
-      <div class="ui-prompt-chips">
-        ${items.map((item) => `
-          <button type="button" class="ui-chip-btn ${item === active ? "active" : ""}" data-chip="${esc(item)}">
-            ${esc(item)}
-          </button>
-        `).join("")}
+      <div class="ui-prompt-chips" role="radiogroup">
+        ${items.map((item) => {
+          const itemClean = String(item).replace(/\s*\(\d+\)$/, "").trim();
+          const isAct = item === active || (activeClean !== "" && itemClean === activeClean);
+          return `
+            <button type="button" class="ui-chip-btn ${isAct ? "active" : ""}" data-chip="${esc(item)}" role="radio" aria-checked="${isAct ? "true" : "false"}">
+              ${esc(item)}
+            </button>
+          `;
+        }).join("")}
       </div>
     `;
   }
@@ -270,6 +287,51 @@ class PromptChips extends HTMLElement {
   }
 }
 if (!customElements.get("prompt-chips")) customElements.define("prompt-chips", PromptChips);
+
+/* ==========================================================================
+   Awesome UI Kit Helper Utilities
+   ========================================================================== */
+
+function debounce(fn, delayMs = 150) {
+  let timer = null;
+  return function (...args) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      fn.apply(this, args);
+    }, delayMs);
+  };
+}
+
+function isManualTask(task) {
+  if (!task) return false;
+  return task.checkin_mode === "manual" || Boolean(task.tags && task.tags.toLowerCase().includes("manual"));
+}
+
+function applyCredentialKindRules({ kind, accountRow, accountInput, secretLabel, secretInput, storageDesc = "macOS Keychain" }) {
+  if (kind === "password") {
+    if (accountRow) accountRow.classList.remove("is-hidden");
+    if (accountInput) accountInput.required = true;
+    if (secretLabel) secretLabel.textContent = `登录密码 * (${storageDesc} 加密存储)`;
+    if (secretInput) secretInput.placeholder = "输入站点登录密码...";
+  } else {
+    if (accountRow) accountRow.classList.add("is-hidden");
+    if (accountInput) {
+      accountInput.required = false;
+      accountInput.value = "";
+    }
+    if (secretLabel) {
+      secretLabel.textContent = kind === "cookie"
+        ? `Cookie 字符串 * (${storageDesc} 加密存储)`
+        : `API Token / Bearer 令牌 * (${storageDesc} 加密存储)`;
+    }
+    if (secretInput) {
+      secretInput.placeholder = kind === "cookie"
+        ? "输入完整 Cookie 字符串 (如 session=...; uid=...)..."
+        : "输入 API Token / 密钥...";
+    }
+  }
+}
 
 /* ==========================================================================
    State & App Controller
@@ -529,7 +591,7 @@ function openSiteDetailDrawer(siteName) {
   // 1. Config Pane
   const paneConfig = $("#site-pane-config");
   if (paneConfig) {
-    const isManualMode = task.checkin_mode === "manual" || (task.tags || "").toLowerCase().includes("manual");
+    const isManualMode = isManualTask(task);
     paneConfig.innerHTML = `
       <div class="tile-info-grid tile-info-col1 mb-md">
         <div>
@@ -727,29 +789,14 @@ function openSiteDetailDrawer(siteName) {
 
     const updateCredKindUi = () => {
       if (!kindSelect) return;
-      const k = kindSelect.value;
-      if (k === "password") {
-        if (accountRow) accountRow.classList.remove("is-hidden");
-        if (accountInput) accountInput.required = true;
-        if (secretLabel) secretLabel.textContent = "登录密码 * (保存在系统 Keychain)";
-        if (secretInput) secretInput.placeholder = "输入站点登录密码...";
-      } else {
-        if (accountRow) accountRow.classList.add("is-hidden");
-        if (accountInput) {
-          accountInput.required = false;
-          accountInput.value = "";
-        }
-        if (secretLabel) {
-          secretLabel.textContent = k === "cookie"
-            ? "Cookie 字符串 * (保存在系统 Keychain)"
-            : "API Token / Bearer 令牌 * (保存在系统 Keychain)";
-        }
-        if (secretInput) {
-          secretInput.placeholder = k === "cookie"
-            ? "输入完整 Cookie 字符串 (如 session=...; uid=...)..."
-            : "输入 API Token / 密钥...";
-        }
-      }
+      applyCredentialKindRules({
+        kind: kindSelect.value,
+        accountRow,
+        accountInput,
+        secretLabel,
+        secretInput,
+        storageDesc: "保存在系统 Keychain",
+      });
     };
     if (kindSelect) {
       kindSelect.addEventListener("change", updateCredKindUi);
@@ -1175,13 +1222,27 @@ function initTagsPicker(containerSelector, hiddenInputSelector, customInputSelec
     }
   };
 
-  addBtn?.addEventListener("click", addCustomTag);
-  customInput?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      addCustomTag();
-    }
-  });
+  container._currentAddCustomTag = addCustomTag;
+
+  if (addBtn && !addBtn._pickerBound) {
+    addBtn._pickerBound = true;
+    addBtn.addEventListener("click", () => {
+      if (typeof container._currentAddCustomTag === "function") {
+        container._currentAddCustomTag();
+      }
+    });
+  }
+  if (customInput && !customInput._pickerBound) {
+    customInput._pickerBound = true;
+    customInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (typeof container._currentAddCustomTag === "function") {
+          container._currentAddCustomTag();
+        }
+      }
+    });
+  }
 
   renderTagsCloud();
 }
@@ -1207,9 +1268,7 @@ $("#drawer-backdrop")?.addEventListener("click", () => {
    ========================================================================== */
 
 function getManualTasks() {
-  const manualList = (state.tasks || []).filter((t) =>
-    t.checkin_mode === "manual" || (t.tags && t.tags.toLowerCase().includes("manual"))
-  );
+  const manualList = (state.tasks || []).filter(isManualTask);
   let list = [...manualList];
   if (manualStatusFilter === "pending") {
     list = list.filter((t) => t.status !== "done" && t.status !== "OK" && t.status !== "ALREADY");
@@ -1229,9 +1288,7 @@ function getManualTasks() {
 }
 
 function getFilteredTasks() {
-  let list = (state.tasks || []).filter((t) =>
-    t.checkin_mode !== "manual" && (!t.tags || !t.tags.toLowerCase().includes("manual"))
-  );
+  let list = (state.tasks || []).filter((t) => !isManualTask(t));
   if (currentFilter === "待办") {
     list = list.filter((t) => t.status !== "done" && t.status !== "OK" && t.status !== "ALREADY" && t.site_health_status !== "suppressed");
   } else if (currentFilter === "已完成") {
@@ -1307,7 +1364,7 @@ function renderTile(task, showAction = true) {
   const isDone = task.status === "done" || task.status === "OK" || task.status === "ALREADY";
   const isFail = task.status === "failed" || task.status === "FAIL";
   const isSupp = task.site_health_status === "suppressed";
-  const isManual = task.checkin_mode === "manual" || (task.tags && task.tags.toLowerCase().includes("manual"));
+  const isManual = isManualTask(task);
   const tileClass = isSupp ? "is-suppressed" : isDone ? "is-ok" : isFail ? "is-fail" : "is-pending";
   const pillClass = isSupp ? "is-suppressed" : isDone ? "is-ok" : isFail ? "is-fail" : "is-pending";
   const pillText = isSupp ? "熔断" : isDone ? "已打卡" : isFail ? "失败" : "待办";
@@ -1463,13 +1520,20 @@ function generateTrendSvg(historyList, isMini = false) {
 }
 
 /* ==========================================================================
-   Master Render Pipeline
+   Master Render Pipeline & Modular View Sub-renderers
    ========================================================================== */
 
-function render() {
-  const autoTasks = (state.tasks || []).filter((t) =>
-    t.checkin_mode !== "manual" && (!t.tags || !t.tags.toLowerCase().includes("manual"))
-  );
+function getTaskFilterCount(filterKey, tasks, counts) {
+  if (filterKey === "全部") return tasks.length;
+  if (filterKey === "待办") return counts.pending;
+  if (filterKey === "已完成") return counts.done;
+  if (filterKey === "失败") return counts.failed;
+  if (filterKey === "熔断" || filterKey === "确定性失败抑制") return counts.suppressed;
+  return tasks.filter((t) => categorizeSite(t) === filterKey).length;
+}
+
+function computeTaskStats() {
+  const autoTasks = (state.tasks || []).filter((t) => !isManualTask(t));
   const totalTasks = autoTasks.length;
   const counts = { pending: 0, done: 0, failed: 0, suppressed: 0 };
   autoTasks.forEach((task) => {
@@ -1478,16 +1542,17 @@ function render() {
     else if (task.status === "failed" || task.status === "FAIL") counts.failed++;
     else counts.pending++;
   });
-
   const successRate = totalTasks ? Math.round((counts.done / totalTasks) * 100) : 0;
+  return { autoTasks, totalTasks, counts, successRate };
+}
 
-  // 1. Sidebar Badges
+function renderGlobalBadges(stats) {
+  const { totalTasks, counts, successRate } = stats;
   $("#sidebar-pending-badge").textContent = String(totalTasks);
   $("#sidebar-runs-badge").textContent = String((state.runs || []).length);
   $("#sidebar-jobs-badge").textContent = String((state.jobs || []).length);
   $("#sidebar-health-badge").textContent = String(counts.suppressed);
 
-  // 2. View 1: Overview KPIs & Summary
   $("#kpi-done").textContent = String(counts.done);
   $("#kpi-pending").textContent = String(counts.pending);
   $("#kpi-failed").textContent = String(counts.failed);
@@ -1497,14 +1562,14 @@ function render() {
   $("#overview-creds-count").textContent = String((state.credentials || []).length);
   $("#overview-jobs-count").textContent = String((state.jobs || []).filter((j) => j.status === "queued" || j.status === "running").length);
   $("#overview-health-count").textContent = String(counts.suppressed);
+}
 
-  // Overview Mini Trend Chart
+function renderOverviewView() {
   const overviewTrendChart = $("#overview-trend-chart");
   if (overviewTrendChart) {
     overviewTrendChart.innerHTML = generateTrendSvg(state.history || [], true);
   }
 
-  // Overview Recent Runs Table
   const overviewRunsTbody = $("#overview-runs-tbody");
   if (overviewRunsTbody) {
     const recent = (state.runs || []).slice(0, 5);
@@ -1537,8 +1602,10 @@ function render() {
       });
     });
   }
+}
 
-  // 3. View 2: Tasks Matrix (平铺全展开，无外部包裹容器)
+function renderTasksView(stats) {
+  const { autoTasks, totalTasks, counts } = stats;
   const filteredTasks = getFilteredTasks();
   $("#tasks-header-count").textContent = `${filteredTasks.length} / ${totalTasks}`;
 
@@ -1552,15 +1619,17 @@ function render() {
     ];
     if (counts.suppressed > 0) suggestions.push(`熔断 (${counts.suppressed})`);
     chips.setAttribute("suggestions", JSON.stringify(suggestions));
-    chips.setAttribute("active", currentFilter.includes("(") ? currentFilter : `${currentFilter} (${currentFilter === "全部" ? totalTasks : currentFilter === "待办" ? counts.pending : currentFilter === "已完成" ? counts.done : currentFilter === "失败" ? counts.failed : counts.suppressed})`);
+    const activeCount = getTaskFilterCount(currentFilter, autoTasks, counts);
+    chips.setAttribute("active", `${currentFilter} (${activeCount})`);
   }
 
   const tasksTilesContainer = $("#tasks-tiles-container");
   if (tasksTilesContainer) {
     tasksTilesContainer.innerHTML = renderTilesGrid(filteredTasks);
   }
+}
 
-  // 3.5. View 2.5: Manual Check-in Workspace (专区渲染)
+function renderManualView() {
   const { all: manualAll, filtered: manualFiltered } = getManualTasks();
   const manualPendingCount = manualAll.filter((t) => t.status === "pending" || t.status === "failed" || t.status === "FAIL").length;
   const manualDoneCount = manualAll.filter((t) => t.status === "done" || t.status === "OK" || t.status === "ALREADY").length;
@@ -1613,8 +1682,9 @@ function render() {
       manualTilesContainer.innerHTML = renderTilesGrid(manualFiltered);
     }
   }
+}
 
-  // 4. View 3: History & Trend Analytics
+function renderHistoryView(stats) {
   const historyList = state.history || [];
   let totalSuccessEver = 0;
   let totalTasksSum = 0;
@@ -1626,20 +1696,18 @@ function render() {
     successSum += (h.done_count || 0);
   });
 
-  const avgSuccessRate = totalTasksSum > 0 ? Math.round((successSum / totalTasksSum) * 100) : successRate;
+  const avgSuccessRate = totalTasksSum > 0 ? Math.round((successSum / totalTasksSum) * 100) : (stats ? stats.successRate : 0);
 
   $("#history-kpi-avg-rate").textContent = `${avgSuccessRate}%`;
   $("#history-kpi-total-runs").textContent = String(state.total_runs_count !== undefined ? state.total_runs_count : (state.runs || []).length);
   $("#history-kpi-days-count").textContent = `${historyList.length || 1} 天`;
   $("#history-kpi-total-success").textContent = String(totalSuccessEver);
 
-  // Large Trend Curve
   const historyCurveChart = $("#history-curve-chart");
   if (historyCurveChart) {
     historyCurveChart.innerHTML = generateTrendSvg(historyList, false);
   }
 
-  // Daily History Table
   const historyDailyTbody = $("#history-daily-tbody");
   if (historyDailyTbody) {
     historyDailyTbody.innerHTML = historyList.length ? historyList.map((h) => {
@@ -1662,7 +1730,6 @@ function render() {
     }).join("") : `<tr><td colspan="6" class="empty-cell">暂无历史按日统计数据</td></tr>`;
   }
 
-  // History Batches & Evidence
   const historyContainer = $("#history-batches-container");
   if (historyContainer) {
     const runsList = state.runs || [];
@@ -1733,8 +1800,9 @@ function render() {
       });
     });
   }
+}
 
-  // 5. View 4: Job Queue Table
+function renderQueueView() {
   const jobsTbody = $("#jobs-tbody");
   if (jobsTbody) {
     const jobsList = state.jobs || [];
@@ -1754,15 +1822,17 @@ function render() {
       </tr>
     `).join("") : `<tr><td colspan="6" class="empty-cell">暂无作业队列记录</td></tr>`;
   }
+}
 
-  // 6. View 5: Health & Circuit Breakers (平铺)
+function renderHealthView() {
   const healthTilesContainer = $("#health-tiles-container");
   if (healthTilesContainer) {
     const suppressedTasks = (state.tasks || []).filter((t) => t.site_health_status === "suppressed" || t.status === "failed" || t.status === "FAIL");
     healthTilesContainer.innerHTML = suppressedTasks.length ? renderTilesGrid(suppressedTasks) : `<div class="empty-cell">当前所有站点健康状态良好，无熔断或严重异常站点。</div>`;
   }
+}
 
-  // 7. View 6: Settings / Credentials Table
+function renderCredentialsView() {
   const credsTbody = $("#credentials-tbody");
   if (credsTbody) {
     const credsList = state.credentials || [];
@@ -1776,60 +1846,79 @@ function render() {
         <td><button class="btn sm danger" data-del-cred="${esc(c.ref)}">${uiIcon("trash", { size: 12 })} 删除凭据</button></td>
       </tr>
     `).join("") : `<tr><td colspan="6" class="empty-cell">暂无保存的凭据引用</td></tr>`;
+  }
+}
 
-    credsTbody.querySelectorAll("[data-del-cred]").forEach((btn) => {
-      btn.onclick = async () => {
-        if (!confirm("确认删除该凭据？")) return;
-        try {
-          await api("/api/credentials/delete", { ref: btn.dataset.delCred });
-          await load();
-          showToast("凭据已安全移除");
-        } catch (err) { showToast(err.message); }
-      };
-    });
+function render(target = null) {
+  const stats = computeTaskStats();
+  if (target === "tasks") {
+    renderTasksView(stats);
+    initTileActionDelegation();
+    return;
+  }
+  if (target === "manual") {
+    renderManualView();
+    initTileActionDelegation();
+    return;
   }
 
-  // Bind Tile Click to Open Right Detail Drawer
-  document.querySelectorAll("[data-site-tile]").forEach((tile) => {
-    tile.onclick = (e) => {
-      if (e.target.closest("[data-stop-prop]")) return;
+  // Full render pipeline
+  renderGlobalBadges(stats);
+  renderOverviewView();
+  renderTasksView(stats);
+  renderManualView();
+  renderHistoryView(stats);
+  renderQueueView();
+  renderHealthView();
+  renderCredentialsView();
+  initTileActionDelegation();
+}
+
+let tileDelegationInitialized = false;
+function initTileActionDelegation() {
+  if (tileDelegationInitialized) return;
+  tileDelegationInitialized = true;
+
+  document.addEventListener("click", (e) => {
+    const markBtn = e.target.closest("[data-mark-complete]");
+    if (markBtn) {
+      e.stopPropagation();
+      markTaskManuallyComplete(markBtn.dataset.markComplete, markBtn);
+      return;
+    }
+    const manualBtn = e.target.closest("[data-manual-checkin]");
+    if (manualBtn) {
+      e.stopPropagation();
+      handleManualCheckin(manualBtn.dataset.manualCheckin, manualBtn.dataset.url);
+      return;
+    }
+    const runBtn = e.target.closest("[data-run-site]");
+    if (runBtn) {
+      e.stopPropagation();
+      triggerRun([runBtn.dataset.runSite]);
+      return;
+    }
+    const openSiteBtn = e.target.closest("[data-open-site-detail]");
+    if (openSiteBtn) {
+      e.stopPropagation();
+      openSiteDetailDrawer(openSiteBtn.dataset.openSiteDetail);
+      return;
+    }
+    const delCredBtn = e.target.closest("[data-del-cred]");
+    if (delCredBtn) {
+      e.stopPropagation();
+      if (!confirm("确认删除该凭据？")) return;
+      api("/api/credentials/delete", { ref: delCredBtn.dataset.delCred })
+        .then(() => load())
+        .then(() => showToast("凭据已安全移除"))
+        .catch((err) => showToast(err.message));
+      return;
+    }
+    const tile = e.target.closest("[data-site-tile]");
+    if (tile && !e.target.closest("[data-stop-prop]")) {
       openSiteDetailDrawer(tile.dataset.siteTile);
-    };
-  });
-  document.querySelectorAll("[data-manual-checkin]").forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      handleManualCheckin(btn.dataset.manualCheckin, btn.dataset.url);
-    };
-  });
-  document.querySelectorAll("[data-mark-complete]").forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      markTaskManuallyComplete(btn.dataset.markComplete, btn);
-    };
-  });
-  document.querySelectorAll("[data-open-site-detail]").forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      openSiteDetailDrawer(btn.dataset.openSiteDetail);
-    };
-  });
-  document.querySelectorAll("[data-run-site]").forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      triggerRun([btn.dataset.runSite]);
-    };
-  });
-  document.querySelectorAll("[data-delete-credential]").forEach((btn) => {
-    btn.onclick = async (e) => {
-      e.stopPropagation();
-      if (!confirm("确认删除该站点保存的凭据？")) return;
-      try {
-        await api("/api/credentials/delete", { ref: btn.dataset.deleteCredential });
-        await load();
-        showToast("凭据已安全移除");
-      } catch (err) { showToast(err.message); }
-    };
+      return;
+    }
   });
 }
 
@@ -2000,24 +2089,32 @@ $("#cfg-test-tg-btn")?.addEventListener("click", async () => {
 });
 
 
+const handleTasksSearch = debounce((val) => {
+  searchQuery = val.trim();
+  render("tasks");
+}, 120);
+
 $("#tasks-search-input")?.addEventListener("input", (e) => {
-  searchQuery = e.target.value.trim();
-  render();
+  handleTasksSearch(e.target.value);
 });
 
 $("#tasks-sort-select")?.addEventListener("change", (e) => {
   currentSort = e.target.value;
-  render();
+  render("tasks");
 });
 
+const handleManualSearch = debounce((val) => {
+  manualSearchQuery = val.trim();
+  render("manual");
+}, 120);
+
 $("#manual-search-input")?.addEventListener("input", (e) => {
-  manualSearchQuery = e.target.value.trim();
-  render();
+  handleManualSearch(e.target.value);
 });
 
 $("#manual-filter-select")?.addEventListener("change", (e) => {
   manualStatusFilter = e.target.value;
-  render();
+  render("manual");
 });
 
 $("#manual-open-all-pending-btn")?.addEventListener("click", () => {
@@ -2039,7 +2136,7 @@ if (filterChips) {
   filterChips.addEventListener("select", (e) => {
     const raw = e.detail || "全部";
     currentFilter = raw.replace(/\s*\(\d+\)$/, "");
-    render();
+    render("tasks");
   });
 }
 
@@ -2057,7 +2154,7 @@ if (manualFilterChips) {
     }
     const select = $("#manual-filter-select");
     if (select) select.value = manualStatusFilter;
-    render();
+    render("manual");
   });
 }
 
@@ -2119,29 +2216,14 @@ const credSecretInput = $("#cred-secret");
 
 const updateMainCredKindUi = () => {
   if (!credKindSelect) return;
-  const k = credKindSelect.value;
-  if (k === "password") {
-    if (credAccountRow) credAccountRow.classList.remove("is-hidden");
-    if (credAccountInput) credAccountInput.required = true;
-    if (credSecretLabel) credSecretLabel.textContent = "登录密码 * (macOS Keychain 加密存储)";
-    if (credSecretInput) credSecretInput.placeholder = "输入站点登录密码...";
-  } else {
-    if (credAccountRow) credAccountRow.classList.add("is-hidden");
-    if (credAccountInput) {
-      credAccountInput.required = false;
-      credAccountInput.value = "";
-    }
-    if (credSecretLabel) {
-      credSecretLabel.textContent = k === "cookie"
-        ? "Cookie 字符串 * (macOS Keychain 加密存储)"
-        : "API Token / Bearer 令牌 * (macOS Keychain 加密存储)";
-    }
-    if (credSecretInput) {
-      credSecretInput.placeholder = k === "cookie"
-        ? "输入完整 Cookie 字符串 (如 session=...; uid=...)..."
-        : "输入 API Token / 密钥...";
-    }
-  }
+  applyCredentialKindRules({
+    kind: credKindSelect.value,
+    accountRow: credAccountRow,
+    accountInput: credAccountInput,
+    secretLabel: credSecretLabel,
+    secretInput: credSecretInput,
+    storageDesc: "macOS Keychain",
+  });
 };
 if (credKindSelect) {
   credKindSelect.addEventListener("change", updateMainCredKindUi);

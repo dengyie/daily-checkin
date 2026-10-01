@@ -622,55 +622,13 @@ code, pre {
   width: 4px;
 }
 .homepage-tile.is-ok .tile-status-bar { background: var(--color-success); box-shadow: 0 0 10px var(--color-success); }
-.homepage-tile.is-clickable {
-  cursor: pointer;
-}
-
-/* Site Drawer Dedicated Header & Avatar */
-.drawer-site-header-wrap {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-width: 0;
-}
-
-.drawer-site-avatar-box {
-  width: 46px;
-  height: 46px;
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--border-glass);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  padding: 8px;
-}
-.drawer-site-avatar-box svg {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
-.drawer-site-title-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.drawer-footer-bar {
-  padding: 16px 24px;
-  border-top: 1px solid var(--border-glass);
-  background: rgba(0, 0, 0, 0.2);
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-}
 .homepage-tile.is-pending .tile-status-bar { background: var(--color-warning); box-shadow: 0 0 10px var(--color-warning); }
 .homepage-tile.is-fail .tile-status-bar { background: var(--color-danger); box-shadow: 0 0 10px var(--color-danger); }
 .homepage-tile.is-suppressed .tile-status-bar { background: var(--color-purple); box-shadow: 0 0 10px var(--color-purple); }
+
+.homepage-tile.is-clickable {
+  cursor: pointer;
+}
 
 .tile-head {
   display: flex;
@@ -862,6 +820,7 @@ code, pre {
   border-radius: 50%;
   background: currentColor;
   box-shadow: 0 0 6px currentColor;
+  animation: dot-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
 /* Tile Grid Details */
@@ -1189,24 +1148,75 @@ code, pre {
 .ui-status-indicator {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 12px;
   font-weight: 500;
-  padding: 3px 9px;
+  padding: 3px 10px;
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--border-glass);
 }
-.ui-status-dot {
-  width: 7px;
-  height: 7px;
+.ui-status-dot-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+}
+.ui-status-ping {
+  position: absolute;
+  inset: 0;
   border-radius: 50%;
+  opacity: 0.75;
+  animation: ui-ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+.ui-status-ping.online { background: #10b981; }
+.ui-status-ping.busy { background: #f59e0b; }
+.ui-status-ping.connecting { background: #3b82f6; }
+.ui-status-ping.error { background: #ef4444; }
+.ui-status-ping.offline { display: none; }
+
+.ui-status-dot {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 .ui-status-dot.online { background: #10b981; box-shadow: 0 0 8px #10b981; }
 .ui-status-dot.busy { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+.ui-status-dot.connecting { background: #3b82f6; box-shadow: 0 0 8px #3b82f6; }
 .ui-status-dot.error { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
 .ui-status-dot.offline { background: #64748b; }
-.ui-status-ping { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
+
+.ui-status-label {
+  line-height: 1;
+}
+.ui-status-ping-text {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+
+@keyframes ui-ping {
+  75%, 100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+@keyframes dot-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.85);
+  }
+}
 
 /* Theme Toggle */
 .ui-theme-toggle {
@@ -1240,6 +1250,7 @@ code, pre {
 }
 
 /* Prompt Chips */
+.ui-prompt-chips,
 .ui-chips-container {
   display: flex;
   gap: 8px;
@@ -1305,6 +1316,49 @@ code, pre {
 }
 .evidence-drawer.is-open {
   transform: translateX(0);
+}
+
+/* Site Drawer Dedicated Header & Avatar */
+.drawer-site-header-wrap {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.drawer-site-avatar-box {
+  width: 46px;
+  height: 46px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-glass);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 8px;
+}
+.drawer-site-avatar-box svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.drawer-site-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.drawer-footer-bar {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border-glass);
+  background: rgba(0, 0, 0, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
 }
 
 .drawer-header {
@@ -1568,11 +1622,27 @@ code, pre {
   border-color: rgba(16, 185, 129, 0.4);
   background: rgba(6, 78, 59, 0.85);
   box-shadow: 0 10px 25px -5px rgba(16, 185, 129, 0.3);
+  color: #ecfdf5;
+}
+.message-toast.toast-success ui-icon {
+  color: #34d399;
 }
 .message-toast.toast-error {
   border-color: rgba(239, 68, 68, 0.4);
   background: rgba(127, 29, 29, 0.85);
   box-shadow: 0 10px 25px -5px rgba(239, 68, 68, 0.3);
+  color: #fef2f2;
+}
+.message-toast.toast-error ui-icon {
+  color: #f87171;
+}
+.message-toast.toast-info {
+  border-color: rgba(59, 130, 246, 0.4);
+  background: rgba(30, 58, 138, 0.85);
+  color: #eff6ff;
+}
+.message-toast.toast-info ui-icon {
+  color: #60a5fa;
 }
 
 /* ==========================================================================
@@ -1631,28 +1701,6 @@ code, pre {
 
 .form-grid-col2 .content-card:hover {
   border-color: var(--border-glass-highlight);
-}
-
-  color: #ecfdf5;
-}
-.message-toast.toast-success ui-icon {
-  color: #34d399;
-}
-.message-toast.toast-error {
-  border-color: rgba(239, 68, 68, 0.4);
-  background: rgba(127, 29, 29, 0.85);
-  color: #fef2f2;
-}
-.message-toast.toast-error ui-icon {
-  color: #f87171;
-}
-.message-toast.toast-info {
-  border-color: rgba(59, 130, 246, 0.4);
-  background: rgba(30, 58, 138, 0.85);
-  color: #eff6ff;
-}
-.message-toast.toast-info ui-icon {
-  color: #60a5fa;
 }
 
 /* Spin animation for loader */
