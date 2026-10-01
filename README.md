@@ -25,7 +25,7 @@
 
 <br>
 
-<img src="docs/assets/dashboard.png" alt="Daily Check-in 控制台" width="100%" style="border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12);"/>
+<img src="docs/assets/dashboard-v2.png" alt="Daily Check-in 控制台" width="100%" style="border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12);"/>
 
 </div>
 
