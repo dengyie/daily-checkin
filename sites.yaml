@@ -883,6 +883,10 @@ sites:
   # 随后按钮翻成 disabled「今日已签到」。已签: 按钮「今日已签到」(disabled)。
   # 常驻「每日签到 / 每天一次，每次获得 10 积分」说明绝不能当已签。
   # LinuxDo OAuth 登录(复用 9222 共享 profile,已关联 mangoqwq)。P0:禁止全清 Cookie。
+  # pool(pool.983698.xyz, 983698 公益池)—— 2026-09-20 接入。
+  # 2026-10-01 站点改版:每日签到从「商店」Tab 迁移至「我的信息」Tab
+  # (商店 Tab 面板已变为「兑换邀请码」,消耗积分,绝不可点)。
+  # pool_checkin 专属流程:点「我的信息」→「立即签到」(文案锚定,严防误触兑换)。
   - name: 'pool'
     url: https://pool.983698.xyz/
     kind: pool

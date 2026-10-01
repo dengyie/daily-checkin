@@ -5463,9 +5463,11 @@ class TestDarkforgerCheckin(unittest.TestCase):
 
 
 class TestPoolCheckin(unittest.TestCase):
-    """pool.983698.xyz —— 2026-09-20 接入.
+    """pool.983698.xyz —— 2026-09-20 接入,2026-10-01 站点改版适配.
 
-    React SPA,侧栏「商店」是 in-app tab,首页没有立即签到。必须先点商店再点 CTA。
+    React SPA,「我的信息」(subscriptions)是 in-app tab;2026-10-01 改版后每日签到
+    从「商店」Tab 迁移到「我的信息」Tab(商店面板已变为「兑换邀请码」,绝不可点)。
+    必须先点「我的信息」再点 CTA。
     P0 红线: 绝不调用 clear_cookies / clear_localStorage / clear_all (全清 9222 其它域).
     """
 
@@ -5530,8 +5532,8 @@ class TestPoolCheckin(unittest.TestCase):
         self.assertNotIn("clear_localstorage", lower)
         self.assertNotIn("clear_all", lower)
 
-    def test_pool_already_checked_in_on_store_tab(self):
-        """点开商店后按钮显示今日已签到时，直接返回 ALREADY，不再点立即签到。"""
+    def test_pool_already_checked_in_on_info_tab(self):
+        """2026-10-01 改版:点「我的信息」后按钮显示今日已签到时，直接返回 ALREADY。"""
         m = self.m
         clicks = []
 
@@ -5556,7 +5558,7 @@ class TestPoolCheckin(unittest.TestCase):
             def locator(self, sel):
                 if "LinuxDo" in sel:
                     return FakeLocator(sel, visible=False)
-                if "商店" in sel:
+                if "我的信息" in sel:
                     return FakeLocator(sel, visible=True)
                 if "今日已签到" in sel:
                     return FakeLocator(sel, visible=True)
@@ -5565,7 +5567,7 @@ class TestPoolCheckin(unittest.TestCase):
                 return FakeLocator(sel, visible=False)
 
         async def fake_page_text(p, limit=2000):
-            return "商店\n每日签到\n每天一次，每次获得 10 积分\n今日已签到"
+            return "我的信息\n每日签到\n今日已签到"
 
         orig_page_text = m.page_text
         m.page_text = fake_page_text
@@ -5573,16 +5575,18 @@ class TestPoolCheckin(unittest.TestCase):
             res = self.asyncio.run(m.pool_checkin(FakePage(), self._adapter()))
             self.assertEqual(res.status, "ALREADY")
             self.assertIn("今日已签到", res.detail)
-            self.assertTrue(any("商店" in c for c in clicks))
+            self.assertTrue(any("我的信息" in c for c in clicks))
             self.assertFalse(any("立即签到" in c for c in clicks))
+            # 商店 Tab 的「兑换邀请码」绝不可被点击(消耗积分)
+            self.assertFalse(any("兑换邀请码" in c for c in clicks))
         finally:
             m.page_text = orig_page_text
 
-    def test_pool_successful_checkin_via_store_tab(self):
-        """正常流程：点商店 → 点立即签到 → toast 签到成功。"""
+    def test_pool_successful_checkin_via_info_tab(self):
+        """2026-10-01 改版正常流程：点我的信息 → 点立即签到 → toast 签到成功。"""
         m = self.m
         clicks = []
-        state = {"clicked": False, "store": False}
+        state = {"clicked": False, "info": False}
 
         class FakeLocator:
             def __init__(self, sel, visible=True):
@@ -5597,8 +5601,8 @@ class TestPoolCheckin(unittest.TestCase):
                 return self._visible
             async def click(self, **kw):
                 clicks.append(self.sel)
-                if "商店" in self.sel:
-                    state["store"] = True
+                if "我的信息" in self.sel:
+                    state["info"] = True
                 if "立即签到" in self.sel:
                     state["clicked"] = True
 
@@ -5612,19 +5616,19 @@ class TestPoolCheckin(unittest.TestCase):
             def locator(self, sel):
                 if "LinuxDo" in sel:
                     return FakeLocator(sel, visible=False)
-                if "商店" in sel:
+                if "我的信息" in sel:
                     return FakeLocator(sel, visible=True)
                 if "立即签到" in sel:
-                    return FakeLocator(sel, visible=state["store"] and not state["clicked"])
+                    return FakeLocator(sel, visible=state["info"] and not state["clicked"])
                 if "今日已签到" in sel:
                     return FakeLocator(sel, visible=state["clicked"])
                 return FakeLocator(sel, visible=False)
 
         async def fake_page_text(p, limit=2000):
             if state["clicked"]:
-                return "商店\n每日签到\n签到成功，获得 10 积分\n今日已签到"
-            if state["store"]:
-                return "商店\n每日签到\n每天一次，每次获得 10 积分\n立即签到"
+                return "我的信息\n每日签到\n签到成功，获得 10 积分\n今日已签到"
+            if state["info"]:
+                return "我的信息\n每日签到\n立即签到"
             return "我的信息\n商店\n动漫\nmangoqwq"
 
         orig_page_text = m.page_text
@@ -5633,8 +5637,10 @@ class TestPoolCheckin(unittest.TestCase):
             res = self.asyncio.run(m.pool_checkin(FakePage(), self._adapter()))
             self.assertEqual(res.status, "OK")
             self.assertIn("签到成功", res.detail)
-            self.assertTrue(any("商店" in c for c in clicks))
+            self.assertTrue(any("我的信息" in c for c in clicks))
             self.assertTrue(any("立即签到" in c for c in clicks))
+            self.assertFalse(any("商店" in c for c in clicks))
+            self.assertFalse(any("兑换邀请码" in c for c in clicks))
         finally:
             m.page_text = orig_page_text
 

@@ -8069,8 +8069,11 @@ def is_pool_site(site_url: str) -> bool:
 async def pool_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
     """pool.983698.xyz 专用签到流程.
 
-    React SPA,侧栏「商店」是 in-app tab(page==='store'),URL 不改 hash/path。
-    首页没有「立即签到」,通用 browser 扫首页会 FAIL:no_button,必须先点「商店」。
+    React SPA,侧栏「我的信息」(subscriptions)是 in-app tab,URL 不改 hash/path。
+    2026-10-01 站点改版:每日签到从「商店」Tab 迁移到「我的信息」Tab
+    (紧跟手机绑定表单后);商店 Tab 的 reward 面板已改为「兑换邀请码」
+    (POST /api/user/store/invites,消耗积分)——绝不可点击,选择器必须
+    锚定「立即签到」文案。
     未签: button.primary「立即签到」→ POST /api/user/checkin → toast「签到成功，获得 10 积分」
          随后按钮翻成 disabled「今日已签到」。
     已签: button.primary disabled「今日已签到」。常驻「每日签到」标题绝不能当已签。
@@ -8109,15 +8112,15 @@ async def pool_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResul
             pass
         await wait_text_ready(page, 30, adapter.ready_rounds)
 
-    store_tab = page.locator('button:has-text("商店")').first
-    if await store_tab.count() == 0 or not await store_tab.is_visible(timeout=2000):
+    info_tab = page.locator('button:has-text("我的信息")').first
+    if await info_tab.count() == 0 or not await info_tab.is_visible(timeout=2000):
         body = await page_text(page, 800)
-        return fail_result("no_store_tab", detail=f"商店 tab not found: {body[:120]}", adapter=kind, stage="action")
-    print("  pool: clicking 商店 tab...", flush=True)
+        return fail_result("no_tab", detail=f"我的信息 tab not found: {body[:120]}", adapter=kind, stage="action")
+    print("  pool: clicking 我的信息 tab...", flush=True)
     try:
-        await store_tab.click()
+        await info_tab.click()
     except Exception as e:
-        return fail_result("click_failed", detail=f"click 商店 failed: {e}", adapter=kind, stage="action")
+        return fail_result("click_failed", detail=f"click 我的信息 failed: {e}", adapter=kind, stage="action")
     await asyncio.sleep(0.8)
     await wait_text_ready(page, 20, max(adapter.ready_rounds or 8, 6))
 
@@ -8138,7 +8141,7 @@ async def pool_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResul
         body_fresh = await page_text(page, 800)
         if "今日已签到" in body_fresh:
             return confirmed_done_result("今日已签到", adapter=kind)
-        return fail_result("no_button", detail=f"立即签到 not found after 商店: {body_fresh[:120]}", adapter=kind, stage="action")
+        return fail_result("no_button", detail=f"立即签到 not found after 我的信息: {body_fresh[:120]}", adapter=kind, stage="action")
 
     print("  pool: clicking 立即签到...", flush=True)
     action = ActionEvidence(
