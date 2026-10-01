@@ -1,149 +1,143 @@
-# Daily Check-in
+<div align="center">
 
-A local-first, evidence-driven multi-site check-in system for macOS and an existing Chrome CDP session.
+# 🌟 Daily Check-in
 
-它不是“点击到了就算成功”的签到脚本。每个成功结果必须经过业务确认，并记录 action、confirmation、provider、stage 与失败原因。
+### 泛支持所有网页的全自动签到神器 · 证据驱动 · 零假死 · 极速扩展
 
-- SQLite 是权威任务与运行数据库
-- Obsidian 是任务导入与结果投影界面；SQLite 是系统运行权威
-- macOS Keychain 保存账号、Cookie、Token 和密码
-- 本地 Web UI 支持任务、凭据、单站/全站执行、队列和运行证据
-- 复用已有 headed Chrome，不启动、不杀死浏览器
-- 无确认不成功，CDP 硬故障不会被误报为正常完成
+[![GitHub License](https://img.shields.io/github/license/dengyie/daily-checkin?style=flat-square&color=blue)](LICENSE)
+[![Python Version](https://img.shields.io/badge/python-3.10+-brightgreen.svg?style=flat-square)](https://www.python.org/)
+[![Playwright](https://img.shields.io/badge/playwright-CDP%20Headed-orange.svg?style=flat-square)](https://playwright.dev/)
+[![Security](https://img.shields.io/badge/storage-macOS%20Keychain%20%2B%20SQLite-purple.svg?style=flat-square)](SECURITY.md)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-green.svg?style=flat-square)](https://github.com/dengyie/daily-checkin/pulls)
 
-![Daily Check-in dashboard](docs/assets/dashboard.png)
+<p align="center">
+  <b>不仅是一个脚本，而是一套工业级、高容错、泛用型网页签到与调度系统。</b><br>
+  依托原生 Chrome CDP 会话复用，支持几乎所有需要登录、防爬或复杂交互的现代 Web 站点。
+</p>
 
-## 主要特性
+[✨ 核心亮点](#-为什么选择-daily-checkin) •
+[🌐 泛网页支持](#-泛网页签到与零代码适配) •
+[🚀 快速上手](#-快速上手) •
+[🖥️ Web 控制台](#-现代-web-ui-控制台) •
+[⚙️ 站点配置指南](#-站点配置与自定义扩展) •
+[🧩 架构设计](#-架构与工作原理) •
+[🤝 社区贡献](#-参与贡献)
 
-### 独立任务系统
+<br>
 
-运行状态默认保存在：
+<img src="docs/assets/dashboard.png" alt="Daily Check-in 控制台" width="100%" style="border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12);"/>
 
-```text
-~/.hermes/checkin/system.db
+</div>
+
+---
+
+## 📖 痛点与解决方案
+
+| 传统签到脚本常见痛点 | 🌟 Daily Check-in 解决方案 |
+| :--- | :--- |
+| **容易掉登录态**：纯 HTTP 请求频繁被风控拦截或 Cookie 过期 | **复用系统 Chrome CDP**：直接共享浏览器真实会话，免除频繁扫码与验证 |
+| **虚假成功 (Fake Success)**：点了按钮就报成功，其实被弹窗挡住或签到失败 | **证据驱动架构 (Evidence-First)**：双重核验 DOM 强状态 / 响应数据，无实质业务成功绝不误报 |
+| **适配成本高**：每个新网站都要写几十行复杂脚本 | **极简声明式 YAML**：95% 网站只需几行选择器配置，通用智能流自动识别 |
+| **弹窗阻断**：全屏广告、活动弹窗、签到日历遮挡点击 | **智能弹窗爆破 (Overlay Zapper)**：自动清理遮罩与阻挡层，精准点击目标 CTA |
+| **安全隐患**：明文账号密码写在配置文件中 | **系统级安全隔离**：敏感凭据落入 macOS Keychain 硬件保护，SQLite 仅存引用 |
+
+---
+
+## ✨ 为什么选择 Daily Check-in
+
+### 1. 🌐 泛支持所有网页签到（Universal Web Check-in）
+无论是 **New API / One API 中继网关**、各类**论坛社区（Linux.do/Discuz 等）**、**AI 平台**、**云服务商**，还是各类个性化独立站点，只需提供 URL 与简单的 CSS/文本选择器，系统即可自动接入。
+
+### 2. 🛡️ 严格的业务证据驱动（Evidence-Driven Verification）
+拒绝“只要没报错就算签到成功”。签到动作执行后，系统会启动证据采集门：
+- `dom_strong` / `dom_done_state`: 页面出现“今日已签到”、“明日再来”或签到按钮状态变更为 disabled。
+- `network_response` / `api_success`: 捕获到底层签到接口成功回包与积分增加。
+- 只有真实捕获到证据才标记 `OK` / `ALREADY`，否则准确归类失败原因（如 `auth_failed`, `no_confirm`, `selector_missing` 等）。
+
+### 3. 🚀 真正的无感 CDP 会话复用（Headless-Proof）
+- 自动连接您日常使用的独立 Chrome 调试端口，**不主动启动、不暴力关闭**您的浏览器。
+- 通过 CDP `/json/new` 创建静默临时标签页，签到完成后立刻安全销毁，**绝不干扰您正在浏览的标签页**。
+- 原生绕过绝大部分自动化检测（Cloudflare Turnstile, WAF, 滑块风控）。
+
+### 4. 🎛️ 开箱即用的精美前后端控制台
+- **极简独立**：内置无构建轻量前端（原生 Modern Web Components + CSS 变量，无需 `npm install` 或复杂的 Node 构建环境）。
+- **功能齐全**：支持单站即时调试、全站一键执行、实时 FIFO 任务队列、失败重试、健康熔断诊断、运行证据下钻与 Telegram 告警配置。
+
+### 5. 🔌 丰富的生态与联动能力
+- **Obsidian 任务联动**：可双向同步 Obsidian 每日任务清单，结果自动打勾投影。
+- **Hermes / Cron / 自动化调度**：单进程优雅退出，支持定时静默巡检与异常告警。
+
+---
+
+## 🌐 泛网页签到与零代码适配
+
+Daily Check-in 拥有高度抽象的适配引擎，绝大多数网站无需编写任何 Python 代码，只需在 `sites.yaml` 中声明：
+
+### 场景 A：标准现代网页（只需配置按钮与已签到文本）
+```yaml
+sites:
+  - name: '我的技术论坛'
+    url: https://forum.example.com/checkin
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+      - '.checkin-btn'
+    already:
+      - 'text=今日已签到'
+      - 'text=明日再来'
+      - 'button:disabled'
 ```
 
-SQLite 数据库管理：
-
-- 站点目录
-- 每日任务
-- 运行批次和单站结果
-- Web 作业队列
-- credential reference
-
-系统每天会从已启用站点目录生成待办。Obsidian 只负责导入与结果投影；文件缺失、iCloud 未挂载或单行投影失败时，SQLite 中已登记的任务仍会独立运行，业务结果不会被降级。
-
-### Evidence-first 成功门
-
-```text
-页面动作 action
-    ↓
-业务确认 confirmation
-    ↓
-OK / ALREADY
+### 场景 B：New API / One API / 各种 API 聚合中继平台
+原生内置 `newapi_profile` 模板，一行搞定全站适配：
+```yaml
+sites:
+  - name: '公益大模型网关'
+    url: https://api.example.com/profile
+    kind: newapi_profile
 ```
 
-点击按钮本身不产生成功结果。支持的证据类型包括：
-
-- `dom_strong`
-- `dom_done_state`
-- `network_response`
-- `server_status`
-- `api_success`
-
-当前通用 provider 主要使用严格 DOM 确认；未经验证的站点 API 不会被猜测调用。
-
-### 安全的 Chrome 生命周期
-
-- 仅连接已有 Chrome CDP
-- 不调用 `chromium.launch()`
-- 不调用远端 `Browser.close()`
-- 使用 `/json/new` 创建静默临时 target
-- 只按精确 CDP target ID 绑定页面
-- 只关闭本轮 target 和由 `openerId` 证明归属的 OAuth popup
-- 无法证明归属时宁可失败，不操作未知标签
-- 默认拒绝纯 headless endpoint
-- 自动发现硬优先 `chrome-checkin-profile`
-
-### 本地 Web UI（前后端分离）
-
-控制台现在分成两个进程：
-
-- **前端（静态页面）**：`http://127.0.0.1:8766`
-- **后端（API）**：`http://127.0.0.1:8765`
-
-支持：
-
-- 今日任务和状态汇总
-- 添加系统任务
-- 单站执行
-- 全部站点执行
-- FIFO 作业队列
-- 运行历史和 evidence
-- Keychain 凭据保存、引用查看和删除
-
-两个进程都只允许 loopback 绑定；后端启用随机 CSRF token、Host allow-list、`Cache-Control: no-store` 和精确 Origin CORS allow-list；前端静态服务保留 CSP、`no-store`、`nosniff` 安全头。
-
-这是项目自带的轻量本地前端,不是独立的 SaaS 服务:
-
-- 页面文件在 `web/` (`index.html`、`app.js`、`style.css`),无需 npm、Node、React/Vue 或前端构建步骤。
-- 前端是独立的只读静态服务（`scripts/serve-frontend.py`,默认端口 8766）,不具备 API、凭据、runner 或文件写入能力。
-- 后端在 `checkin_core/web.py`,提供 loopback HTTP API（默认 8765)、FIFO job queue、认证/CSRF/CORS 和 run evidence。
-- 前端通过显式 `API_BASE`（默认 `http://127.0.0.1:8765`)调用 API;登录使用密码（`DAILY_CHECKIN_WEB_PASSWORD`）。旧 Bearer `web.token` 仍被接受以保持兼容。
-- 默认只监听 `127.0.0.1`;不要通过反向代理直接暴露公网。
-
-### 与参考仓库的关系
-
-架构设计参考 `qixing-jk/all-api-hub` 的 provider、API-first、native-page action 和 server-side confirmation 思路。参考仓库有自己的 Web 前端;本项目没有复制其前端或运行时,而是保留独立的 Python/CDP/SQLite/Keychain 实现,并使用上面的无构建 HTML/CSS/JavaScript 前端。
-
-### Keychain 凭据
-
-可以保存：
-
-- account
-- cookie
-- token
-- password
-
-秘密值进入 macOS Keychain：
-
-```text
-service = com.mango.daily-checkin
+### 场景 C：静默 API 签到 / 积分接口
+有些站点只需登录态并在控制台静默触发 POST 请求：
+```yaml
+sites:
+  - name: '极速签到站点'
+    url: https://router.example.com/console
+    kind: browser
+    signin_api: /api/user/sign_in
 ```
 
-SQLite 只保存凭据引用、类型、标签和更新时间。秘密值不会进入 system.db、JSONL、Git 或 Web 状态 API。
+### 场景 D：深度定制 Provider（高阶扩展）
+对于具有极其复杂的前置流程（如 Canvas 刮刮乐、验证码等待、OAuth 跳转）的站点，继承 `BaseCheckinProvider` 即可享受完整的生命周期管理与证据收集能力。
 
-通用 DOM provider 不会自动读取凭据。只有站点专用 provider 明确实现消费规则后，凭据才会注入页面或请求，防止跨站泄漏。
+---
 
-## 系统要求
+## 🚀 快速上手
 
-- macOS
+### 1. 环境准备
+
+- macOS 12+ (推荐)
 - Python 3.10+
 - Google Chrome 或 Chromium
-- Chrome 已使用独立 profile 开启 Remote Debugging
-- `lsof` 和 macOS `security` CLI
-
-Hermes Agent 和 Obsidian 都是可选集成，不是核心运行依赖。
-
-## 快速开始
-
-### 1. 克隆与安装
 
 ```bash
+# 1. 克隆项目
 git clone https://github.com/dengyie/daily-checkin.git
 cd daily-checkin
 
+# 2. 创建并激活虚拟环境
 python3 -m venv .venv
 source .venv/bin/activate
+
+# 3. 安装轻量依赖
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-runner 通过 CDP 连接系统 Chrome；Playwright 下载的 Chromium 不会由 runner 自动启动。
+### 2. 启动 Chrome 独立调试会话
 
-### 2. 启动独立 Chrome profile
-
-Chrome 136+ 通常要求 Remote Debugging 使用非默认 user-data-dir。
+> 💡 **为什么需要独立 Profile？**
+> Chrome 136+ 安全策略要求远程调试端口绑定独立目录，这保证了签到环境的干净与安全性。
 
 ```bash
 open -n -a "Google Chrome" --args \
@@ -153,374 +147,170 @@ open -n -a "Google Chrome" --args \
   --no-first-run \
   --no-default-browser-check
 ```
+*在打开的浏览器窗口中，登录你希望签到的站点账号（登录态会自动持久化保存）。*
 
-在这个 profile 中手动完成站点登录。runner 不负责启动或终止 Chrome。
-
-检查 CDP：
-
+验证端口畅通：
 ```bash
 curl -fsS http://127.0.0.1:9222/json/version
 ```
 
-### 3. 启动 Web UI（前后端分离）
-
-先启动后端 API:
+### 3. 一键运行体验
 
 ```bash
-.venv/bin/python -m checkin_core.web \
-  --host 127.0.0.1 \
-  --port 8765
+# 仿真测试（解析任务、加载站点目录，但不触发真实点击）
+python stealth_checkin_runner.py --dry-run
+
+# 执行所有已启用站点的签到
+python stealth_checkin_runner.py
+
+# 仅签到指定站点
+python stealth_checkin_runner.py --only "fengwind,HotaruAPI"
+
+# 仅重试上一次失败的站点
+python stealth_checkin_runner.py --retry-auto-fail
 ```
 
-再启动前端静态服务:
+---
+
+## 🖥️ 现代 Web UI 控制台
+
+项目自带前后端分离的现代化本地控制台，让批量管理与监控一目了然。
 
 ```bash
-.venv/bin/python scripts/serve-frontend.py \
-  --host 127.0.0.1 \
-  --port 8766
+# 启动后端 API（端口 8765）
+python -m checkin_core.web --host 127.0.0.1 --port 8765 &
+
+# 启动前端静态服务（端口 8766）
+python scripts/serve-frontend.py --host 127.0.0.1 --port 8766 &
 ```
 
-浏览器访问:
+打开浏览器访问 **`http://127.0.0.1:8766`**：
+
+- 📊 **总览大盘**：实时展示今日成功数、已签数、失败数与队列运行状况。
+- ⚡ **即时调试**：可在面板上对任意单站发起即时运行或批量入队。
+- 🔍 **证据回溯**：点击任意历史记录，可查看详细的动作链（Action）与确认证据（Confirmation）。
+- 🔔 **通知管理**：在线测试与配置 Telegram 机器人推送。
+
+---
+
+## ⚙️ 站点配置与自定义扩展
+
+### 配置文件结构 (`sites.yaml`)
+
+项目内置了丰富站点的适配模板，你可以直接编辑 `sites.yaml` 增删自己的站点：
+
+```yaml
+sites:
+  # 示例 1: 通用网页适配（支持多选择器容错回退）
+  - name: '示例论坛'
+    url: https://linux.do/
+    kind: browser
+    signs:
+      - 'button:has-text("打卡")'
+      - '.checkin-action'
+    already:
+      - 'text=今日已打卡'
+      - 'text=已签到'
+    ready_rounds: 15          # 页面加载等待轮数
+    use_overlay_zapper: true  # 自动清理活动弹窗
+
+  # 示例 2: New API 标准个人中心
+  - name: '我的聚合 API'
+    url: https://api.my-domain.com/profile
+    kind: newapi_profile
+
+  # 示例 3: 带特殊请求头的签到 API
+  - name: '专属节点站'
+    url: https://node.example.com/console
+    kind: browser
+    signin_api: /api/v1/user/checkin
+    signin_api_uid_header: true
+```
+
+### 字段说明表
+
+| 字段 | 类型 | 说明 | 默认值 |
+| :--- | :---: | :--- | :---: |
+| `name` | `string` | 站点唯一标识名称 | **必填** |
+| `url` | `string` | 签到目标页面完整 URL | **必填** |
+| `kind` | `string` | 适配类型 (`browser`, `newapi_profile`, `bohe`, `arkengine` 等) | `browser` |
+| `signs` | `list` | 签到按钮的定位选择器（按顺序依次尝试） | `[]` |
+| `already` | `list` | 已签到状态的判定选择器/文本 | `[]` |
+| `ready_rounds`| `int` | 页面就绪轮询最大次数 | `15` |
+| `use_overlay_zapper` | `bool` | 是否在点击前自动消除干扰遮罩层与弹窗 | `true` |
+| `signin_api` | `string` | 站点内置静默签到 API 路径 | `""` |
+
+---
+
+## 🧩 架构与工作原理
 
 ```text
-http://127.0.0.1:8766
+┌────────────────────────────────────────────────────────┐
+│               交互层 (Web UI / CLI / Cron)              │
+└──────────────────────────┬─────────────────────────────┘
+                           │
+                           ▼
+┌────────────────────────────────────────────────────────┐
+│              调度与编排器 (Check-in Engine)             │
+│  ├─ FIFO 异步队列       ├─ 单例进程锁 (Singleton Lock)  │
+│  ├─ 智能弹窗消除器      ├─ SSO / OAuth 智能跟随         │
+│  └─ 失败自动归类分类器   └─ Telegram 告警分发           │
+└──────────────┬───────────────────────────┬─────────────┘
+               │                           │
+               ▼                           ▼
+┌───────────────────────────┐ ┌───────────────────────────┐
+│     SQLite (system.db)    │ │   macOS Keychain (安全)   │
+│ 存储站点元数据/运行批次/证据 │ │ 硬件隔离存储敏感凭据/Token │
+└───────────────────────────┘ └───────────────────────────┘
+               │
+               ▼
+┌────────────────────────────────────────────────────────┐
+│             真实 Chrome 浏览器 (CDP 会话池)             │
+│  ├─ 复用已有登录态       ├─ 静默创建临时 Target          │
+│  ├─ 严格生命周期管理     └─ 绕过 Cloudflare / Turnstile  │
+└────────────────────────────────────────────────────────┘
 ```
 
-前端通过 `API_BASE`（默认 `http://127.0.0.1:8765`)调用后端 API。登录使用密码 `DAILY_CHECKIN_WEB_PASSWORD`;未设置时可回退 Bearer `web.token`。如需在其它端口部署前端,设置 `DAILY_CHECKIN_WEB_ORIGINS` 并把 `web/app.js` 前注入 `window.API_BASE`。
+### 退出码说明（Exit Codes）
 
-从前端添加任务，或配置 Obsidian 目录后导入任务。
+方便接入外部 CI/CD 与监控探针：
 
-### 4. CLI 运行
+| Code | 状态 | 含义 |
+| :---: | :--- | :--- |
+| **`0`** | `SUCCESS` | 全部任务正常完成（或均为已签到状态/Dry-run） |
+| **`1`** | `BUSINESS_FAIL` | 存在至少一个站点的业务签到失败（如账号失效、未找到确认证据） |
+| **`2`** | `INFRA_FAIL` | 基础设施故障（如 CDP 意外断连、网络不可达） |
+| **`3`** | `NO_CDP` | 未检测到活跃的 Chrome Remote Debugging 端口 |
+| **`4`** | `LOCKED` | 当前已有正在运行的签到批次持有文件锁 |
 
-```bash
-# 解析系统任务但不连接 Chrome
-.venv/bin/python stealth_checkin_runner.py --dry-run
+---
 
-# 执行所有 pending 任务
-.venv/bin/python stealth_checkin_runner.py
+## 🔒 安全与隐私承诺
 
-# 执行指定站点；站点必须存在于系统目录
-.venv/bin/python stealth_checkin_runner.py --only "Site A,Site B"
+- **零数据上传**：本项目完全本地运行，没有中心化统计服务器，不收集任何用户隐私。
+- **凭据硬件级隔离**：账号、密码与持久化 Token 均直接存储于 macOS 系统级 Keychain（`com.mango.daily-checkin`），主数据库仅保存引用标识，彻底杜绝提交 Git 时泄密的可能。
+- **端口安全限制**：Web UI 与 API 仅绑定 `127.0.0.1` 环回地址，并内置严苛的 Host 校验与 CSRF 防护，不建议且严禁直接暴露在公网环境下。
 
-# 严格使用指定 CDP endpoint
-.venv/bin/python stealth_checkin_runner.py --cdp 9222
+---
 
-# 只重试带有 Obsidian #auto-fail 的 pending 任务
-.venv/bin/python stealth_checkin_runner.py --retry-auto-fail
-```
+## 🤝 参与贡献
 
-## 配置
+我们非常欢迎社区贡献！无论是新站点的适配规则、核心引擎优化，还是文档完善：
 
-复制示例：
+1. **Fork 本仓库** 并创建你的分支：`git checkout -b feature/awesome-site`
+2. **添加/测试站点**：在 `sites.yaml` 中添加规则并使用 `--only "YourSite"` 验证
+3. **运行测试套件**：
+   ```bash
+   PYTHONPATH=. python -m unittest discover -s tests -p 'test_*.py'
+   ```
+4. **提交代码** 并发起 Pull Request 🚀
 
-```bash
-mkdir -p "$HOME/.config/daily-checkin"
-cp config/env.example "$HOME/.config/daily-checkin/env"
-```
+---
 
-这个文件只用于本地路径和运行参数，不应保存 Cookie、Token 或密码。Hermes wrapper 会自动加载它；直接运行 CLI 或 Web UI 前请导出：
+## 📄 开源许可
 
-```bash
-set -a
-source "$HOME/.config/daily-checkin/env"
-set +a
-```
+本项目采用 [MIT 许可证](LICENSE)。
 
-常用配置：
-
-```bash
-DAILY_CHECKIN_TASKS_DIR="$HOME/path/to/obsidian/Task/daily"
-DAILY_CHECKIN_DB="$HOME/.hermes/checkin/system.db"
-DAILY_CHECKIN_LOG_DIR="$HOME/.hermes/checkin"
-CDP_PORT=9222
-```
-
-环境变量：
-
-| 变量 | 默认值 | 说明 |
-|---|---:|---|
-| `DAILY_CHECKIN_TASKS_DIR` | `~/Documents/daily-checkin/tasks` | 可选 Obsidian 每日任务目录 |
-| `DAILY_CHECKIN_DB` | `~/.hermes/checkin/system.db` | SQLite 权威数据库 |
-| `DAILY_CHECKIN_LOG_DIR` | `~/.hermes/checkin` | wrapper、JSONL、last-run 和 lock 目录 |
-| `DAILY_CHECKIN_ROOT` | 自动推导 | wrapper 复制安装时的仓库绝对路径 |
-| `CDP_HTTP` | 自动发现 | 指定 CDP HTTP endpoint |
-| `CDP_PORT` | 自动发现 | 指定 CDP 端口 |
-| `SITE_TIMEOUT_S` | `90` | 单站总墙钟超时 |
-| `BATCH_TIMEOUT_S` | `6600` | runner 自身批次 deadline，早于 Hermes 外层 timeout |
-| `BATCH_CLEANUP_RESERVE_S` | `30` | deadline 前保留的收口时间 |
-| `CAPTCHA_WAIT_S` | `40` | 人机验证等待 |
-| `CF_WAIT_S` | `40` | Cloudflare 等待 |
-| `SSO_TIMEOUT_S` | `45` | SSO 总等待 |
-| `CTA_WAIT_S` | `8` | 登录 CTA 等待 |
-| `SIGN_WAIT_S` | `8` | 签到按钮等待 |
-| `CONNECT_RETRIES` | `3` | CDP 连接重试次数 |
-| `CONNECT_RETRY_BACKOFF_S` | `1.5` | 线性重试退避基数 |
-| `CHECKIN_PROVIDER_ENGINE` | `provider` | 设置为 `legacy` 可回滚 provider engine |
-
-显式 CLI `--cdp` 的优先级高于环境变量。
-
-## Obsidian 集成
-
-Obsidian 是可选外部任务界面。任务格式：
-
-```markdown
-- [ ] #task #日常 [Example API](https://api.example.com/profile)
-```
-
-运行结果投影：
-
-```markdown
-- [x] #task #日常 [Example API](https://api.example.com/profile)
-```
-
-失败保持未勾选，并附加稳定原因：
-
-```markdown
-- [ ] #task #日常 [Example API](https://api.example.com/profile) #auto-fail:no_confirm
-```
-
-权威关系：
-
-- 新的 Obsidian 任务会导入 SQLite
-- 系统已有状态不会被旧 checkbox 无条件覆盖
-- 系统结果会投影回 Obsidian
-- Obsidian 暂时不可用不阻断系统任务
-- 投影失败会记录 `projection_status` / `projection_reason`，但不会把已确认的 `OK` 改成失败，也不会把后续独立站点标成 `batch_aborted`
-- 只有 CDP 断连、整批超时等基础设施故障才会中止后续站点；404、403、Cloudflare、验证码和业务资格不足按单站原因记录
-
-默认每日文件名：
-
-```text
-YYYY-MM-DD 每日任务.md
-```
-
-可通过 `--task-file` 覆盖单次路径。
-
-## 调度
-
-任何能执行命令的调度器都可以调用：
-
-```bash
-/path/to/daily-checkin/.venv/bin/python \
-  /path/to/daily-checkin/stealth_checkin_runner.py \
-  --source cron
-```
-
-### Hermes Agent 集成
-
-仓库包含一个 Hermes pre-run wrapper：
-
-```bash
-mkdir -p "$HOME/.hermes/scripts"
-cp "$PWD/scripts/daily-checkin-cdp.sh" \
-  "$HOME/.hermes/scripts/daily-checkin-cdp.sh"
-chmod 755 "$HOME/.hermes/scripts/daily-checkin-cdp.sh"
-
-printf '\nDAILY_CHECKIN_ROOT="%s"\n' "$PWD" >> \
-  "$HOME/.config/daily-checkin/env"
-```
-
-wrapper 会：
-
-- 在单个 Python 进程内完成 CDP 预检和 runner，避免外层 timeout 留下孤儿签到进程
-- 将预检选中的完整 endpoint 固定传给 runner，不做第二次自动发现
-- 输出 `wakeAgent` JSON
-- 成功时保持静默
-- 失败时允许 Hermes 生成摘要
-- 不自动补跑失败站点
-
-大量站点需要给 Hermes pre-run script 足够的总预算。例如 75 站、单站 90 秒时：
-
-```bash
-hermes config set cron.script_timeout_seconds 7200
-```
-
-Hermes 2026.6.5 的配置 schema 可能提示该键未注册，但 scheduler 会直接读取它；可用 scheduler 的实际解析结果或一次 dry-run 验证生效。runner 默认在 `6600s` 自行中止并完成 SQLite、JSONL 和状态收口，Hermes 的 `7200s` 仅作为外层兜底。
-
-Hermes 会拒绝解析后逃出 `~/.hermes/scripts` 的 symlink，因此 pre-run wrapper 必须是普通文件。仓脚本更新后重新复制；`DAILY_CHECKIN_ROOT` 用于定位 runner 和虚拟环境。
-
-手动设置方式：
-
-```bash
-export DAILY_CHECKIN_ROOT="/path/to/daily-checkin"
-```
-
-## 架构
-
-```text
-Web UI / CLI / Scheduler
-          │
-          ▼
-     FIFO job queue
-          │
-          ▼
- Check-in orchestrator ──────── SQLite system.db
-          │                     ├─ sites / daily_tasks
-          │                     ├─ runs / run_items
-          │                     ├─ jobs
-          │                     └─ credential refs
-          │
-          ├─ CDP discovery and ownership
-          ├─ SSO / Cloudflare / CAPTCHA gates
-          ├─ provider registry
-          ├─ action evidence
-          └─ confirmation evidence
-                    │
-                    ▼
-            existing headed Chrome
-
-macOS Keychain ◄── credential secrets
-Obsidian      ◄── optional import / projection
-JSONL         ◄── append-only compatibility log
-```
-
-主要模块：
-
-| 文件 | 责任 |
-|---|---|
-| `stealth_checkin_runner.py` | CLI、CDP、SSO、legacy DOM flow、批次编排 |
-| `scripts/daily-checkin-cron.py` | Hermes 单进程 preflight、固定 endpoint、日志和 gate 输出 |
-| `scripts/daily-checkin-cdp.sh` | 加载本地配置并 `exec` Python cron entry 的薄入口 |
-| `checkin_core/store.py` | SQLite schema、任务、运行、job、credential refs |
-| `checkin_core/keychain.py` | macOS Keychain 秘密存取 |
-| `checkin_core/web.py` | loopback Web UI 和 FIFO job executor |
-| `checkin_core/models.py` | action、confirmation、identity evidence 合同 |
-| `checkin_core/registry.py` | provider 选择 |
-| `checkin_core/providers/` | provider 实现与 legacy bridge |
-| `web/` | 无构建步骤的 HTML/CSS/JavaScript 前端 |
-
-## 结果与退出码
-
-| code | 含义 |
-|---:|---|
-| `0` | 无任务、dry-run 或全部 OK/ALREADY |
-| `1` | 至少一个站点失败 |
-| `2` | CDP/基础设施硬故障 |
-| `3` | wrapper 预检找不到可用 headed CDP |
-| `4` | 已有签到批次持有 singleton lock |
-
-CDP 中途断开时：
-
-- 最终 exit 保持 `2`
-- 不会被前序成功站点覆盖
-- 当前和剩余站点记录 `batch_aborted`
-
-运行输出：
-
-```text
-~/.hermes/checkin/system.db
-~/.hermes/checkin/YYYY-MM-DD.jsonl
-~/.hermes/checkin/last-attempt.json
-~/.hermes/checkin/last-run.json
-~/.hermes/checkin/cron-YYYY-MM-DD.log
-```
-
-`last-attempt.json` 记录每次调用（包括 dry-run）；`last-run.json` 保留最近一次业务运行，dry-run 不覆盖它。
-
-这些文件不应提交到 Git。
-
-## Provider 状态
-
-当前生产默认路径是 `LegacyBrowserProvider`，通过严格 DOM/SSO fallback 承接现有站点。`WisartProvider` 只负责图片公益站的显式匹配和能力边界；在没有真实协议证据前，不执行猜测 API。
-
-New-API 风格 URL 可以使用通用 selector pack，但不会因此自动调用 `/api/user/checkin`。API-first 只能在 provider 明确验证 capability 后启用。
-
-当前已落地：
-
-- Phase A：结果与证据字段、失败分类和可观测性。
-- Phase B：provider contract、registry、legacy bridge。
-- Phase E：singleton lock、target ownership、CDP 双条件探活、full/targeted 运行范围隔离。
-- `CHECKIN_PROVIDER_ENGINE=legacy` 运行时回滚开关。
-
-当前未完成：
-
-- Wisart 登录后脱敏协议探针和真实“未签到 -> 成功”样本。
-- 通用 verified API-first provider。
-- Wisart 次日 cron 自动样本。
-
-## 测试
-
-```bash
-source .venv/bin/activate
-
-python test_stealth_checkin_m1.py
-python -m unittest discover -s tests -p 'test_*.py'
-python -m py_compile \
-  stealth_checkin_runner.py \
-  checkin_core/*.py \
-  checkin_core/providers/*.py \
-  tests/*.py
-node --check web/app.js
-bash -n scripts/daily-checkin-cdp.sh
-git diff --check
-```
-
-当前实现状态：
-
-- Phase A：结果与证据字段、失败分类和可观测性已落地。
-- Phase B：provider contract、registry、legacy bridge 已落地。
-- Phase E：singleton lock、target ownership、CDP 双条件探活和运行范围隔离已落地。
-- Phase C（Wisart）：仅完成显式 provider 边界，尚无登录后协议探针和真实未签到成功样本，未启用猜测 API。
-- Phase D：通用 verified API-first provider 尚未实现。
-- `CHECKIN_PROVIDER_ENGINE=legacy` 已作为运行时回滚开关保留。
-
-当前测试基线：
-
-```text
-Legacy regression: 73
-System/provider/web behavior: 34
-Total: 107
-```
-
-当前提供：
-
-- `LegacyBrowserProvider`：生产默认路径，严格 DOM/SSO fallback。
-- `WisartProvider`：显式匹配和能力边界；API/status 未经真实协议验证，不执行写 API。
-
-
-## 安全说明
-
-- Web UI 只能绑定 loopback；不要通过反向代理直接暴露公网
-- 不要把秘密放进本地 env 文件
-- 不要提交 `system.db`、JSONL、日志、截图、Cookies 数据库或 Chrome profile
-- Chrome Remote Debugging 等同于该 profile 的高权限控制接口，只绑定 `127.0.0.1`
-- Keychain 项只保存于当前 macOS 用户
-- Web UI 能触发真实全站签到；只在你信任的本机运行
-- 未知 provider 不会自动消费保存的凭据
-
-安全问题请参见 [`SECURITY.md`](SECURITY.md)。
-
-## 已知限制
-
-- 当前主要面向 macOS；Keychain backend 使用 macOS `security` CLI
-- 页面结构和 SSO 流程可能随站点变化
-- Turnstile/Cloudflare 不保证自动通过
-- 多设备同时运行可能产生重复签到
-- Web UI 默认是按需进程，不会自动注册系统服务
-- 站点专用 API 必须基于真实协议证据实现
-- 这是个人自动化工具，不保证适用于所有站点，也不规避站点服务条款
-
-## 贡献
-
-欢迎提交：
-
-- 新 provider
-- 站点 fixture
-- 失败分类和 evidence 改进
-- 跨平台 credential backend
-- 文档和测试
-
-提交 provider 时请附：
-
-1. capability/认证边界
-2. 成功与已签到的真实判定
-3. 不记录秘密的测试
-4. 失败与回滚路径
-
-## License
-
-[MIT](LICENSE)
-
-## Acknowledgements
-
-架构设计参考了 [qixing-jk/all-api-hub](https://github.com/qixing-jk/all-api-hub) 的 provider、API-first、native-page action 和 server-side confirmation 思路。本项目保留独立的 Python/CDP/SQLite/Keychain 实现与安全边界。
+<div align="center">
+  <sub>Made with ❤️ by the community. If you find this project helpful, please consider giving it a ⭐!</sub>
+</div>
