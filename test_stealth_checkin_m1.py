@@ -4268,6 +4268,35 @@ class TestSitesYaml(unittest.TestCase):
         for k in vars(builtin_entry):
             self.assertEqual(getattr(a, k), getattr(builtin_entry, k), f"字段 {k} 不等价")
 
+    def test_yaml_registers_mailhub_entry(self):
+        """sites.yaml 的 mailhub 条目解析为 browser,/wallet,选择器钉死立即签到。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "mailhub"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 mailhub 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://mailhub.pigeonw.com/wallet")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertEqual(a.login_url, "https://mailhub.pigeonw.com/login")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn('button.primary:has-text("立即签到")', joined_signs)
+        # 同页「兑换」不是签到,选择器不能退回裸「签到」
+        self.assertNotIn(':has-text("签到")', joined_signs.replace('立即签到', ''))
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        self.assertIn("签到成功", joined_already)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "mailhub"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 mailhub")
+        self.assertEqual(builtin_entry.kind, "browser")
+        for k in vars(builtin_entry):
+            self.assertEqual(getattr(a, k), getattr(builtin_entry, k), f"字段 {k} 不等价")
+
     def test_yaml_registers_dygyz_entry(self):
         """sites.yaml 的 dygyz 条目解析为 browser,/dashboard,prefer_catalog_url,支持 LinuxDo 登录。"""
         import yaml

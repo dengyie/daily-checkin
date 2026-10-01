@@ -922,6 +922,25 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("chengmo", "https://api.chengmo.cc.cd/profile"),
     _N("rugao", "https://new-api.rugao.me/profile"),
     _N("feixingwawa", "https://newapi.feixingwawa.cn/profile"),
+    # mailhub(mailhub.pigeonw.com/wallet):邮箱额度站,POST /wallet/checkin。
+    # 同页「兑换」不是签到,选择器钉死 button.primary「立即签到」。
+    # 默认 LinuxDO 登录(login_url=/login);已登录页有「退出登录」,不走 SSO。
+    _B(
+        "mailhub",
+        "https://mailhub.pigeonw.com/wallet",
+        signs=[
+            'button.primary:has-text("立即签到")',
+            'button:has-text("立即签到")',
+        ],
+        already=[
+            'text=今日已签到',
+            'text=签到成功',
+            'text=今天已签',
+            'button:has-text("今日已签到")',
+        ],
+        prefer_catalog_url=True,
+        login_url="https://mailhub.pigeonw.com/login",
+    ),
     _B(
         "图片公益站",
         "https://wisart.kuaileshifu.com/#/me",

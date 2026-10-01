@@ -343,6 +343,23 @@ sites:
   - name: 'feixingwawa'
     url: https://newapi.feixingwawa.cn/profile
     kind: newapi_profile
+  # mailhub(mailhub.pigeonw.com, Mailhub 邮箱额度站)—— 2026-10-01 接入。
+  # 非 New API:钱包页 POST /wallet/checkin(表单 csrf)。同页另有「兑换」按钮,
+  # 选择器必须钉死 button.primary「立即签到」,不能用裸「签到」。
+  # 登录默认 LinuxDO,本次不测登录;已登录页有「退出登录」,通用流程不会去点 SSO。
+  - name: 'mailhub'
+    url: https://mailhub.pigeonw.com/wallet
+    kind: browser
+    prefer_catalog_url: true
+    login_url: https://mailhub.pigeonw.com/login
+    signs:
+      - 'button.primary:has-text("立即签到")'
+      - 'button:has-text("立即签到")'
+    already:
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=今天已签'
+      - 'button:has-text("今日已签到")'
   - name: '图片公益站'
     url: https://wisart.kuaileshifu.com/#/me
     kind: browser
