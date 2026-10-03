@@ -4268,6 +4268,58 @@ class TestSitesYaml(unittest.TestCase):
         for k in vars(builtin_entry):
             self.assertEqual(getattr(a, k), getattr(builtin_entry, k), f"字段 {k} 不等价")
 
+    def test_yaml_registers_wududu_entry(self):
+        """sites.yaml 的 wududu 条目解析为 newapi_profile,/profile(标准 LinuxDO New API 站)."""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "wududu"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 wududu 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://wududu.edu.kg/profile")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        # 常驻说明文案绝不能进 already(假 ALREADY 红线)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "wududu"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 wududu")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        # sites.yaml 与 _BUILTIN_SITE_ADAPTERS 字段等价
+        for k in vars(builtin_entry):
+            self.assertEqual(getattr(a, k), getattr(builtin_entry, k), f"字段 {k} 不等价")
+
+    def test_yaml_registers_cngov_entry(self):
+        """sites.yaml 的 cngov 条目解析为 newapi_profile,/profile(标准 LinuxDO New API 站)."""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "cngov"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 cngov 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://cngov.cc.cd/profile")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        # 常驻说明文案绝不能进 already(假 ALREADY 红线)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "cngov"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 cngov")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        # sites.yaml 与 _BUILTIN_SITE_ADAPTERS 字段等价
+        for k in vars(builtin_entry):
+            self.assertEqual(getattr(a, k), getattr(builtin_entry, k), f"字段 {k} 不等价")
+
     def test_yaml_registers_mailhub_entry(self):
         """sites.yaml 的 mailhub 条目解析为 browser,/wallet,选择器钉死立即签到。"""
         import yaml
@@ -6103,7 +6155,7 @@ class YunzhiCheckinTest(unittest.TestCase):
 
     def test_p0_no_clear_cookies_in_yunzhi_path(self):
         import inspect
-        for fn_name in ("yunzhi_checkin", "_yunzhi_api", "_yunzhi_build_headers"):
+        for fn_name in ("yunzhi_checkin", "_yunzhi_api", "_yunzhi_build_headers", "_yunzhi_load_external_token", "_yunzhi_save_external_token"):
             src = inspect.getsource(getattr(self.m, fn_name)).lower()
             self.assertNotIn("clear_cookies", src, f"{fn_name} 不得调用 clear_cookies")
             self.assertNotIn("clear_localstorage", src, f"{fn_name} 不得清 localStorage")
@@ -6592,6 +6644,144 @@ class YunzhiCheckinTest(unittest.TestCase):
         self.assertEqual(res.status, "FAIL")
         self.assertEqual(res.reason, "auth_required")
         self.assertIn("cloud_phone_token", res.detail)
+
+    def test_yunzhi_win_in_yaml_and_builtin(self):
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "yunzhi_win"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 yunzhi_win 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "yunzhi")
+        self.assertEqual(a.url, "https://yunzhi.play.cn/ai/?channel_code=00000042")
+        self.assertTrue(a.prefer_catalog_url)
+        b = next((x for x in _BUILTIN_SITE_ADAPTERS if x.name == "yunzhi_win"), None)
+        self.assertIsNotNone(b, "内置 adapter 应包含 yunzhi_win")
+        self.assertEqual(b.kind, "yunzhi")
+        for k in vars(b):
+            self.assertEqual(getattr(a, k), getattr(b, k), f"yunzhi_win 字段 {k} 不等价")
+
+    def test_yunzhi_load_external_token(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # direct candidate patch
+            with mock.patch.object(self.m.Path, "home", return_value=Path(tmpdir)):
+                # not found
+                tok, dev, p = self.m._yunzhi_load_external_token("nonexistent_site")
+                self.assertEqual(tok, "")
+                self.assertIsNone(p)
+
+                # path traversal rejection
+                tok, dev, p = self.m._yunzhi_load_external_token("../../etc/passwd")
+                self.assertEqual(tok, "")
+
+                # Put under ~/.config/daily-checkin/credentials/
+                target_dir = Path(tmpdir) / ".config" / "daily-checkin" / "credentials"
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_file = target_dir / "yunzhi_win_test.json"
+                target_file.write_text(json.dumps({
+                    "token": "win_tok_999",
+                    "deviceNo": "win_dev_888",
+                }), encoding="utf-8")
+                # 测试过于宽松的权限自动收紧为 0600
+                target_file.chmod(0o666)
+                tok, dev, p = self.m._yunzhi_load_external_token("yunzhi_win_test")
+                self.assertEqual(tok, "win_tok_999")
+                self.assertEqual(dev, "win_dev_888")
+                self.assertEqual(p, target_file)
+                self.assertEqual(oct(target_file.stat().st_mode & 0o777), "0o600")
+
+    def test_yunzhi_save_external_token(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_file = Path(tmpdir) / "yunzhi_save_test.json"
+            target_file.write_text(json.dumps({
+                "token": "old_token",
+                "deviceNo": "dev_123",
+            }), encoding="utf-8")
+
+            # rotation update (原子写盘)
+            self.m._yunzhi_save_external_token(target_file, "new_rotated_token")
+            data = json.loads(target_file.read_text(encoding="utf-8"))
+            self.assertEqual(data["token"], "new_rotated_token")
+            self.assertIn("updated_at", data)
+            self.assertEqual(oct(target_file.stat().st_mode & 0o777), "0o600")
+
+    def test_yunzhi_win_flow_with_external_token_and_auto_rotation(self):
+        """外部 Token 驱动: 不查 localStorage, 响应带新 token 时触发自动回写持久化."""
+        m = self.m
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_file = Path(tmpdir) / "yunzhi_win.json"
+            target_file.write_text(json.dumps({
+                "token": "initial_ext_token",
+                "deviceNo": "ext_dev_001",
+            }), encoding="utf-8")
+
+            evaluated_creds_called = []
+
+            class ExternalTokenPage:
+                url = "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+                async def goto(self, *a, **k):
+                    pass
+
+                async def evaluate(self, js, payload=None):
+                    if "cloud_phone_token" in js:
+                        evaluated_creds_called.append(True)
+                        return {"token": "WRONG_ACCOUNT_1_TOKEN", "deviceNo": "wrong_dev"}
+                    method = payload["method"]
+                    path = payload["url"].replace(m.YUNZI_API_BASE, "")
+                    if (method, path) == ("GET", "/api/content/home-popups/init"):
+                        # 模拟服务端下发轮换的新 token
+                        return {
+                            "_http_status": 200,
+                            "_authorization": "brand_new_rotated_token_xyz",
+                            "_data": {"code": 0, "message": "success", "data": {"channelCode": "00000042", "popups": []}},
+                        }
+                    if (method, path) == ("POST", "/api/benefit/user/benefit"):
+                        return {
+                            "_http_status": 200,
+                            "_authorization": "",
+                            "_data": {"code": 0, "message": "success", "data": {
+                                "benefitConfigId": 158, "remainingQuota": 0, "matchType": "CLOUD_DEVICE",
+                                "userItems": [], "cloudDevices": [
+                                    {"flavor": "4C8G128GB", "vendorResourceId": "D0026092223823038",
+                                     "status": 2, "expireTime": "2026-10-05 06:25:39"},
+                                ],
+                            }},
+                        }
+                    return {"_http_status": 404, "_authorization": "", "_data": None}
+
+            adapter = m.SiteAdapter(
+                name="yunzhi_win",
+                url="https://yunzhi.play.cn/ai/?channel_code=00000042",
+                kind="yunzhi",
+                sign_selectors=['text=开心收下', 'text=立即领取'],
+                already_selectors=['text=今日已领取', 'text=明天再来'],
+                prefer_catalog_url=True,
+                login_url="https://yunzhi.play.cn/ai/#/login",
+            )
+
+            async def fake_url(*a, **k):
+                return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+            async def fake_bypass(*a, **k):
+                return False
+
+            with mock.patch.object(m, "_yunzhi_load_external_token", return_value=("initial_ext_token", "ext_dev_001", target_file)), \
+                 mock.patch.object(m, "page_url", fake_url), \
+                 mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass):
+                res = self.asyncio.run(m.yunzhi_checkin(ExternalTokenPage(), adapter))
+
+            self.assertEqual(res.status, "ALREADY")
+            # 确信未读取 9222 的 localStorage (账号隔离保障)
+            self.assertEqual(len(evaluated_creds_called), 0, "使用外部 Token 时不应轮询页面 localStorage")
+            # 确信自动写回了新 token (自动续期保障)
+            saved_data = json.loads(target_file.read_text(encoding="utf-8"))
+            self.assertEqual(saved_data["token"], "brand_new_rotated_token_xyz")
 
 
 if __name__ == "__main__":

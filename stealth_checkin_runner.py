@@ -922,6 +922,7 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("chengmo", "https://api.chengmo.cc.cd/profile"),
     _N("rugao", "https://new-api.rugao.me/profile"),
     _N("feixingwawa", "https://newapi.feixingwawa.cn/profile"),
+    _N("wududu", "https://wududu.edu.kg/profile"),
     # mailhub(mailhub.pigeonw.com/wallet):邮箱额度站,POST /wallet/checkin。
     # 同页「兑换」不是签到,选择器钉死 button.primary「立即签到」。
     # 默认 LinuxDO 登录(login_url=/login);已登录页有「退出登录」,不走 SSO。
@@ -1026,7 +1027,7 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
         kind="mzlone",
     ),
-    _N("小喵喵", "https://cngov.cc.cd/custom/7920deaddf8828b7"),
+    _N("cngov", "https://cngov.cc.cd/profile"),
     _N("快跑", "https://kuaipao.ai/console/personal"),
     _N("CHY", "https://chybenzun.top/profile"),
     _B(
@@ -1252,6 +1253,22 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     # HMAC-SHA256 头签名 + MD5 体签名;复用 9222 profile 的 cloud_phone_token 登录态。
     _B(
         "yunzhi",
+        "https://yunzhi.play.cn/ai/?channel_code=00000042",
+        signs=[
+            'text=开心收下',
+            'text=立即领取',
+        ],
+        already=[
+            'text=今日已领取',
+            'text=明天再来',
+        ],
+        prefer_catalog_url=True,
+        login_url="https://yunzhi.play.cn/ai/#/login",
+        kind="yunzhi",
+    ),
+    # yunzhi_win(云智手机账号2: 台式机账号 Token 独立签到)—— 2026-10-03 接入。
+    _B(
+        "yunzhi_win",
         "https://yunzhi.play.cn/ai/?channel_code=00000042",
         signs=[
             'text=开心收下',
@@ -6708,7 +6725,9 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
     await _ensure_relayfor_benefits_panel(page)
 
     # 2. 轮询等待动作按钮挂载 (兼顾限时活动签到与词元贷借/还)
-    deadline = time.monotonic() + max(SIGN_WAIT_S, 12.0)
+    # 2026-10-03 实证:国庆活动卡片(RelayFor Checkin)首次渲染延迟超 12s,导致
+    # 限时签到按钮未被及时捕获而误判为"词元贷已结清"。放宽到 25s 兜底慢渲染。
+    deadline = time.monotonic() + max(SIGN_WAIT_S, 25.0)
     action_sel = None
     campaign_sel = None
     done = ""
@@ -6949,7 +6968,11 @@ async def relayfor_go_checkin(page, adapter, browser=None) -> CheckinResult:
     if not go_status or not go_status.get("found"):
         # 检查是否因未登录
         try:
-            is_login = await page.evaluate("() => Boolean(document.querySelector('form.login-form, input[type=\"password\"]'))")
+            # 2026-10-03:仅检测可见元素,排除 SPA 中隐藏的修改密码表单,避免假阳性 login_required
+            is_login = await page.evaluate("""() => {
+                const el = document.querySelector('form.login-form, input[type="password"]');
+                return el ? (el.offsetParent !== null || el.checkVisibility?.() !== false) : false;
+            }""")
             if is_login:
                 return fail_result("login_required", detail="relayfor 登录失效，需重新登录", adapter=kind)
         except Exception:
@@ -9176,13 +9199,79 @@ def _yunzhi_check_business(resp: dict, what: str) -> tuple[dict, str]:
     return data.get("data") or {}, ""
 
 
+def _yunzhi_load_external_token(site_name: str) -> tuple[str, str, Path | None]:
+    """读取专属 Token 配置文件 (~/.config/daily-checkin/credentials/{site_name}.json).
+
+    用于多账号场景(如 yunzhi_win),避免依赖或覆盖 9222 共享 profile 的登录态.
+    返回 (token, device_no, file_path)。未找到或损坏返回 ("", "", None)。
+    """
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-]", "", site_name or "")
+    if not safe_name:
+        return "", "", None
+    candidates = [
+        Path.home() / ".config" / "daily-checkin" / "credentials" / f"{safe_name}.json",
+        Path.home() / ".hermes" / "checkin" / f"{safe_name}.json",
+    ]
+    for p in candidates:
+        if p.is_file():
+            try:
+                # 防御式权限收紧: 凭据文件严禁 group/other 读写权限
+                try:
+                    st = p.stat()
+                    if (st.st_mode & 0o077) != 0:
+                        try:
+                            p.chmod(0o600)
+                        except OSError:
+                            pass
+                except OSError:
+                    pass
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    tok = str(data.get("token") or "").strip()
+                    dev = str(data.get("deviceNo") or "").strip()
+                    if tok:
+                        return tok, dev, p
+            except Exception:
+                pass
+    return "", "", None
+
+
+def _yunzhi_save_external_token(path: Path | None, new_token: str) -> None:
+    """当接口返回轮换 _authorization 时安全写回配置文件,保障长期免登."""
+    if not path or not new_token:
+        return
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("token") != new_token:
+                data["token"] = new_token
+                data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                payload = json.dumps(data, indent=2, ensure_ascii=False)
+                # 原子写盘: 临时文件写盘 + 强制 0600 + os.replace 原子替换, 防进程异常退出截断文件
+                tmp_path = path.with_suffix(f".tmp.{os.getpid()}")
+                tmp_path.write_text(payload, encoding="utf-8")
+                try:
+                    tmp_path.chmod(0o600)
+                except OSError:
+                    pass
+                os.replace(tmp_path, path)
+                try:
+                    path.chmod(0o600)
+                except OSError:
+                    pass
+                print(f"  yunzhi: 凭据文件已自动安全更新至新 Token ({path})", flush=True)
+    except Exception as e:
+        print(f"  yunzhi warning: 自动更新凭据文件失败 ({path}): {e}", flush=True)
+
+
 async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
     """云智手机(yunzhi.play.cn)「今日登录福利」纯 RPC 签到流程 (2026-10-01 接入).
 
     流程:领每日弹窗福利卡(如可领) → 查 benefit 158 待开通 userItems →
     对运行中云机(status=2)发起 benefit/claim → 轮询 claim/status 至成功。
-    P0:凭据只读自 9222 profile(localStorage/Cookie),严禁任何清空 Cookie/Storage
-    的操作;全部 API 走页面内 fetch,不做任何 UI 点击。
+    P0:主账号凭据只读自 9222 profile(localStorage/Cookie),多账号优先读专属
+    credentials JSON 文件;严禁任何清空 Cookie/Storage 的操作;
+    全部 API 走页面内 fetch,不做任何 UI 点击。
     """
     kind = adapter.kind or "yunzhi"
     site_url = adapter.url or YUNZI_ENTRY_URL
@@ -9195,46 +9284,57 @@ async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
 
     await bypass_chrome_interstitial_if_needed(page)
 
-    # 轮询读取 localStorage 登录态(SPA commit 后立即可读)
-    token = ""
-    device_no = ""
-    eval_errors = 0
-    for _ in range(12):
-        try:
-            creds = await page.evaluate(_YUNZI_CREDS_JS)
-        except Exception:
-            creds = None
-            eval_errors += 1
-        if isinstance(creds, dict):
-            token = str(creds.get("token") or "")
-            device_no = str(creds.get("deviceNo") or "")
-        if token:
-            break
-        try:
-            cur_url = (await page_url(page) or "").lower()
-        except Exception:
-            cur_url = ""
-        if "login" in cur_url:
-            break
-        await asyncio.sleep(0.8)
+    ext_token, ext_device, token_path = _yunzhi_load_external_token(adapter.name)
+    token = ext_token
+    device_no = ext_device
+
+    def _update_token(new_tok: str | None) -> None:
+        nonlocal token
+        if new_tok and new_tok != token:
+            token = new_tok
+            _yunzhi_save_external_token(token_path, token)
+
     if not token:
-        # 区分「真未登录」与「页面持续异常」:后者不是登录态问题,
-        # 报 auth_required 会误导排障方向(2026-10-01 review P3)
-        if eval_errors >= 12:
+        # 轮询读取 localStorage 登录态(SPA commit 后立即可读)
+        eval_errors = 0
+        for _ in range(12):
+            try:
+                creds = await page.evaluate(_YUNZI_CREDS_JS)
+            except Exception:
+                creds = None
+                eval_errors += 1
+            if isinstance(creds, dict):
+                token = str(creds.get("token") or "")
+                device_no = str(creds.get("deviceNo") or "")
+            if token:
+                break
+            try:
+                cur_url = (await page_url(page) or "").lower()
+            except Exception:
+                cur_url = ""
+            if "login" in cur_url:
+                break
+            await asyncio.sleep(0.8)
+        if not token:
+            # 区分「真未登录」与「页面持续异常」:后者不是登录态问题,
+            # 报 auth_required 会误导排障方向(2026-10-01 review P3)
+            if eval_errors >= 12:
+                return fail_result(
+                    "error",
+                    detail=f"{adapter.name} 页面 evaluate 持续异常 {eval_errors} 次,登录态无法读取(页面可能已崩溃/被导航)",
+                    adapter=kind, stage="auth",
+                )
             return fail_result(
-                "error",
-                detail=f"yunzhi 页面 evaluate 持续异常 {eval_errors} 次,登录态无法读取(页面可能已崩溃/被导航)",
+                "auth_required",
+                detail=f"{adapter.name} 未登录: 9222 profile 无 cloud_phone_token 且无本地凭据文件 (请在浏览器登录或配置 credentials)",
                 adapter=kind, stage="auth",
             )
-        return fail_result(
-            "auth_required",
-            detail="yunzhi 未登录: 9222 profile 无 cloud_phone_token (请在浏览器登录云智手机)",
-            adapter=kind, stage="auth",
-        )
+    else:
+        print(f"  yunzhi: 使用外部专属凭据文件 ({token_path})", flush=True)
 
     # ---- Step 1: 每日弹窗福利(home-popups/init → {id}/claim) ----
     init = await _yunzhi_api(page, "GET", "/api/content/home-popups/init", token, device_no)
-    token = init.get("_authorization") or token
+    _update_token(init.get("_authorization"))
     init_data, init_err = _yunzhi_check_business(init, "home-popups/init")
     if init_err:
         if _yunzhi_is_auth_err(init_err) or init.get("_http_status") in (401, 403):
@@ -9251,7 +9351,7 @@ async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
         pid = claimable[0].get("popupId")
         if pid is not None:
             r = await _yunzhi_api(page, "POST", f"/api/content/home-popups/{pid}/claim", token, device_no)
-            token = r.get("_authorization") or token
+            _update_token(r.get("_authorization"))
             rd, rd_err = _yunzhi_check_business(r, f"home-popups/{pid}/claim")
             if rd_err:
                 popup_note = rd_err
@@ -9272,7 +9372,7 @@ async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
         )
 
     det = await _fetch_benefit()
-    token = det.get("_authorization") or token
+    _update_token(det.get("_authorization"))
     bd, det_err = _yunzhi_check_business(det, "benefit/user/benefit")
     if det_err:
         if _yunzhi_is_auth_err(det_err) or det.get("_http_status") in (401, 403):
@@ -9287,7 +9387,7 @@ async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
         for _ in range(3):
             await asyncio.sleep(1.5)
             det = await _fetch_benefit()
-            token = det.get("_authorization") or token
+            _update_token(det.get("_authorization"))
             bd_retry, retry_err = _yunzhi_check_business(det, "benefit/user/benefit")
             if not retry_err:
                 bd = bd_retry
@@ -9339,7 +9439,7 @@ async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
             page, "POST", "/api/benefit/claim", token, device_no,
             body_params={"userItemId": uid, "resourceId": resource_id},
         )
-        token = claim.get("_authorization") or token
+        _update_token(claim.get("_authorization"))
         cd, claim_err = _yunzhi_check_business(claim, "benefit/claim")
         if claim_err:
             # 仅匹配明确的「已领取」语义;过宽的 "已" 会把「已过期」等
@@ -9370,7 +9470,7 @@ async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
                 page, "POST", "/api/benefit/claim/status", token, device_no,
                 body_params={"claimId": claim_id},
             )
-            token = ps.get("_authorization") or token
+            _update_token(ps.get("_authorization"))
             pd, ps_err = _yunzhi_check_business(ps, "benefit/claim/status")
             if ps_err:
                 failures.append(ps_err)

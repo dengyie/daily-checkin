@@ -343,6 +343,11 @@ sites:
   - name: 'feixingwawa'
     url: https://newapi.feixingwawa.cn/profile
     kind: newapi_profile
+  # wududu(wududu.edu.kg, dudu公益站)—— 2026-10-02 接入。
+  # 标准 LinuxDO OAuth + newapi_profile,checkin_enabled=true、无 Turnstile(2026-10-02 /api/status 实测)。
+  - name: 'wududu'
+    url: https://wududu.edu.kg/profile
+    kind: newapi_profile
   # mailhub(mailhub.pigeonw.com, Mailhub 邮箱额度站)—— 2026-10-01 接入。
   # 非 New API:钱包页 POST /wallet/checkin(表单 csrf)。同页另有「兑换」按钮,
   # 选择器必须钉死 button.primary「立即签到」,不能用裸「签到」。
@@ -499,8 +504,11 @@ sites:
       - 'text=今日已签'
       - 'text=已签到'
     # 「每日仅可签到一次」是站点常驻说明文案,未签到页也有,绝不能当已签(同 guxiaomo).
-  - name: '小喵喵'
-    url: https://cngov.cc.cd/custom/7920deaddf8828b7
+  # cngov(cngov.cc.cd, 大喵喵API / 原小喵喵)—— 2026-10-02 恢复标准 /profile 签到。
+  # 标准 LinuxDO OAuth + newapi_profile, checkin_enabled=true, turnstile_check=true。
+  # runner 内置 dismiss_obstructing_dialogs 自动关闭系统公告弹窗，wait_turnstile_token 自动等待验证。
+  - name: 'cngov'
+    url: https://cngov.cc.cd/profile
     kind: newapi_profile
   - name: '快跑'
     url: https://kuaipao.ai/console/personal
@@ -979,6 +987,20 @@ sites:
   # 登录态: localStorage cloud_phone_token / Cookie CG_CLINET_USER_TOKEN_YUN。
   # 严禁 clear_cookies;直连 urllib 会被 WAF 503,必须页面内 fetch。
   - name: 'yunzhi'
+    url: https://yunzhi.play.cn/ai/?channel_code=00000042
+    kind: yunzhi
+    prefer_catalog_url: true
+    login_url: https://yunzhi.play.cn/ai/#/login
+    signs:
+      - 'text=开心收下'
+      - 'text=立即领取'
+    already:
+      - 'text=今日已领取'
+      - 'text=明天再来'
+  # yunzhi_win (云智手机账号2: 台式机账号 Token 独立签到与云机空间领取)—— 2026-10-03 接入。
+  # 独立 Token 凭据驱动(~/.config/daily-checkin/credentials/yunzhi_win.json);
+  # 经由 9222 页面内 fetch 发起纯 RPC 请求,不碰 9222 的主账号 localStorage/Cookie,支持自动续期回写。
+  - name: 'yunzhi_win'
     url: https://yunzhi.play.cn/ai/?channel_code=00000042
     kind: yunzhi
     prefer_catalog_url: true
