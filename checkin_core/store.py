@@ -38,7 +38,7 @@ def default_db_path() -> Path:
 
 
 DEFAULT_DB = default_db_path()
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 logger = logging.getLogger("checkin.store")
 
 DEFAULT_SYSTEM_CONFIGS: dict[str, str] = {
@@ -53,6 +53,18 @@ DEFAULT_SYSTEM_CONFIGS: dict[str, str] = {
     "tg_bot_token": "",
     "tg_chat_id": "",
     "tg_notify_policy": "all",
+    "ai_inspector_enabled": "false",
+    "ai_inspector_base_url": "",
+    "ai_inspector_api_key": "",
+    "ai_inspector_model": "gpt-4o-mini",
+    "ai_inspector_policy": "on_failure",
+    "ai_inspector_fallback_enabled": "false",
+    "ai_inspector_fallback_base_url": "",
+    "ai_inspector_fallback_api_key": "",
+    "ai_inspector_fallback_model": "gpt-4o-mini",
+    "ai_inspector_channels": "[]",
+    "ai_auto_retry_enabled": "true",
+    "ai_auto_retry_max": "3",
 }
 
 
@@ -173,9 +185,24 @@ class SystemStore:
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS ai_inspections(
+                    id INTEGER PRIMARY KEY,
+                    day TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'cron',
+                    model TEXT NOT NULL,
+                    prompt_tokens INTEGER DEFAULT 0,
+                    completion_tokens INTEGER DEFAULT 0,
+                    latency_ms INTEGER DEFAULT 0,
+                    status TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    structured_json TEXT NOT NULL DEFAULT '{}',
+                    remediation_log TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_tasks_day_status ON daily_tasks(day,status);
                 CREATE INDEX IF NOT EXISTS idx_items_run ON run_items(run_id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status,id);
+                CREATE INDEX IF NOT EXISTS idx_ai_inspections_day ON ai_inspections(day);
                 """
             )
             # Version-gated schema migration: CREATE TABLE IF NOT EXISTS is a
@@ -198,6 +225,9 @@ class SystemStore:
                     SystemStore._migrate_column(db, "sites", "tags", "TEXT NOT NULL DEFAULT ''")
                 if stored_version < 5:
                     # v4 -> v5: system_config table for dynamic scheduler & notify configuration.
+                    pass
+                if stored_version < 6:
+                    # v5 -> v6: ai_inspections table for post-checkin AI inspection & auto-remediation.
                     pass
             db.execute(
                 "INSERT INTO meta(key,value) VALUES('schema_version',?) "
@@ -392,6 +422,110 @@ class SystemStore:
                 "ON CONFLICT(site_id) DO UPDATE SET status=excluded.status,failures=excluded.failures,"
                 "last_reason=excluded.last_reason,updated_at=excluded.updated_at",
                 (site_id, next_status, failures, next_reason, now),
+            )
+
+    def save_ai_inspection(
+        self,
+        day: str,
+        model: str,
+        latency_ms: int,
+        status: str,
+        summary: str,
+        structured_json: str,
+        remediation_log: str = "[]",
+        source: str = "cron",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+    ) -> int:
+        now = self.now()
+        with self.connect() as db:
+            cur = db.execute(
+                """INSERT INTO ai_inspections(
+                       day, source, model, prompt_tokens, completion_tokens,
+                       latency_ms, status, summary, structured_json, remediation_log, created_at
+                   ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    day, source, model, int(prompt_tokens), int(completion_tokens),
+                    int(latency_ms), status, summary, structured_json, remediation_log, now,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def get_latest_ai_inspection(self, day: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM ai_inspections WHERE day=? ORDER BY id DESC LIMIT 1",
+                (day,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_latest_ai_remediation_log(
+        self,
+        day: str,
+        remediation_log: Sequence[dict[str, Any]] | str,
+    ) -> bool:
+        """Update remediation_log for the latest ai_inspection on given day."""
+        log_json = (
+            remediation_log
+            if isinstance(remediation_log, str)
+            else json.dumps(list(remediation_log), ensure_ascii=False)
+        )
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT id FROM ai_inspections WHERE day=? ORDER BY id DESC LIMIT 1",
+                (day,),
+            ).fetchone()
+            if not row:
+                return False
+            db.execute(
+                "UPDATE ai_inspections SET remediation_log=? WHERE id=?",
+                (log_json, row["id"]),
+            )
+            return True
+
+    def get_site_failures(self, site_name: str) -> int:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT sh.failures FROM site_health sh
+                   JOIN sites s ON sh.site_id = s.id
+                   WHERE s.name = ?""",
+                (site_name,),
+            ).fetchone()
+            return int(row["failures"]) if row else 0
+
+    def get_today_retry_count(self, site_name: str, day: str) -> int:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT value FROM meta WHERE key = ?",
+                (f"ai_retry:{day}:{site_name}",),
+            ).fetchone()
+            return int(row["value"]) if row else 0
+
+    def increment_today_retry_count(self, site_name: str, day: str) -> int:
+        with self.connect() as db:
+            key = f"ai_retry:{day}:{site_name}"
+            row = db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            new_val = (int(row["value"]) + 1) if row else 1
+            db.execute(
+                "INSERT INTO meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, str(new_val)),
+            )
+            return new_val
+
+    def suppress_site(self, name: str, reason: str = "ai:suppressed") -> None:
+        now = self.now()
+        with self.connect() as db:
+            site = db.execute("SELECT id FROM sites WHERE name=?", (name,)).fetchone()
+            if not site:
+                return
+            site_id = int(site[0])
+            db.execute(
+                "INSERT INTO site_health(site_id, status, failures, last_reason, updated_at) "
+                "VALUES(?, 'suppressed', 1, ?, ?) "
+                "ON CONFLICT(site_id) DO UPDATE SET status='suppressed', "
+                "last_reason=excluded.last_reason, updated_at=excluded.updated_at",
+                (site_id, reason, now),
             )
 
     def create_run(self, day: str, source: str = "cli", cdp: dict | None = None) -> int:
@@ -833,6 +967,7 @@ class SystemStore:
             "jobs": self.jobs(30),
             "history": self.daily_history(14),
             "total_runs_count": self.total_runs_count(),
+            "ai_inspection": self.get_latest_ai_inspection(day),
         }
 
 
@@ -857,8 +992,62 @@ class SystemStore:
             "tg_bot_token": os.environ.get("DAILY_CHECKIN_TG_BOT_TOKEN", ""),
             "tg_chat_id": os.environ.get("DAILY_CHECKIN_TG_CHAT_ID", ""),
             "tg_notify_policy": "all",
+            "ai_inspector_enabled": os.environ.get("CHECKIN_AI_INSPECTOR_ENABLED", "false"),
+            "ai_inspector_base_url": os.environ.get("CHECKIN_AI_INSPECTOR_BASE_URL", ""),
+            "ai_inspector_api_key": os.environ.get("CHECKIN_AI_INSPECTOR_API_KEY", ""),
+            "ai_inspector_model": os.environ.get("CHECKIN_AI_INSPECTOR_MODEL", "gpt-4o-mini"),
+            "ai_inspector_policy": os.environ.get("CHECKIN_AI_INSPECTOR_POLICY", "on_failure"),
+            "ai_inspector_fallback_enabled": os.environ.get("CHECKIN_AI_INSPECTOR_FALLBACK_ENABLED", "false"),
+            "ai_inspector_fallback_base_url": os.environ.get("CHECKIN_AI_INSPECTOR_FALLBACK_BASE_URL", ""),
+            "ai_inspector_fallback_api_key": os.environ.get("CHECKIN_AI_INSPECTOR_FALLBACK_API_KEY", ""),
+            "ai_inspector_fallback_model": os.environ.get("CHECKIN_AI_INSPECTOR_FALLBACK_MODEL", "gpt-4o-mini"),
+            "ai_inspector_channels": os.environ.get("CHECKIN_AI_INSPECTOR_CHANNELS", "[]"),
+            "ai_auto_retry_enabled": os.environ.get("CHECKIN_AI_AUTO_RETRY_ENABLED", "true"),
+            "ai_auto_retry_max": os.environ.get("CHECKIN_AI_AUTO_RETRY_MAX", "3"),
         }
         return env_map.get(key, DEFAULT_SYSTEM_CONFIGS.get(key, ""))
+
+    def get_ai_channels(self) -> list[Any]:
+        """Return prioritized list of configured AI channels with fallback support."""
+        from checkin_core.ai_inspector_models import AIChannelConfig
+        channels_json = self.get_config("ai_inspector_channels", "[]") or "[]"
+        channels: list[AIChannelConfig] = []
+        if channels_json and channels_json != "[]":
+            try:
+                raw_list = json.loads(channels_json)
+                if isinstance(raw_list, list):
+                    for item in raw_list:
+                        if isinstance(item, dict):
+                            channels.append(AIChannelConfig.from_dict(item))
+            except Exception as e:
+                logger.warning("Failed to parse ai_inspector_channels: %s", e)
+
+        if not channels:
+            primary_url = (self.get_config("ai_inspector_base_url") or "").strip()
+            primary_key = (self.get_config("ai_inspector_api_key") or "").strip()
+            primary_model = (self.get_config("ai_inspector_model") or "gpt-4o-mini").strip()
+            if primary_url and primary_key:
+                channels.append(AIChannelConfig(
+                    name="Primary (主用渠道)",
+                    base_url=primary_url,
+                    api_key=primary_key,
+                    model=primary_model,
+                    enabled=True,
+                ))
+
+            fb_enabled = str(self.get_config("ai_inspector_fallback_enabled") or "false").lower() in ("true", "1", "yes")
+            fb_url = (self.get_config("ai_inspector_fallback_base_url") or "").strip()
+            fb_key = (self.get_config("ai_inspector_fallback_api_key") or "").strip()
+            fb_model = (self.get_config("ai_inspector_fallback_model") or "gpt-4o-mini").strip()
+            if fb_enabled and fb_url and fb_key:
+                channels.append(AIChannelConfig(
+                    name="Fallback (备用降级渠道)",
+                    base_url=fb_url,
+                    api_key=fb_key,
+                    model=fb_model,
+                    enabled=True,
+                ))
+        return channels
 
     def get_all_configs(self) -> dict[str, str]:
         """Return all merged system configs with defaults and environment fallbacks."""

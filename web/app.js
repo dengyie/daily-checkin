@@ -37,6 +37,7 @@ const ICONS = {
   'code': '<path d="m8 9-3 3 3 3m8-6 3 3-3 3M14 5l-4 14"/>',
   'copy': '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
   'eye': '<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/>',
+  'eye-off': '<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24m-3.12-6.36A9.75 9.75 0 0 1 12 5.5c4.76 0 8.27 3.32 9.5 6.5a11.99 11.99 0 0 1-3.18 4.36M6.53 6.53C4.24 7.92 2.76 10.15 2.5 12c1.23 3.18 4.74 6.5 9.5 6.5 1.57 0 3.03-.36 4.35-1m3.65 3.65L2 2"/>',
   'external-link': '<path d="M14 5h5v5M19 5l-8 8M19 14v3a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h3"/>',
   'file-text': '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6m-4 5H8m8 4H8m2-8H8"/>',
   'git-branch': '<path d="M6 3v12a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V9"/><circle cx="6" cy="3" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="12" cy="18" r="2"/>',
@@ -538,6 +539,7 @@ $("#jump-to-tasks-btn")?.addEventListener("click", () => switchView("tasks"));
 $("#jump-to-trend-btn")?.addEventListener("click", () => switchView("history"));
 $("#jump-to-history-btn")?.addEventListener("click", () => switchView("history"));
 $("#overview-jump-health-btn")?.addEventListener("click", () => switchView("health"));
+$("#jump-to-ai-config-btn")?.addEventListener("click", () => switchView("batch-config"));
 
 /* ==========================================================================
    Site Details Slide-over Drawer (右侧浮层详情页)
@@ -1602,6 +1604,106 @@ function renderOverviewView() {
       });
     });
   }
+
+  const overviewAiBody = $("#overview-ai-body");
+  if (overviewAiBody) {
+    const inspection = state.ai_inspection;
+    if (!inspection) {
+      overviewAiBody.innerHTML = `
+        <div class="empty-cell">
+          <div class="mb-xs">${uiIcon("bot", { size: 28, className: "text-muted" })}</div>
+          <div>今日全量批次尚未生成 AI 智能质检报告</div>
+          <div class="text-xs text-muted mt-xs">每日 08:10 批次执行结束后，系统将自动调用大模型进行失败归因分析与自愈决策</div>
+        </div>
+      `;
+    } else {
+      let structured = {};
+      try {
+        structured = typeof inspection.structured_json === "string"
+          ? JSON.parse(inspection.structured_json || "{}")
+          : (inspection.structured_json || {});
+      } catch (e) {
+        structured = {};
+      }
+
+      let remediationLog = [];
+      try {
+        remediationLog = typeof inspection.remediation_log === "string"
+          ? JSON.parse(inspection.remediation_log || "[]")
+          : (inspection.remediation_log || []);
+      } catch (e) {
+        remediationLog = [];
+      }
+
+      const sites = structured.inspections || structured.sites || [];
+      const catLabels = {
+        transient_flake: "偶发抖动",
+        auth_expired: "凭据过期",
+        upstream_disabled: "上游关停",
+        upstream_offline: "服务离线",
+        selector_drift: "页面改版",
+        unknown: "未知归因",
+      };
+
+      overviewAiBody.innerHTML = `
+        <div class="ai-inspection-wrap">
+          <div class="ai-inspection-header">
+            <div class="ai-inspection-meta">
+              <strong>${uiIcon("bot", { size: 14 })} ${esc(inspection.model)}</strong>
+              ${structured.channel_name ? `<span class="badge is-ok ml-xs">${esc(structured.channel_name)}</span>` : ""}
+              <span class="text-xs text-muted ml-xs">| 状态: <span class="${inspection.status === 'success' || inspection.status === 'ok' ? 'text-success font-bold' : 'text-warning font-bold'}">${esc(inspection.status)}</span></span>
+              <span class="text-xs text-muted ml-xs">| 耗时: ${Number(inspection.latency_ms || 0)}ms</span>
+              <span class="text-xs text-muted ml-xs">| Token: ${Number(inspection.prompt_tokens || 0)} in / ${Number(inspection.completion_tokens || 0)} out</span>
+            </div>
+            <div class="text-xs text-muted font-mono">质检时间: ${esc(inspection.created_at || "-")}</div>
+          </div>
+          ${(structured.fallback_chain && structured.fallback_chain.length > 0) ? `
+            <div class="tile-reason-alert mb-xs text-xs">
+              <strong>⚠️ 触发容灾降级：</strong>主用渠道异常（${esc(structured.fallback_chain.join("；"))}），已自动级联降级至备用渠道分析。
+            </div>
+          ` : ""}
+          ${inspection.summary ? `
+            <div class="ai-inspection-summary">
+              <strong>AI 质检总评：</strong>${esc(inspection.summary)}
+            </div>
+          ` : ""}
+          ${remediationLog.length > 0 ? `
+            <div class="ai-remediation-summary text-xs mb-xs">
+              <strong>自愈操作跟踪：</strong>
+              ${remediationLog.map((r) => `<span class="badge ${r.status === 'success' || r.status === 'scheduled' ? 'is-ok' : 'is-fail'}">${esc(r.site_name)}: ${esc(r.action)} (${esc(r.status)})</span>`).join(" ")}
+            </div>
+          ` : ""}
+          ${sites.length ? `
+            <div class="ai-inspection-list">
+              ${sites.map((site) => {
+                const siteName = site.site || site.site_name || "未知站点";
+                const actionText = site.suggested_action || site.recommended_action || "";
+                const cat = site.category || "unknown";
+                const catLabel = catLabels[cat] || cat;
+                const confPct = Math.round((Number(site.confidence) || 0) * 100);
+                return `
+                  <div class="ai-site-card">
+                    <div class="ai-site-header">
+                      <span class="ai-site-name">${esc(siteName)}</span>
+                      <div class="ai-site-tags">
+                        <span class="ai-badge ${esc(cat)}">${esc(catLabel)} · 置信度 ${confPct}%</span>
+                        ${site.can_auto_retry ? '<span class="ai-badge transient_flake">可自动重试</span>' : ''}
+                      </div>
+                    </div>
+                    <div class="ai-site-cause"><strong>根因定性：</strong>${esc(site.root_cause || "-")}</div>
+                    ${actionText ? `<div class="ai-site-action"><strong>自愈建议：</strong>${esc(actionText)}</div>` : ''}
+                    ${site.evidence_snippet ? `<div class="tile-prop-val text-xs text-muted font-mono mt-xs">证据片段: ${esc(site.evidence_snippet)}</div>` : ''}
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          ` : `
+            <div class="empty-cell">本次质检无异常站点需归因（批次全量成功或未识别到失败站点）</div>
+          `}
+        </div>
+      `;
+    }
+  }
 }
 
 function renderTasksView(stats) {
@@ -2013,6 +2115,18 @@ async function loadBatchConfig() {
     if (form.elements["cf_wait_s"]) form.elements["cf_wait_s"].value = cfgs.cf_wait_s || "30";
     if (form.elements["connect_retries"]) form.elements["connect_retries"].value = cfgs.connect_retries || "2";
 
+    if (form.elements["ai_inspector_enabled"]) form.elements["ai_inspector_enabled"].value = String(cfgs.ai_inspector_enabled) === "true" ? "true" : "false";
+    if (form.elements["ai_inspector_policy"]) form.elements["ai_inspector_policy"].value = cfgs.ai_inspector_policy || "on_failure";
+    if (form.elements["ai_inspector_base_url"]) form.elements["ai_inspector_base_url"].value = cfgs.ai_inspector_base_url || "";
+    if (form.elements["ai_inspector_api_key"]) form.elements["ai_inspector_api_key"].value = cfgs.ai_inspector_api_key || "";
+    if (form.elements["ai_inspector_model"]) form.elements["ai_inspector_model"].value = cfgs.ai_inspector_model || "gpt-4o-mini";
+    if (form.elements["ai_inspector_fallback_enabled"]) form.elements["ai_inspector_fallback_enabled"].value = String(cfgs.ai_inspector_fallback_enabled) === "true" ? "true" : "false";
+    if (form.elements["ai_inspector_fallback_base_url"]) form.elements["ai_inspector_fallback_base_url"].value = cfgs.ai_inspector_fallback_base_url || "";
+    if (form.elements["ai_inspector_fallback_api_key"]) form.elements["ai_inspector_fallback_api_key"].value = cfgs.ai_inspector_fallback_api_key || "";
+    if (form.elements["ai_inspector_fallback_model"]) form.elements["ai_inspector_fallback_model"].value = cfgs.ai_inspector_fallback_model || "gpt-4o-mini";
+    if (form.elements["ai_auto_retry_enabled"]) form.elements["ai_auto_retry_enabled"].value = String(cfgs.ai_auto_retry_enabled) === "false" ? "false" : "true";
+    if (form.elements["ai_auto_retry_max"]) form.elements["ai_auto_retry_max"].value = cfgs.ai_auto_retry_max || "3";
+
     if (form.elements["tg_notify_enabled"]) form.elements["tg_notify_enabled"].value = String(cfgs.tg_notify_enabled) === "false" ? "false" : "true";
     if (form.elements["tg_notify_policy"]) form.elements["tg_notify_policy"].value = cfgs.tg_notify_policy || "all";
     if (form.elements["tg_bot_token"]) form.elements["tg_bot_token"].value = cfgs.tg_bot_token || "";
@@ -2085,6 +2199,157 @@ $("#cfg-test-tg-btn")?.addEventListener("click", async () => {
   } finally {
     btn.disabled = false;
     btn.innerHTML = origHtml;
+  }
+});
+
+$("#cfg-toggle-ai-key-btn")?.addEventListener("click", () => {
+  const input = $("#cfg-ai-inspector-api-key");
+  const btn = $("#cfg-toggle-ai-key-btn");
+  if (!input) return;
+  if (input.type === "password") {
+    input.type = "text";
+    if (btn) btn.innerHTML = uiIcon("eye-off", { size: 13 });
+  } else {
+    input.type = "password";
+    if (btn) btn.innerHTML = uiIcon("eye", { size: 13 });
+  }
+});
+
+$("#cfg-test-ai-btn")?.addEventListener("click", async () => {
+  const form = $("#batch-config-form");
+  const btn = $("#cfg-test-ai-btn");
+  const resultSpan = $("#cfg-ai-test-result");
+  const baseUrl = form?.elements["ai_inspector_base_url"]?.value?.trim() || "";
+  const apiKey = form?.elements["ai_inspector_api_key"]?.value?.trim() || "";
+  const model = form?.elements["ai_inspector_model"]?.value?.trim() || "gpt-4o-mini";
+
+  if (!baseUrl) {
+    showToast("请先填写 AI API Base URL 端点", "error");
+    if (resultSpan) {
+      resultSpan.className = "text-xs text-danger";
+      resultSpan.textContent = "Base URL 不能为空";
+    }
+    return;
+  }
+  if (!apiKey) {
+    showToast("请先填写 AI API Key", "error");
+    if (resultSpan) {
+      resultSpan.className = "text-xs text-danger";
+      resultSpan.textContent = "API Key 不能为空";
+    }
+    return;
+  }
+
+  const origHtml = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `${uiIcon("loader", { size: 13, className: "spin" })} 正在测试 AI 模型连通性...`;
+  }
+  if (resultSpan) {
+    resultSpan.className = "text-xs text-muted";
+    resultSpan.textContent = "正在握手并测试模型生成...";
+  }
+
+  try {
+    const res = await api("/api/ai/test", {
+      ai_inspector_base_url: baseUrl,
+      ai_inspector_api_key: apiKey,
+      ai_inspector_model: model,
+    });
+    if (res.ok) {
+      showToast(`🎉 AI 模型连通性测试成功 (${res.latency_ms}ms)！`, "success");
+      if (resultSpan) {
+        resultSpan.className = "text-xs text-success font-mono";
+        resultSpan.textContent = `✅ 连通成功 (${res.latency_ms}ms) · 响应: "${res.sample_reply}"`;
+      }
+    }
+  } catch (err) {
+    showToast(`AI 连通性测试失败: ${err.message}`, "error");
+    if (resultSpan) {
+      resultSpan.className = "text-xs text-danger font-mono";
+      resultSpan.textContent = `❌ 失败: ${err.message}`;
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origHtml;
+    }
+  }
+});
+
+$("#cfg-toggle-ai-fallback-key-btn")?.addEventListener("click", () => {
+  const input = $("#cfg-ai-inspector-fallback-api-key");
+  const btn = $("#cfg-toggle-ai-fallback-key-btn");
+  if (!input) return;
+  if (input.type === "password") {
+    input.type = "text";
+    if (btn) btn.innerHTML = uiIcon("eye-off", { size: 13 });
+  } else {
+    input.type = "password";
+    if (btn) btn.innerHTML = uiIcon("eye", { size: 13 });
+  }
+});
+
+$("#cfg-test-ai-fallback-btn")?.addEventListener("click", async () => {
+  const form = $("#batch-config-form");
+  const btn = $("#cfg-test-ai-fallback-btn");
+  const resultSpan = $("#cfg-ai-fallback-test-result");
+  const baseUrl = form?.elements["ai_inspector_fallback_base_url"]?.value?.trim() || "";
+  const apiKey = form?.elements["ai_inspector_fallback_api_key"]?.value?.trim() || "";
+  const model = form?.elements["ai_inspector_fallback_model"]?.value?.trim() || "gpt-4o-mini";
+
+  if (!baseUrl) {
+    showToast("请先填写备用渠道 Base URL 端点", "error");
+    if (resultSpan) {
+      resultSpan.className = "text-xs text-danger";
+      resultSpan.textContent = "备用 Base URL 不能为空";
+    }
+    return;
+  }
+  if (!apiKey) {
+    showToast("请先填写备用渠道 API Key", "error");
+    if (resultSpan) {
+      resultSpan.className = "text-xs text-danger";
+      resultSpan.textContent = "备用 API Key 不能为空";
+    }
+    return;
+  }
+
+  const origHtml = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `${uiIcon("loader", { size: 13, className: "spin" })} 正在测试备用渠道...`;
+  }
+  if (resultSpan) {
+    resultSpan.className = "text-xs text-muted";
+    resultSpan.textContent = "正在握手并测试备用模型...";
+  }
+
+  try {
+    const res = await api("/api/ai/test", {
+      channel_name: "Fallback 备用渠道",
+      base_url: baseUrl,
+      api_key: apiKey,
+      model: model,
+    });
+    if (res.ok) {
+      showToast(`🎉 备用渠道连通性测试成功 (${res.latency_ms}ms)！`, "success");
+      if (resultSpan) {
+        resultSpan.className = "text-xs text-success font-mono";
+        resultSpan.textContent = `✅ 连通成功 (${res.latency_ms}ms) · 响应: "${res.sample_reply}"`;
+      }
+    }
+  } catch (err) {
+    showToast(`备用渠道测试失败: ${err.message}`, "error");
+    if (resultSpan) {
+      resultSpan.className = "text-xs text-danger font-mono";
+      resultSpan.textContent = `❌ 失败: ${err.message}`;
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origHtml;
+    }
   }
 });
 

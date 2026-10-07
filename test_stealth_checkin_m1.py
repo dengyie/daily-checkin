@@ -4033,6 +4033,59 @@ class TestSitesYaml(unittest.TestCase):
         resolved = resolve_site("虾蹬王", "https://checkin.kunyou.asia/")
         self.assertEqual(resolved.url, "https://checkin.kunyou.asia/")
 
+    def test_yaml_registers_deadlion_entry(self):
+        """sites.yaml 的 deadlion 条目解析为 kind=browser,/console 立即签到与今日已签到回执。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "deadlion"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 deadlion 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://free.deadlion.cn/console")
+        self.assertTrue(a.prefer_catalog_url)
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn('button:has-text("立即签到")', joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn('button:has-text("今日已签到")', joined_already)
+        self.assertIn("text=今日已签到", joined_already)
+        resolved = resolve_site("deadlion", "https://free.deadlion.cn/console")
+        self.assertEqual(resolved.url, "https://free.deadlion.cn/console")
+
+    def test_yaml_registers_motomoto_entry(self):
+        """sites.yaml 的 motomoto 条目解析为 kind=browser,/profile Check in now 与 Checked in 回执。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "motomoto"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 motomoto 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, done_button_signal, _DIALOG_DISMISS_JS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://motomoto.lol/profile")
+        self.assertTrue(a.prefer_catalog_url)
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn('button:has-text("Check in now")', joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn('button:has-text("Checked in")', joined_already)
+        self.assertIn("text=Checked in", joined_already)
+        resolved = resolve_site("motomoto", "https://motomoto.lol/profile")
+        self.assertEqual(resolved.url, "https://motomoto.lol/profile")
+        self.assertEqual(resolved.kind, "browser")
+
+        # 验证 Checked in 的 disabled 与 card 判定
+        self.assertEqual(done_button_signal("Checked in", True), "btn:disabled:Checkedin")
+        self.assertEqual(done_button_signal("Checked in", False), "")
+        self.assertEqual(done_button_signal("Daily Check-in\nChecked in\nToday +$50", False), "btn:card:checkedin")
+
+        # 验证弹窗遮罩排除机制包含「我已知悉」
+        self.assertIn("我已知悉", _DIALOG_DISMISS_JS)
+
     def test_yaml_registers_bxacc_entry(self):
         """sites.yaml 的 bxacc 条目解析为 newapi_profile,/profile,prefer_catalog_url。"""
         import yaml
@@ -4080,6 +4133,68 @@ class TestSitesYaml(unittest.TestCase):
         self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 techmob")
         self.assertEqual(builtin_entry.kind, "newapi_profile")
         self.assertEqual(builtin_entry.url, "https://newapi.do.techmob.net/profile")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
+
+    def test_yaml_registers_si_entry(self):
+        """sites.yaml 的 si 条目解析为 newapi_profile,/profile,prefer_catalog_url。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "si"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 si 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://si.99442200.xyz/profile")
+        self.assertTrue(a.prefer_catalog_url)
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        resolved_si = resolve_site("si", "http://si.99442200.xyz/profile")
+        self.assertEqual(resolved_si.url, "https://si.99442200.xyz/profile")
+        self.assertEqual(resolved_si.kind, "newapi_profile")
+        resolved_furry = resolve_site("furry API", "http://si.99442200.xyz/profile")
+        self.assertEqual(resolved_furry.url, "https://si.99442200.xyz/profile")
+        self.assertEqual(resolved_furry.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "si"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 si")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://si.99442200.xyz/profile")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
+
+    def test_yaml_registers_yuheng_entry(self):
+        """sites.yaml 的 yuheng 条目解析为 newapi_profile,/profile,prefer_catalog_url。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "yuheng"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 yuheng 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://yuheng.site/profile")
+        self.assertTrue(a.prefer_catalog_url)
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        resolved_yuheng = resolve_site("yuheng", "https://yuheng.site/profile")
+        self.assertEqual(resolved_yuheng.url, "https://yuheng.site/profile")
+        self.assertEqual(resolved_yuheng.kind, "newapi_profile")
+        resolved_alias = resolve_site("玉衡中转", "https://yuheng.site/profile")
+        self.assertEqual(resolved_alias.url, "https://yuheng.site/profile")
+        self.assertEqual(resolved_alias.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "yuheng"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 yuheng")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://yuheng.site/profile")
         self.assertTrue(builtin_entry.prefer_catalog_url)
 
     def test_yaml_registers_0api_entry(self):
@@ -6782,6 +6897,233 @@ class YunzhiCheckinTest(unittest.TestCase):
             # 确信自动写回了新 token (自动续期保障)
             saved_data = json.loads(target_file.read_text(encoding="utf-8"))
             self.assertEqual(saved_data["token"], "brand_new_rotated_token_xyz")
+
+
+class IloveCatCheckinTest(unittest.TestCase):
+    """靴貓公益站 (https://api.ilovecat520.me/playground) 每日摸猫 + 猫咪占卜 专属签到流程单测."""
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+        import asyncio as _aio
+        self.asyncio = _aio
+
+    def _adapter(self):
+        return self.m.SiteAdapter(
+            name="靴貓公益站",
+            url="https://api.ilovecat520.me/playground",
+            kind="ilovecat",
+            sign_selectors=[
+                "button.cat-pet__cat",
+                "button.cat-fortune__drum",
+            ],
+            already_selectors=[
+                "text=明天再来摸摸吧",
+                "text=今天已经抽过了，明天再来抽一支吧。",
+            ],
+            prefer_catalog_url=True,
+            login_url="https://api.ilovecat520.me/login",
+        )
+
+    def test_is_ilovecat_site_positive_negative(self):
+        f = self.m.is_ilovecat_site
+        self.assertTrue(f("https://api.ilovecat520.me/playground"))
+        self.assertTrue(f("https://api.ilovecat520.me/login"))
+        self.assertTrue(f("https://ilovecat520.me"))
+        self.assertFalse(f("https://example.com/"))
+        self.assertFalse(f(""))
+
+    def test_is_ilovecat_name_positive_negative(self):
+        f = self.m.is_ilovecat_name
+        self.assertTrue(f("靴貓公益站"))
+        self.assertTrue(f("靴貓"))
+        self.assertTrue(f("ilovecat"))
+        self.assertTrue(f("每日摸猫"))
+        self.assertFalse(f("other_site"))
+
+    def test_kind_in_literal(self):
+        self.assertIn("ilovecat", self.m.AdapterKind.__args__)
+
+    def test_yaml_registers_ilovecat_entry(self):
+        """sites.yaml 的 靴貓公益站 条目解析为 kind=ilovecat 且主路径为 /playground。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "靴貓公益站"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 靴貓公益站 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "ilovecat")
+        self.assertEqual(a.url, "https://api.ilovecat520.me/playground")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertEqual(a.login_url, "https://api.ilovecat520.me/login")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("button.cat-pet__cat", joined_signs)
+        self.assertIn("button.cat-fortune__drum", joined_signs)
+
+    def test_builtin_entry_ilovecat(self):
+        """_BUILTIN_SITE_ADAPTERS 中的 靴貓公益站 为 ilovecat adapter。"""
+        from stealth_checkin_runner import _BUILTIN_SITE_ADAPTERS
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "靴貓公益站"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 靴貓公益站")
+        self.assertEqual(builtin_entry.kind, "ilovecat")
+        self.assertEqual(builtin_entry.url, "https://api.ilovecat520.me/playground")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
+        self.assertEqual(builtin_entry.login_url, "https://api.ilovecat520.me/login")
+
+    def test_dispatch_contains_ilovecat_branch(self):
+        src = TARGET.read_text(encoding="utf-8")
+        self.assertIn("is_ilovecat_site(site_url)", src)
+        self.assertIn("return await ilovecat_checkin(page, adapter, browser=browser)", src)
+
+    def test_p0_no_clear_cookies_in_ilovecat_path(self):
+        """ilovecat 专属流程不得调用 clear_cookies / clear_localstorage / 全清接口."""
+        import inspect
+        src = inspect.getsource(self.m.ilovecat_checkin)
+        lower = src.lower()
+        self.assertNotIn("clear_cookies", lower)
+        self.assertNotIn("clear_localstorage", lower)
+        self.assertNotIn("clear_all", lower)
+
+    def test_ilovecat_already_checked_in(self):
+        """API 与页面均显示今日已摸猫、已占卜时，直接返回 ALREADY。"""
+        m = self.m
+        clicks = []
+
+        class FakeLocator:
+            def __init__(self, sel, visible=True):
+                self.sel = sel
+                self._visible = visible
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def click(self, **kw):
+                clicks.append(self.sel)
+
+        class FakePage:
+            url = "https://api.ilovecat520.me/playground"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k):
+                if "/api/cat/status" in expr:
+                    return {
+                        "ok": True,
+                        "status": 200,
+                        "data": {
+                            "pet": {"played": True, "reward": 2500},
+                            "fortune": {"played": True, "reward": 3000},
+                        }
+                    }
+                return ""
+            def locator(self, sel):
+                return FakeLocator(sel, visible=True)
+
+        async def fake_page_text(p, limit=2000):
+            return "靴貓公益站\n每日摸猫\n明天再来摸摸吧\n猫咪占卜\n今天已经抽过了"
+
+        async def fake_page_url(p):
+            return "https://api.ilovecat520.me/playground"
+
+        async def fake_bypass(*a, **k):
+            return False
+
+        orig_page_text = m.page_text
+        orig_page_url = m.page_url
+        orig_bypass = m.bypass_chrome_interstitial_if_needed
+        m.page_text = fake_page_text
+        m.page_url = fake_page_url
+        m.bypass_chrome_interstitial_if_needed = fake_bypass
+        try:
+            res = self.asyncio.run(m.ilovecat_checkin(FakePage(), self._adapter()))
+            self.assertEqual(res.status, "ALREADY")
+            self.assertIn("摸猫", res.detail)
+            self.assertIn("占卜", res.detail)
+            self.assertEqual(len(clicks), 0)
+        finally:
+            m.page_text = orig_page_text
+            m.page_url = orig_page_url
+            m.bypass_chrome_interstitial_if_needed = orig_bypass
+
+    def test_ilovecat_fresh_checkin_both_actions(self):
+        """未签到状态下点击摸猫与占卜按钮，完成后均返回 OK 并包含两个动作的详情。"""
+        m = self.m
+        clicks = []
+        status_call_count = [0]
+
+        class FakeLocator:
+            def __init__(self, sel, visible=True):
+                self.sel = sel
+                self._visible = visible
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def click(self, **kw):
+                clicks.append(self.sel)
+
+        class FakePage:
+            url = "https://api.ilovecat520.me/playground"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k):
+                if "/api/cat/status" in expr:
+                    status_call_count[0] += 1
+                    if status_call_count[0] == 1:
+                        # 初始查询：未摸未抽
+                        return {
+                            "ok": True,
+                            "status": 200,
+                            "data": {
+                                "pet": {"played": False},
+                                "fortune": {"played": False},
+                            }
+                        }
+                    else:
+                        # 点击后二次验证：已完成
+                        return {
+                            "ok": True,
+                            "status": 200,
+                            "data": {
+                                "pet": {"played": True, "reward": 2191},
+                                "fortune": {"played": True, "reward": 3000},
+                            }
+                        }
+                return ""
+            def locator(self, sel):
+                return FakeLocator(sel, visible=True)
+
+        async def fake_page_text(p, limit=2000):
+            return "靴貓公益站\n每日摸猫\n猫咪占卜"
+
+        async def fake_page_url(p):
+            return "https://api.ilovecat520.me/playground"
+
+        async def fake_bypass(*a, **k):
+            return False
+
+        orig_page_text = m.page_text
+        orig_page_url = m.page_url
+        orig_bypass = m.bypass_chrome_interstitial_if_needed
+        m.page_text = fake_page_text
+        m.page_url = fake_page_url
+        m.bypass_chrome_interstitial_if_needed = fake_bypass
+        try:
+            res = self.asyncio.run(m.ilovecat_checkin(FakePage(), self._adapter()))
+            self.assertEqual(res.status, "OK")
+            self.assertIn("摸猫成功", res.detail)
+            self.assertIn("占卜成功", res.detail)
+            self.assertTrue(any("cat-pet__cat" in c for c in clicks))
+            self.assertTrue(any("cat-fortune__drum" in c for c in clicks))
+        finally:
+            m.page_text = orig_page_text
+            m.page_url = orig_page_url
+            m.bypass_chrome_interstitial_if_needed = orig_bypass
 
 
 if __name__ == "__main__":

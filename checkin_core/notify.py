@@ -53,7 +53,7 @@ def _send_telegram_raw(token: str, chat_id: str, text: str) -> bool:
         return False
 
 
-def build_daily_summary_text(results, today_str: str) -> str:
+def build_daily_summary_text(results, today_str: str, ai_report: Any | None = None) -> str:
     """Build daily summary text from CheckinResult list.
 
     Returns formatted markdown-safe text ready for Telegram.
@@ -86,6 +86,20 @@ def build_daily_summary_text(results, today_str: str) -> str:
             names = "、".join(sites[:8])
             extra = f" +{len(sites)-8}" if len(sites) > 8 else ""
             lines.append(f"  {reason}: {names}{extra}")
+
+    if ai_report and getattr(ai_report, "inspections", None):
+        lines.append("")
+        lines.append("🤖 AI 智能质检归因:")
+        if getattr(ai_report, "summary", ""):
+            lines.append(f"💡 结论: {ai_report.summary}")
+        for insp in ai_report.inspections[:6]:
+            action_hint = f" -> {insp.suggested_action}" if getattr(insp, "suggested_action", "") else ""
+            lines.append(f"• {insp.site}: [{insp.category}] {insp.root_cause}{action_hint}")
+        if len(ai_report.inspections) > 6:
+            lines.append(f"  ...等共 {len(ai_report.inspections)} 项")
+        if getattr(ai_report, "auto_retry_targets", None):
+            lines.append(f"⚡ 已触发自愈重试: {', '.join(ai_report.auto_retry_targets)}")
+
     return "\n".join(lines)
 
 
@@ -95,6 +109,7 @@ def notify_daily_summary(
     run_source: str = "cli",
     run_scope: str = "targeted",
     store: Any | None = None,
+    ai_report: Any | None = None,
 ) -> bool:
     """Fire daily summary to TG. Gated: only on full batch (not --only/retry)."""
     if run_scope != "full":
@@ -149,7 +164,7 @@ def notify_daily_summary(
         print("  notify: TG notification skipped (policy=fail_only and 0 failures)", flush=True)
         return False
 
-    text = build_daily_summary_text(results, today_str)
+    text = build_daily_summary_text(results, today_str, ai_report=ai_report)
     if not text:
         return False
     return _send_telegram_raw(token, chat_id, text)

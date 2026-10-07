@@ -211,6 +211,19 @@
             </div>
           </div>
 
+          <!-- Overview AI Inspection Card (今日 AI 质检与自愈决策总览) -->
+          <div class="content-card mt-md" id="overview-ai-card">
+            <div class="content-card-head">
+              <div class="card-title">
+                <span><ui-icon name="bot" size="16"></ui-icon> 今日 AI 智能质检与自愈归因 (AI Inspector & Remediation)</span>
+              </div>
+              <button class="btn sm" id="jump-to-ai-config-btn"><ui-icon name="settings" size="13"></ui-icon> 前往配置 AI 面板</button>
+            </div>
+            <div id="overview-ai-body">
+              <div class="empty-cell">正在检测今日 AI 质检记录...</div>
+            </div>
+          </div>
+
           <!-- Recent Runs Preview -->
           <div class="content-card">
             <div class="content-card-head">
@@ -696,7 +709,112 @@
                 </div>
               </div>
 
-              <!-- 3. Telegram 战报推送偏好 -->
+              <!-- 3. AI 智能质检与自愈专家配置 (AI Inspector & Remediation) -->
+              <div class="content-card">
+                <div class="card-title mb-sm"><ui-icon name="bot" size="16"></ui-icon> AI 智能质检与自愈专家配置</div>
+                <div class="form-group-item">
+                  <label for="cfg-ai-inspector-enabled">AI 智能质检总开关 (AI Inspector Switch)</label>
+                  <select id="cfg-ai-inspector-enabled" name="ai_inspector_enabled">
+                    <option value="true">开启 AI 智能质检 (批次完成后自动归因与自愈)</option>
+                    <option value="false">关闭 AI 智能质检</option>
+                  </select>
+                  <small class="tile-prop-label mt-xs d-block">
+                    开启后，每日批次尾部将自动脱敏日志并调用配置的大模型进行根因定性与自愈决策。
+                  </small>
+                </div>
+                <div class="form-group-item">
+                  <label for="cfg-ai-inspector-policy">质检介入策略 (Inspection Policy)</label>
+                  <select id="cfg-ai-inspector-policy" name="ai_inspector_policy">
+                    <option value="on_failure">仅在批次存在失败站点时介入质检 (推荐，节约 Token)</option>
+                    <option value="always">全量批次始终调用质检</option>
+                  </select>
+                </div>
+                <div class="form-group-item">
+                  <label for="cfg-ai-auto-retry-enabled">智能自愈重试 (Auto-Remediation)</label>
+                  <select id="cfg-ai-auto-retry-enabled" name="ai_auto_retry_enabled">
+                    <option value="true">开启自愈重试 (置信度 ≥ 0.85 偶发波动自动重跑)</option>
+                    <option value="false">关闭自愈重试 (仅生成定性归因报告)</option>
+                  </select>
+                </div>
+                <div class="form-group-item">
+                  <label for="cfg-ai-auto-retry-max">单批次自愈重试配额上限 (Max Retry Targets)</label>
+                  <input type="number" id="cfg-ai-auto-retry-max" name="ai_auto_retry_max" min="1" max="5" value="3">
+                  <small class="tile-prop-label mt-xs d-block">
+                    单日单站严格最多重试 1 次，防重试风暴整批上限 1~5 站（默认 3 站）。
+                  </small>
+                </div>
+
+                <!-- 渠道 1: 主用 AI 渠道 (Primary Channel) -->
+                <div class="ai-channel-box mt-md">
+                  <div class="ai-channel-head">
+                    <span class="badge is-ok">主用渠道 (Primary · 优先级 1)</span>
+                    <span class="text-xs text-muted">默认首选分析模型</span>
+                  </div>
+                  <div class="form-group-item mt-xs">
+                    <label for="cfg-ai-inspector-base-url">主用 Base URL (OpenAI 兼容端点)</label>
+                    <input type="url" id="cfg-ai-inspector-base-url" name="ai_inspector_base_url" placeholder="例如: https://api.openai.com/v1 或 https://api.deepseek.com/v1" autocomplete="off">
+                  </div>
+                  <div class="form-group-item">
+                    <label for="cfg-ai-inspector-api-key">主用 API Key</label>
+                    <div class="input-with-button-row">
+                      <input type="password" id="cfg-ai-inspector-api-key" name="ai_inspector_api_key" placeholder="sk-..." autocomplete="off">
+                      <button type="button" class="btn sm" id="cfg-toggle-ai-key-btn" title="显示/隐藏 Key"><ui-icon name="eye" size="13"></ui-icon></button>
+                    </div>
+                  </div>
+                  <div class="form-group-item">
+                    <label for="cfg-ai-inspector-model">主用模型名称 (Model Identifier)</label>
+                    <input type="text" id="cfg-ai-inspector-model" name="ai_inspector_model" placeholder="gpt-4o-mini" list="ai-models-datalist" value="gpt-4o-mini">
+                  </div>
+                  <div class="action-bar-row mt-sm">
+                    <button type="button" class="btn sm" id="cfg-test-ai-btn"><ui-icon name="bot" size="13"></ui-icon> 测试主用渠道连通性</button>
+                    <span class="text-xs text-muted" id="cfg-ai-test-result"></span>
+                  </div>
+                </div>
+
+                <!-- 渠道 2: 备用降级 AI 渠道 (Fallback Channel) -->
+                <div class="ai-channel-box mt-md">
+                  <div class="ai-channel-head">
+                    <span class="badge is-pending">备用降级渠道 (Fallback · 容灾备援)</span>
+                    <span class="text-xs text-muted">主用遇 429 限流 / 欠费 / 超时时无缝自动降级</span>
+                  </div>
+                  <div class="form-group-item mt-xs">
+                    <label for="cfg-ai-inspector-fallback-enabled">启用备用降级容灾</label>
+                    <select id="cfg-ai-inspector-fallback-enabled" name="ai_inspector_fallback_enabled">
+                      <option value="false">未启用备用降级</option>
+                      <option value="true">启用备用降级 (主用异常时自动级联切换)</option>
+                    </select>
+                  </div>
+                  <div class="form-group-item">
+                    <label for="cfg-ai-inspector-fallback-base-url">备用 Base URL</label>
+                    <input type="url" id="cfg-ai-inspector-fallback-base-url" name="ai_inspector_fallback_base_url" placeholder="例如: https://api.siliconflow.cn/v1" autocomplete="off">
+                  </div>
+                  <div class="form-group-item">
+                    <label for="cfg-ai-inspector-fallback-api-key">备用 API Key</label>
+                    <div class="input-with-button-row">
+                      <input type="password" id="cfg-ai-inspector-fallback-api-key" name="ai_inspector_fallback_api_key" placeholder="sk-..." autocomplete="off">
+                      <button type="button" class="btn sm" id="cfg-toggle-ai-fallback-key-btn" title="显示/隐藏 Key"><ui-icon name="eye" size="13"></ui-icon></button>
+                    </div>
+                  </div>
+                  <div class="form-group-item">
+                    <label for="cfg-ai-inspector-fallback-model">备用模型名称</label>
+                    <input type="text" id="cfg-ai-inspector-fallback-model" name="ai_inspector_fallback_model" placeholder="deepseek-chat" list="ai-models-datalist" value="gpt-4o-mini">
+                  </div>
+                  <div class="action-bar-row mt-sm">
+                    <button type="button" class="btn sm" id="cfg-test-ai-fallback-btn"><ui-icon name="bot" size="13"></ui-icon> 测试备用渠道连通性</button>
+                    <span class="text-xs text-muted" id="cfg-ai-fallback-test-result"></span>
+                  </div>
+                </div>
+
+                <datalist id="ai-models-datalist">
+                  <option value="gpt-4o-mini"></option>
+                  <option value="gpt-4o"></option>
+                  <option value="deepseek-chat"></option>
+                  <option value="claude-3-5-haiku-latest"></option>
+                  <option value="Qwen/Qwen2.5-7B-Instruct"></option>
+                </datalist>
+              </div>
+
+              <!-- 4. Telegram 战报推送偏好 -->
               <div class="content-card">
                 <div class="card-title mb-sm"><ui-icon name="send" size="16"></ui-icon> Telegram 日报推送渠道与偏好</div>
                 <div class="form-group-item">
@@ -726,18 +844,24 @@
                 </div>
               </div>
 
-              <!-- 4. 运行时持久化与控制策略 -->
+              <!-- 5. 运行时持久化与安全脱敏架构 -->
               <div class="content-card">
-                <div class="card-title mb-sm"><ui-icon name="database" size="16"></ui-icon> 动态持久化架构说明</div>
+                <div class="card-title mb-sm"><ui-icon name="database" size="16"></ui-icon> 动态持久化与脱敏安全说明</div>
                 <div class="tile-info-grid tile-info-col1">
                   <div>
                     <div class="tile-prop-label">配置存储权威 (Single Source of Truth)</div>
                     <div class="tile-prop-val font-mono">SQLite system.db → system_config 表</div>
                   </div>
                   <div>
-                    <div class="tile-prop-label">环境变量优先级策略</div>
+                    <div class="tile-prop-label">P0 凭据零泄露红线 (Zero-Leakage Sanitization)</div>
                     <div class="tile-prop-val text-xs text-muted wrap-text">
-                      当前面板配置保存在 SQLite 权威表中，每日批次与 Web 端将优先读取此处动态配置。未配置项自动回退至本地 <code>env.sh</code> 默认值。
+                      网络 I/O 边界内嵌严格脱敏管道，出网前自动粉碎 Bearer Token、JWT、账号密码、Session Cookie、邮箱及 UID，确保敏感凭据零泄露。
+                    </div>
+                  </div>
+                  <div>
+                    <div class="tile-prop-label">双重置信度门禁 (Confidence Gating)</div>
+                    <div class="tile-prop-val text-xs text-muted wrap-text">
+                      仅当偶发故障置信度 ≥ 0.85 时允许自愈重试；永久停运站点置信度 ≥ 0.90 时自动打上抑制标签，防风暴单日单站严格限额 1 次。
                     </div>
                   </div>
                   <div>

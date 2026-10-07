@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import threading
 import unittest
+from unittest import mock
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1493,6 +1494,76 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
         self.conn.request("POST", "/api/sites/delete", json.dumps({"name": "not-exists-999"}).encode(), headers)
         resp = self.conn.getresponse()
         self.assertEqual(resp.status, 400)
+
+    def test_api_ai_latest_endpoint(self):
+        # Query when no inspection exists
+        self.conn.request("GET", f"/api/ai/latest?day={self.day}")
+        resp = self.conn.getresponse()
+        self.assertEqual(resp.status, 200)
+        data = json.loads(resp.read())
+        self.assertTrue(data.get("ok"))
+        self.assertIsNone(data.get("inspection"))
+
+        # Record an inspection
+        self.store.save_ai_inspection(
+            day=self.day,
+            model="gpt-4o-mini",
+            latency_ms=120,
+            status="success",
+            summary="All clear",
+            structured_json=json.dumps({"summary": "All clear", "inspections": []}),
+            remediation_log=json.dumps([{"site_name": "foo", "action": "retry", "status": "scheduled"}]),
+            prompt_tokens=100,
+            completion_tokens=20,
+        )
+
+        # Query again
+        self.conn.request("GET", f"/api/ai/latest?day={self.day}")
+        resp = self.conn.getresponse()
+        self.assertEqual(resp.status, 200)
+        data = json.loads(resp.read())
+        self.assertTrue(data.get("ok"))
+        insp = data.get("inspection")
+        self.assertIsNotNone(insp)
+        self.assertEqual(insp["model"], "gpt-4o-mini")
+        self.assertEqual(insp["summary"], "All clear")
+        self.assertEqual(insp["prompt_tokens"], 100)
+        self.assertEqual(insp["completion_tokens"], 20)
+
+    def test_api_ai_test_endpoint(self):
+        self.conn.request("GET", "/api/state")
+        res = self.conn.getresponse()
+        csrf = json.loads(res.read())["csrf"]
+
+        headers = {"Content-Type": "application/json", "X-CSRF-Token": csrf}
+
+        # Missing base_url and api_key
+        body = json.dumps({"base_url": "", "api_key": ""}).encode()
+        self.conn.request("POST", "/api/ai/test", body, headers)
+        resp = self.conn.getresponse()
+        self.assertEqual(resp.status, 400)
+
+        # Mock successful external call
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "choices": [{"message": {"content": "pong"}}]
+        }).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with mock.patch("urllib.request.urlopen", return_value=mock_resp):
+            body = json.dumps({
+                "channel_name": "TestPrimary",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "sk-fake-test-key",
+                "model": "gpt-4o-mini"
+            }).encode()
+            self.conn.request("POST", "/api/ai/test", body, headers)
+            resp = self.conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read())
+            self.assertTrue(data.get("ok"))
+            self.assertEqual(data.get("channel_name"), "TestPrimary")
+            self.assertEqual(data.get("reply"), "pong")
 
 
 

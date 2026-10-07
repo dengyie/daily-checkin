@@ -435,7 +435,7 @@ TERMS_CLICK_SELECTORS = [
 ]
 
 Status = Literal["OK", "ALREADY", "FAIL"]
-AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool", "sub2api", "xmiaom", "glados", "yunzhi"]
+AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool", "sub2api", "xmiaom", "glados", "yunzhi", "ilovecat"]
 
 
 @dataclass
@@ -798,6 +798,21 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         login_url="https://ai.xmiaom.com/sign-in",
         kind="xmiaom",
     ),
+    _B(
+        "靴貓公益站",
+        "https://api.ilovecat520.me/playground",
+        signs=[
+            "button.cat-pet__cat",
+            "button.cat-fortune__drum",
+        ],
+        already=[
+            "text=明天再来摸摸吧",
+            "text=今天已经抽过了，明天再来抽一支吧。",
+        ],
+        prefer_catalog_url=True,
+        login_url="https://api.ilovecat520.me/login",
+        kind="ilovecat",
+    ),
     _N("午夜", "https://api.lyjxka.top/profile"),
     _B(
         "abrdns",
@@ -875,17 +890,6 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         ],
         prefer_catalog_url=True,
     ),
-    # columbina(newapi.columbina.eu.org):New API 系,密码框渲染成
-    # input[name=password] type=text(2026-08-26 inspect),凭据登录后
-    # /profile 显示「每日签到 已签到 今天 +$X」→ 登录即签到。绑定真账密
-    # 走 _ensure_account_logged_in 先登录,再落 profile 判定 done 态。
-    _B(
-        "columbina",
-        "https://newapi.columbina.eu.org/profile",
-        signs=['button:has-text("立即签到")', 'button:has-text("签到")', 'button:has-text("今日签到")'],
-        already=['text=今日已签到', 'text=签到成功', 'text=已签到', 'text=今天已签到'],
-        prefer_catalog_url=True,
-    ),
     # gemai(api.gemai.cc, 哈基米API站):New API 系账密登录站,登录卡在 /sign-in
     # (/login 直接 404,2026-08-26 CDP 实测),账号 input[name=username] +
     # password input[name=password]type=password,含 legal 条款 checkbox。绑定
@@ -923,6 +927,8 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("rugao", "https://new-api.rugao.me/profile"),
     _N("feixingwawa", "https://newapi.feixingwawa.cn/profile"),
     _N("wududu", "https://wududu.edu.kg/profile"),
+    _N("si", "https://si.99442200.xyz/profile", prefer_catalog_url=True),
+    _N("yuheng", "https://yuheng.site/profile", prefer_catalog_url=True),
     # mailhub(mailhub.pigeonw.com/wallet):邮箱额度站,POST /wallet/checkin。
     # 同页「兑换」不是签到,选择器钉死 button.primary「立即签到」。
     # 默认 LinuxDO 登录(login_url=/login);已登录页有「退出登录」,不走 SSO。
@@ -955,7 +961,6 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("7r", "https://penis.7r.fit/console/personal"),
     _N("简直了", "https://jianzhile.vip/console/personal"),
     _N("无名", "https://welfare.0xpsyche.me/profile"),
-    _N("子非鱼", "https://ai.112102.xyz/profile"),
     _N("7倍", "https://7x.hk/profile"),
     _N(
         "yoct",
@@ -1534,6 +1539,25 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
             login_url=str(entry.get("login_url", "") or "https://yunzhi.play.cn/ai/#/login"),
             kind="yunzhi",
+        )
+    if kind == "ilovecat":
+        # api.ilovecat520.me 靴貓公益站专属 ilovecat_checkin 流程:
+        # 1. 每日摸猫 (cat-pet): 点击 button.cat-pet__cat
+        # 2. 猫咪占卜 (cat-fortune): 点击 button.cat-fortune__drum
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else [
+                "button.cat-pet__cat",
+                "button.cat-fortune__drum",
+            ],
+            already=list(already) if already is not None else [
+                "text=明天再来摸摸吧",
+                "text=今天已经抽过了，明天再来抽一支吧。",
+            ],
+            ready_rounds=rr,
+            prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
+            login_url=str(entry.get("login_url", "") or "https://api.ilovecat520.me/login"),
+            kind="ilovecat",
         )
     # browser (default)
     return _B(
@@ -4406,11 +4430,17 @@ def done_button_signal(lab: str, disabled: bool = False) -> str:
         return f"btn:{compact}"
     if compact in ("已签到", "已领取") or t in ("已签到", "已领取"):
         return f"btn:disabled:{compact or t}" if disabled else ""
+    t_lower = t.lower()
+    compact_lower = compact.lower()
+    if compact_lower in ("checkedin", "alreadycheckedin") or t_lower in ("checked in", "already checked in"):
+        return f"btn:disabled:{compact or t}" if disabled else ""
     # card: 每日签到\n已签到\n今天 +¥20
     if "已签到" in t and ("今天" in t or "今日" in t):
         return "btn:card:today"
     if "已领取" in t and ("今天" in t or "今日" in t):
         return "btn:card:claimed"
+    if ("checked in" in t_lower or "checkedin" in compact_lower) and ("today" in t_lower or "daily" in t_lower):
+        return "btn:card:checkedin"
     return ""
 
 
@@ -9515,6 +9545,213 @@ async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     )
 
 
+# ===================== ilovecat (靴貓公益站 每日摸猫 + 猫咪占卜 专属流程) =====================
+def is_ilovecat_site(site_url: str) -> bool:
+    """靴貓公益站 (api.ilovecat520.me) 专属站判定."""
+    u = (site_url or "").lower()
+    return "ilovecat520.me" in u or "ilovecat" in u
+
+
+def is_ilovecat_name(name: str) -> bool:
+    """ilovecat 站点名称判定."""
+    n = (name or "").lower()
+    return "靴貓" in n or "ilovecat" in n or "摸猫" in n
+
+
+async def _ilovecat_fetch_status(page) -> dict:
+    """通过页面内 fetch 权威查询 /api/cat/status 接口状态."""
+    try:
+        return await page.evaluate(
+            '''async () => {
+                let uid = localStorage.getItem('uid');
+                if (!uid) {
+                    try {
+                        const u = JSON.parse(localStorage.getItem('user') || '{}');
+                        uid = u.id;
+                    } catch(e) {}
+                }
+                const headers = {};
+                if (uid) {
+                    headers['New-Api-User'] = String(uid);
+                }
+                const res = await fetch('/api/cat/status', {
+                    headers: headers
+                });
+                if (!res.ok) {
+                    return { ok: false, status: res.status };
+                }
+                const json = await res.json();
+                return { ok: true, status: res.status, data: json?.data || {} };
+            }'''
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """靴貓公益站 (api.ilovecat520.me/playground) 每日摸猫 + 猫咪占卜 专属签到流程.
+
+    业务机制:
+    1. 页面入口: /playground (前端展示两个卡片: 每日摸猫 + 猫咪占卜)
+    2. 每日摸猫: 点击 button.cat-pet__cat (摸猫)，成功后获得鱼罐头，按钮变为 .is-done
+    3. 猫咪占卜: 点击 button.cat-fortune__drum (抽签)，成功后抽取签文并获得鱼罐头，按钮变为 .is-done 且 disabled
+    4. 权威状态: GET /api/cat/status 返回 pet.played 与 fortune.played
+    5. SSO 维护: 未登录或掉登录时前往 /login 走 LinuxDO OAuth 回跳
+    """
+    kind = adapter.kind or "ilovecat"
+    site_url = adapter.url or "https://api.ilovecat520.me/playground"
+    if "/playground" not in site_url:
+        site_url = "https://api.ilovecat520.me/playground"
+
+    print(f"  ilovecat flow: {adapter.name} ({site_url})", flush=True)
+
+    async def _ensure_sso():
+        if "/login" not in (page.url or "") and "/sign-in" not in (page.url or ""):
+            try:
+                await page.goto("https://api.ilovecat520.me/login", wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+                await asyncio.sleep(1.0)
+            except Exception:
+                pass
+        await check_terms(page)
+        await asyncio.sleep(0.3)
+        sso_status = await try_linuxdo_sso(page, origin_host="api.ilovecat520.me", browser=browser)
+        return sso_status
+
+    # 1. 打开 /playground
+    try:
+        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception:
+        pass
+    await bypass_chrome_interstitial_if_needed(page)
+    await wait_text_ready(page, 30, adapter.ready_rounds)
+
+    cur_url = await page_url(page)
+    cur_text = await page_text(page, 600)
+
+    # 2. 检查登录态
+    if is_auth_page_url(cur_url) or looks_logged_out(cur_text):
+        print("  ilovecat: unauthenticated, performing LinuxDO SSO...", flush=True)
+        sso_res = await _ensure_sso()
+        if sso_res not in ("OK", "ALREADY"):
+            return fail_result("auth_failed", detail=f"SSO: {sso_res}", adapter=kind)
+        try:
+            await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+            await wait_text_ready(page, 30, adapter.ready_rounds)
+        except Exception:
+            pass
+
+    # 3. 检查当前两项状态 (权威 API + DOM 双保险)
+    api_stat = await _ilovecat_fetch_status(page)
+    stat_data = api_stat.get("data", {}) if api_stat.get("ok") else {}
+    pet_played = bool(stat_data.get("pet", {}).get("played"))
+    fortune_played = bool(stat_data.get("fortune", {}).get("played"))
+
+    # 若 API 获取失败，退化为 DOM 检查
+    if not api_stat.get("ok"):
+        pet_done_loc = page.locator("button.cat-pet__cat.is-done, .cat-pet:has-text('明天再来摸摸吧')")
+        if await pet_done_loc.count() > 0:
+            pet_played = True
+        fortune_done_loc = page.locator("button.cat-fortune__drum.is-done, .cat-fortune:has-text('今天已经抽过了')")
+        if await fortune_done_loc.count() > 0:
+            fortune_played = True
+
+    # 若两项均已完成
+    if pet_played and fortune_played:
+        print("  ilovecat: both pet and fortune already completed", flush=True)
+        details = []
+        if stat_data.get("pet", {}).get("reward"):
+            details.append(f"摸猫(罐头+{stat_data['pet']['reward']/100:.2f})")
+        else:
+            details.append("摸猫已完成")
+        if stat_data.get("fortune", {}).get("reward"):
+            details.append(f"占卜(罐头+{stat_data['fortune']['reward']/100:.2f})")
+        else:
+            details.append("占卜已完成")
+        return confirmed_done_result("; ".join(details), adapter=kind)
+
+    # 4. 执行未完成的签到动作
+    actions_taken = []
+    action_evidences = []
+
+    # 4.1 每日摸猫
+    if not pet_played:
+        print("  ilovecat: clicking 每日摸猫 (cat-pet__cat)...", flush=True)
+        pet_btn = page.locator("button.cat-pet__cat, button[aria-label*='摸']").first
+        if await pet_btn.count() > 0 and await pet_btn.is_visible(timeout=3000):
+            try:
+                await pet_btn.click(timeout=5000)
+            except Exception as e:
+                print(f"  ilovecat pet click fallback force: {e}", flush=True)
+                await pet_btn.click(force=True, timeout=5000)
+            actions_taken.append("pet")
+            action_evidences.append(ActionEvidence(kind="dom_click", target="button.cat-pet__cat", attempted_at=datetime.now().isoformat(timespec="seconds")))
+            await asyncio.sleep(2.0)
+        else:
+            print("  ilovecat: pet button not visible or found", flush=True)
+
+    # 4.2 猫咪占卜
+    if not fortune_played:
+        print("  ilovecat: clicking 猫咪占卜 (cat-fortune__drum)...", flush=True)
+        fortune_btn = page.locator("button.cat-fortune__drum, button[aria-label*='抽']").first
+        if await fortune_btn.count() > 0 and await fortune_btn.is_visible(timeout=3000):
+            try:
+                await fortune_btn.click(timeout=5000)
+            except Exception as e:
+                print(f"  ilovecat fortune click fallback force: {e}", flush=True)
+                await fortune_btn.click(force=True, timeout=5000)
+            actions_taken.append("fortune")
+            action_evidences.append(ActionEvidence(kind="dom_click", target="button.cat-fortune__drum", attempted_at=datetime.now().isoformat(timespec="seconds")))
+            await asyncio.sleep(2.0)
+        else:
+            print("  ilovecat: fortune button not visible or found", flush=True)
+
+    # 5. 再次确认结果
+    await asyncio.sleep(1.0)
+    api_stat_after = await _ilovecat_fetch_status(page)
+    stat_data_after = api_stat_after.get("data", {}) if api_stat_after.get("ok") else {}
+    pet_played_after = bool(stat_data_after.get("pet", {}).get("played"))
+    fortune_played_after = bool(stat_data_after.get("fortune", {}).get("played"))
+
+    # 若 API 获取失败，退化为 DOM 检查
+    if not api_stat_after.get("ok"):
+        pet_done_loc = page.locator("button.cat-pet__cat.is-done, .cat-pet:has-text('明天再来摸摸吧')")
+        if await pet_done_loc.count() > 0:
+            pet_played_after = True
+        fortune_done_loc = page.locator("button.cat-fortune__drum.is-done, .cat-fortune:has-text('今天已经抽过了')")
+        if await fortune_done_loc.count() > 0:
+            fortune_played_after = True
+
+    combined_action = action_evidences[0] if action_evidences else ActionEvidence(kind="none")
+
+    results_desc = []
+    if pet_played_after:
+        r = stat_data_after.get("pet", {}).get("reward")
+        results_desc.append(f"摸猫成功(罐头+{r/100:.2f})" if r else "摸猫成功")
+    if fortune_played_after:
+        r = stat_data_after.get("fortune", {}).get("reward")
+        results_desc.append(f"占卜成功(罐头+{r/100:.2f})" if r else "占卜成功")
+
+    detail_str = "; ".join(results_desc) if results_desc else "摸猫与占卜操作完成"
+
+    if pet_played_after and fortune_played_after:
+        return ok_result(
+            "OK", adapter=kind, detail=detail_str, action=combined_action,
+            confirmation=dom_confirmation(detail_str, done_state=True),
+            pre_state="PENDING", post_state="DONE", transition="PENDING_TO_DONE",
+            attribution="runner",
+        )
+    elif pet_played_after or fortune_played_after:
+        # 部分成功也视为有效进展，记录 detail
+        return ok_result(
+            "OK", adapter=kind, detail=f"部分完成: {detail_str}", action=combined_action,
+            confirmation=dom_confirmation(detail_str, done_state=True),
+            pre_state="PENDING", post_state="DONE", transition="PENDING_TO_DONE",
+            attribution="runner",
+        )
+
+    text_final = await page_text(page, 900)
+    return fail_result("no_confirm", detail=text_final[:100], adapter=kind, action=combined_action)
+
 
 def is_fengwind_site(site_url: str) -> bool:
     """api-welfalre.fengwind.com 专属站判定."""
@@ -9828,7 +10065,7 @@ _DIALOG_DISMISS_JS = """() => {
     const btn = [...d.querySelectorAll('button')].find(b => {
       const t = (b.innerText || '').trim();
       const aria = b.getAttribute('aria-label') || '';
-      return ['我已阅读','我知道了','知道了','关闭','Close','Got it','确定'].some(
+      return ['我已阅读','我知道了','知道了','我已知悉','知悉','关闭','Close','Got it','确定'].some(
         k => t.includes(k) || aria.includes(k)
       );
     });
@@ -9836,7 +10073,7 @@ _DIALOG_DISMISS_JS = """() => {
     // Close only when we have a real dismiss control AND the text marks this
     // as an announcement-style overlay. A dialog with 确定/OK but no 公告/通知
     // marker is a modal decision — leave it alone (fail-safe).
-    if (btn && (looksAnnouncement || /我已阅读|我知道了/.test(text))) {
+    if (btn && (looksAnnouncement || /我已阅读|我知道了|我已知悉/.test(text))) {
       if (!d.getAttribute('data-dismissed')) {
         btn.click();
         d.setAttribute('data-dismissed', '1');
@@ -10116,25 +10353,32 @@ async def _click_cta_and_confirm(
     # absent in the 13s window). One bounded reload + rescan of the SAME strict
     # text/DOM done-state gate gives the site's rendered truth a second chance.
     # Never accepts bare click/navigation as success — done-state evidence only.
+    # SPA status fetch race (deadlion 2026-10-06): after goto(commit) the shell
+    # renders the default 立即签到 CTA while the async check-in status request
+    # has yet to flip it to 今日已签到 — a single sample races ahead of the
+    # server truth. Poll the done-state gate a few bounded rounds before
+    # conceding; still evidence-only, never bare click/navigation.
     try:
         await page.goto(site_url, wait_until="commit", timeout=min(GOTO_TIMEOUT_MS, 15000))
         await wait_text_ready(page, 40, 12)
-        text_r = await page_text(page, 2000)
-        if is_valid_checkin_confirm(text_r):
-            sig = confirm_signal(text_r)
-            print(f"  confirm(after reload): {sig}", flush=True)
-            return ok_result(
-                "OK", adapter=kind, detail=sig, action=action,
-                confirmation=dom_confirmation(sig),
-                pre_state="PENDING", post_state="DONE",
-                transition="PENDING_TO_DONE", attribution="runner",
+        for _ in range(4):
+            text_r = await page_text(page, 2000)
+            if is_valid_checkin_confirm(text_r):
+                sig = confirm_signal(text_r)
+                print(f"  confirm(after reload): {sig}", flush=True)
+                return ok_result(
+                    "OK", adapter=kind, detail=sig, action=action,
+                    confirmation=dom_confirmation(sig),
+                    pre_state="PENDING", post_state="DONE",
+                    transition="PENDING_TO_DONE", attribution="runner",
+                )
+            already_r = await already_done(
+                page, adapter.already_selectors, trusted_already=adapter.trusted_already_selectors
             )
-        already_r = await already_done(
-            page, adapter.already_selectors, trusted_already=adapter.trusted_already_selectors
-        )
-        if already_r:
-            print(f"  confirm(already after reload): {already_r}", flush=True)
-            return confirmed_done_result(already_r, adapter=kind, action=action)
+            if already_r:
+                print(f"  confirm(already after reload): {already_r}", flush=True)
+                return confirmed_done_result(already_r, adapter=kind, action=action)
+            await asyncio.sleep(1.5)
     except Exception as reload_err:
         print(f"  ! reload confirm skipped: {reload_err}", flush=True)
 
@@ -10226,6 +10470,8 @@ async def legacy_checkin_on_page(
             return await glados_checkin(page, adapter, browser=browser)
         if kind == "yunzhi" or is_yunzhi_site(site_url) or is_yunzhi_name(adapter.name):
             return await yunzhi_checkin(page, adapter, browser=browser)
+        if kind == "ilovecat" or is_ilovecat_site(site_url) or is_ilovecat_name(adapter.name):
+            return await ilovecat_checkin(page, adapter, browser=browser)
         # fengwind 专属窗口守卫(业务根因,2026-09-07):读服务端 /api/checkin/status 的
         # next_reset_at。今日新周期未开时页面残留昨日「已签到」,通用 already 会误判
         # ALREADY 并把 daily_tasks 标 done,使 cron 跳过真实可签时段。本轮守卫只作用于
@@ -11365,6 +11611,29 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
                 prefer_catalog_url=True,
                 login_url="https://ai.xmiaom.com/sign-in",
             )
+        if is_ilovecat_site(url_from_note) or is_ilovecat_name(name):
+            # 靴貓公益站 (api.ilovecat520.me): 每日摸猫 + 猫咪占卜 位于 /playground.
+            return SiteAdapter(
+                name=name,
+                url="https://api.ilovecat520.me/playground",
+                kind="ilovecat",
+                sign_selectors=[
+                    "button.cat-pet__cat",
+                    "button.cat-fortune__drum",
+                ],
+                already_selectors=[
+                    "text=明天再来摸摸吧",
+                    "text=今天已经抽过了，明天再来抽一支吧。",
+                ],
+                trusted_sign_selectors=True,
+                trusted_already_selectors=True,
+                prefer_catalog_url=True,
+                login_url="https://api.ilovecat520.me/login",
+            )
+        if "99442200.xyz" in (url_from_note or "").lower() or name.lower() in ("si", "furry", "furry api"):
+            return _N(name, "https://si.99442200.xyz/profile", prefer_catalog_url=True)
+        if "yuheng.site" in (url_from_note or "").lower() or name.lower() in ("yuheng", "玉衡", "玉衡中转"):
+            return _N(name, "https://yuheng.site/profile", prefer_catalog_url=True)
         u = (url_from_note or "").lower()
         if any(x in u for x in ("/profile", "/console/personal", "/check-in", "/checkin")):
             return _N(name, url_from_note)
@@ -12301,6 +12570,68 @@ async def run(argv: list[str] | None = None) -> int:
         target_sites=target_sites,
         update_business_run=should_update_business_run(run_scope, source),
     )
+    # AI Inspection & Auto-Remediation hook (best-effort, fail-safe)
+    ai_report = None
+    if source in ("cron", "cli") and run_scope == "full" and hard_error is None:
+        try:
+            ai_enabled = (
+                os.environ.get("CHECKIN_AI_INSPECTOR_ENABLED")
+                or store.get_config("ai_inspector_enabled", "false")
+            ).lower() in ("true", "1", "yes", "on")
+            failed_results = [r for r in (results or []) if getattr(r, "status", None) == "FAIL"]
+            policy = (
+                os.environ.get("CHECKIN_AI_INSPECTOR_POLICY")
+                or store.get_config("ai_inspector_policy", "on_failure")
+            ).lower()
+
+            should_inspect = ai_enabled and (failed_results or policy == "always")
+            if should_inspect:
+                from checkin_core.ai_inspector import AIInspector
+                from checkin_core.remediation_engine import RemediationEngine
+
+                channels = store.get_ai_channels() if hasattr(store, "get_ai_channels") else []
+
+                if channels and failed_results:
+                    inspector = AIInspector(
+                        store=store,
+                        channels=channels,
+                    )
+                    ai_report = await inspector.inspect_failures(
+                        today_str, failed_results, source=source
+                    )
+                    if ai_report:
+                        remediation_records: list[dict[str, Any]] = []
+                        suppressed = RemediationEngine.apply_auto_suppression(ai_report, store)
+                        for s_site in suppressed:
+                            remediation_records.append({
+                                "site_name": s_site,
+                                "action": "suppress",
+                                "status": "success",
+                            })
+                        auto_retry_enabled = (
+                            os.environ.get("CHECKIN_AI_AUTO_RETRY_ENABLED")
+                            or store.get_config("ai_auto_retry_enabled", "true")
+                        ).lower() in ("true", "1", "yes", "on")
+                        if auto_retry_enabled and ai_report.auto_retry_targets:
+                            scheduled = RemediationEngine.schedule_retries(
+                                ai_report.auto_retry_targets,
+                                today_str,
+                                store,
+                            )
+                            for r_site in scheduled:
+                                remediation_records.append({
+                                    "site_name": r_site,
+                                    "action": "retry",
+                                    "status": "scheduled",
+                                })
+                        if remediation_records and hasattr(store, "update_latest_ai_remediation_log"):
+                            try:
+                                store.update_latest_ai_remediation_log(today_str, remediation_records)
+                            except Exception as upd_err:
+                                print(f"  AI remediation log update skipped: {upd_err}", flush=True)
+        except Exception as ai_exc:
+            print(f"  AI inspector hook skipped: {ai_exc}", flush=True)
+
     # Notification is best-effort; never fails the batch. Only cron full runs
     # with no hard error fire the daily summary (avoids spurious TG noise on
     # web "run all" and partial/retry batches).
@@ -12309,6 +12640,7 @@ async def run(argv: list[str] | None = None) -> int:
             await asyncio.to_thread(
                 notify_daily_summary, results, today_str,
                 run_source=source, run_scope=run_scope,
+                store=store, ai_report=ai_report,
             )
         except Exception:
             pass

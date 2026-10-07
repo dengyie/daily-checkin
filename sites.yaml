@@ -218,6 +218,17 @@ sites:
       - 'text=签到成功'
     prefer_catalog_url: true
     login_url: https://ai.xmiaom.com/sign-in
+  - name: '靴貓公益站'
+    url: https://api.ilovecat520.me/playground
+    kind: ilovecat
+    signs:
+      - 'button.cat-pet__cat'
+      - 'button.cat-fortune__drum'
+    already:
+      - 'text=明天再来摸摸吧'
+      - 'text=今天已经抽过了，明天再来抽一支吧。'
+    prefer_catalog_url: true
+    login_url: https://api.ilovecat520.me/login
   - name: '午夜'
     url: https://api.lyjxka.top/profile
     kind: newapi_profile
@@ -241,6 +252,36 @@ sites:
       - 'button:has-text("立即签到")'
       - 'button:has-text("签到")'
       - 'button:has-text("使用 Linux Do 登录")'
+  # deadlion (free.deadlion.cn, Free New AI):New API 签到分支,「每日令牌签到」卡片
+  # 位于 /console 仪表盘。Semi Design 绿色「立即签到」按钮,已签态按钮变「今日已签到」
+  # disabled。LinuxDO OAuth 登录态在共享 Chrome profile,无需账密(2026-10-06 接入)。
+  - name: 'deadlion'
+    url: https://free.deadlion.cn/console
+    kind: browser
+    signs:
+      - 'button:has-text("立即签到")'
+    already:
+      - 'button:has-text("今日已签到")'
+      - 'text=今日已签到'
+      - 'text=签到成功'
+    prefer_catalog_url: true
+  # motomoto (motomoto.lol, MotoMoto):Next.js/Tailwind 平台。
+  # 签到位于 /profile 个人中心「Daily Check-in」卡片。
+  # 未签态为按钮「Check in now」,点击后触发 Turnstile 完成签到,
+  # 已签态变为 disabled「Checked in」且展示「Today +$50」。
+  # 登录态在共享 Chrome profile 保持,无需自定义登录处理(2026-10-06 接入)。
+  - name: 'motomoto'
+    url: https://motomoto.lol/profile
+    kind: browser
+    signs:
+      - 'button:has-text("Check in now")'
+      - 'button:has-text("Check in")'
+    already:
+      - 'button:has-text("Checked in")'
+      - 'text=Checked in'
+      - 'text=Checked in today'
+      - 'text=already checked in'
+    prefer_catalog_url: true
   - name: 'guxiaomo'
     url: https://api.guxiaomo.site/wallet
     kind: browser
@@ -268,21 +309,6 @@ sites:
       - 'text=今天已签到'
       - 'text=签到成功'
       - 'text=今日已签到'
-  # columbina(newapi.columbina.eu.org):New API 系,密码框 input[name=password]
-  # type=text,凭据登录后 /profile 显示「每日签到 已签到 今天 +$X」→ 登录即签到。
-  - name: 'columbina'
-    url: https://newapi.columbina.eu.org/profile
-    kind: browser
-    prefer_catalog_url: true
-    signs:
-      - 'button:has-text("立即签到")'
-      - 'button:has-text("签到")'
-      - 'button:has-text("今日签到")'
-    already:
-      - 'text=今日已签到'
-      - 'text=签到成功'
-      - 'text=已签到'
-      - 'text=今天已签到'
   # gemai(api.gemai.cc, 哈基米API站):New API 系账密登录站,真登录卡在 /sign-in
   # (/login 直接 404),账号 input[name=username]+密码 input[name=password]
   # type=password,含 legal 条款 checkbox。绑定真账密走 _ensure_account_logged_in
@@ -348,6 +374,19 @@ sites:
   - name: 'wududu'
     url: https://wududu.edu.kg/profile
     kind: newapi_profile
+  # si(si.99442200.xyz, furry API)—— 2026-10-07 接入。
+  # 标准 LinuxDO OAuth + newapi_profile, checkin_enabled=true、无 Turnstile(2026-10-07 /api/status 实测)。
+  - name: 'si'
+    url: https://si.99442200.xyz/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # yuheng(yuheng.site, 玉衡中转)—— 2026-10-07 接入。
+  # 标准 LinuxDO OAuth + newapi_profile, checkin_enabled=true, turnstile_check=true。
+  # runner 内置 dismiss_obstructing_dialogs 自动关闭系统公告弹窗，wait_turnstile_token 自动等待验证。
+  - name: 'yuheng'
+    url: https://yuheng.site/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
   # mailhub(mailhub.pigeonw.com, Mailhub 邮箱额度站)—— 2026-10-01 接入。
   # 非 New API:钱包页 POST /wallet/checkin(表单 csrf)。同页另有「兑换」按钮,
   # 选择器必须钉死 button.primary「立即签到」,不能用裸「签到」。
@@ -396,9 +435,6 @@ sites:
     kind: newapi_profile
   - name: '无名'
     url: https://welfare.0xpsyche.me/profile
-    kind: newapi_profile
-  - name: '子非鱼'
-    url: https://ai.112102.xyz/profile
     kind: newapi_profile
   - name: '7倍'
     url: https://7x.hk/profile

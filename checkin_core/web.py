@@ -15,7 +15,7 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from checkin_core.keychain import CredentialStore, make_ref, credential_store_from_env
 from checkin_core.notify import _send_telegram_raw
@@ -374,6 +374,13 @@ class CheckinWebApp:
                     configs = app.store.get_all_configs()
                     self.send_json({"ok": True, "configs": configs})
                     return
+                if path == "/api/ai/latest":
+                    parsed = urlparse(self.path)
+                    params = parse_qs(parsed.query)
+                    day = (params.get("day") or [None])[0] or datetime.now().strftime("%Y-%m-%d")
+                    inspection = app.store.get_latest_ai_inspection(day)
+                    self.send_json({"ok": True, "inspection": inspection})
+                    return
                 self.send_error(HTTPStatus.NOT_FOUND)
 
             def do_OPTIONS(self):
@@ -532,6 +539,7 @@ class CheckinWebApp:
                             "cf_wait_s": (5, 300),
                             "captcha_wait_s": (5, 300),
                             "connect_retries": (0, 10),
+                            "ai_auto_retry_max": (1, 10),
                         }
                         for k, (min_v, max_v) in num_keys.items():
                             if k in mapping:
@@ -544,6 +552,78 @@ class CheckinWebApp:
                         updated = app.store.set_configs(mapping)
                         self.send_json({"ok": True, "configs": updated})
                         return
+                    if path == "/api/ai/test":
+                        channel_name = str(body.get("channel_name") or body.get("name") or "Primary").strip()
+                        is_fallback = "fallback" in channel_name.lower() or "备用" in channel_name
+                        url_key = "ai_inspector_fallback_base_url" if is_fallback else "ai_inspector_base_url"
+                        key_key = "ai_inspector_fallback_api_key" if is_fallback else "ai_inspector_api_key"
+                        model_key = "ai_inspector_fallback_model" if is_fallback else "ai_inspector_model"
+
+                        base_url = str(
+                            body.get("base_url")
+                            or body.get(url_key)
+                            or app.store.get_config(url_key)
+                            or ""
+                        ).strip().rstrip("/")
+                        api_key = str(
+                            body.get("api_key")
+                            or body.get(key_key)
+                            or app.store.get_config(key_key)
+                            or ""
+                        ).strip()
+                        model = str(
+                            body.get("model")
+                            or body.get(model_key)
+                            or app.store.get_config(model_key)
+                            or "gpt-4o-mini"
+                        ).strip()
+                        if not base_url:
+                            raise ValueError(f"[{channel_name}] API Base URL 不能为空")
+                        if not api_key:
+                            raise ValueError(f"[{channel_name}] API Key 不能为空")
+
+                        import time, urllib.request, urllib.error
+                        from checkin_core.ai_inspector import create_ssl_context
+                        test_url = f"{base_url}/chat/completions"
+                        test_payload = {
+                            "model": model,
+                            "messages": [{"role": "user", "content": "ping"}],
+                            "max_tokens": 8,
+                        }
+                        req = urllib.request.Request(
+                            test_url,
+                            data=json.dumps(test_payload).encode("utf-8"),
+                            headers={
+                                "Content-Type": "application/json",
+                                "Authorization": f"Bearer {api_key}",
+                                "User-Agent": "HermesCheckinInspector/1.0",
+                            },
+                            method="POST",
+                        )
+                        ctx = create_ssl_context()
+                        t0 = time.monotonic()
+                        try:
+                            with urllib.request.urlopen(req, timeout=12.0, context=ctx) as resp:
+                                resp_data = json.loads(resp.read().decode("utf-8"))
+                                latency_ms = int((time.monotonic() - t0) * 1000)
+                                choices = resp_data.get("choices", [])
+                                reply_text = choices[0].get("message", {}).get("content", "").strip() if choices else "OK"
+                                self.send_json({
+                                    "ok": True,
+                                    "channel_name": channel_name,
+                                    "model": model,
+                                    "latency_ms": latency_ms,
+                                    "reply": reply_text[:80],
+                                    "sample_reply": reply_text[:80],
+                                })
+                                return
+                        except urllib.error.HTTPError as http_err:
+                            body_snippet = http_err.read().decode("utf-8", errors="replace")[:200]
+                            raise ValueError(f"[{channel_name}] HTTP {http_err.code}: {body_snippet}")
+                        except urllib.error.URLError as url_err:
+                            raise ValueError(f"[{channel_name}] 网络连接失败: {url_err.reason}")
+                        except Exception as test_exc:
+                            raise ValueError(f"[{channel_name}] 模型调用失败: {test_exc}")
                     if path == "/api/notify/test":
                         token = str(body.get("tg_bot_token") or app.store.get_config("tg_bot_token") or "").strip()
                         chat_id = str(body.get("tg_chat_id") or app.store.get_config("tg_chat_id") or "").strip()
