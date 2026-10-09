@@ -1059,7 +1059,7 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     ),
     _B(
         "mulink",
-        "https://demo.dev2.mulink.top/wallet",
+        "https://demo.dev2.mulink.top/next?app=wallet",
         signs=[
             'button:has-text("立即打卡")',
             'button:has-text("打卡")',
@@ -2242,6 +2242,45 @@ def set_cdp_http(http: str) -> str:
     return CDP_HTTP
 
 
+class PlaywrightHolder:
+    """Manages the local async_playwright driver lifecycle, allowing transparent
+    restart of the Playwright driver subprocess if the IPC pipe is severed mid-batch."""
+
+    def __init__(self):
+        self._ctx = None
+        self._p = None
+
+    async def __aenter__(self):
+        self._ctx = async_playwright()
+        self._p = await self._ctx.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.stop()
+
+    async def stop(self):
+        if self._p is not None:
+            try:
+                await self._p.stop()
+            except Exception:
+                pass
+            self._p = None
+            self._ctx = None
+
+    async def restart(self):
+        await self.stop()
+        self._ctx = async_playwright()
+        self._p = await self._ctx.start()
+        return self
+
+    @property
+    def chromium(self):
+        return self._p.chromium
+
+    def __getattr__(self, name):
+        return getattr(self._p, name)
+
+
 async def safe_connect(p) -> Any:
     """connect_over_cdp with bounded retries. A transient handshake hiccup
     (slow page table, race with another CDP client) must not abort the batch."""
@@ -2255,6 +2294,11 @@ async def safe_connect(p) -> Any:
             )
         except Exception as e:
             last_err = e
+            if hasattr(p, "restart") and callable(p.restart):
+                try:
+                    await p.restart()
+                except Exception as rest_err:
+                    print(f"  ! Playwright driver restart error: {rest_err}", flush=True)
             if attempt + 1 < max(1, CONNECT_RETRIES):
                 backoff = CONNECT_RETRY_BACKOFF_S * (attempt + 1)
                 print(f"  ! CDP connect retry {attempt + 1}: {e} (wait {backoff:.1f}s)", flush=True)
@@ -2263,15 +2307,22 @@ async def safe_connect(p) -> Any:
 
 
 async def browser_alive(browser) -> bool:
-    """Probe both the Playwright object and the selected HTTP CDP endpoint."""
+    """Probe both the live Playwright wire connection and the selected HTTP CDP endpoint."""
     if browser is None:
         return False
     try:
-        object_alive, version = await asyncio.gather(
-            asyncio.wait_for(
-                asyncio.to_thread(lambda: bool(browser.contexts)),
-                timeout=4.0,
-            ),
+        async def _probe_pw_wire() -> bool:
+            if hasattr(browser, "new_browser_cdp_session") and callable(browser.new_browser_cdp_session):
+                try:
+                    cdp = await asyncio.wait_for(browser.new_browser_cdp_session(), timeout=3.0)
+                    await cdp.detach()
+                    return True
+                except Exception:
+                    return False
+            return bool(getattr(browser, "contexts", None))
+
+        wire_alive, version = await asyncio.gather(
+            _probe_pw_wire(),
             asyncio.wait_for(
                 asyncio.to_thread(
                     http_call,
@@ -2283,7 +2334,7 @@ async def browser_alive(browser) -> bool:
             ),
         )
         return bool(
-            object_alive
+            wire_alive
             and isinstance(version, dict)
             and version.get("webSocketDebuggerUrl")
         )
@@ -2759,7 +2810,10 @@ def classify_page_block(text: str, url: str = "") -> tuple[str, str] | None:
     if re.search(
         r"error\s*(?:code\s*)?(?:50[234]|52[124]|10\d{2})|cloudflare tunnel error|"
         r"bad gateway|service unavailable|"
-        r"gateway timeout|connection timed out|web server is down",
+        r"gateway timeout|connection timed out|web server is down|"
+        r"err_(?:connection_closed|connection_refused|connection_reset|connection_timed_out|"
+        r"timed_out|address_unreachable|name_not_resolved|empty_response|network_changed)|"
+        r"无法访问此网站|意外终止了连接|响应时间过长|找不到服务器\s*ip\s*地址|this site can(?:'|’)?t be reached",
         blob,
     ):
         return "upstream_unavailable", (text or "upstream unavailable")[:120]
@@ -8452,53 +8506,62 @@ async def mulink_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     """
     kind = adapter.kind or "mulink"
     print(f"  mulink flow: {adapter.name}", flush=True)
-    # 2026-09-12 改版:shell 迁至 /os-desktop,旧 /dashboard/overview 会 302 到新页。
-    # 新 shell 侧边栏默认已展开(钱包等项直接可见),故导航展开改为条件式,避免把
-    # 已展开的侧边栏误收起再点不到钱包。
-    shell_url = "https://demo.dev2.mulink.top/os-desktop"
+    # 2026-10-08 改版: 前端 SPA 架构改用 /next?app=wallet 直达内嵌钱包模态 (No-IFrame)。
+    # 旧路由 /os-desktop 与 /wallet 均 302/重定向至 /next。
+    shell_url = adapter.url if (adapter.url and "next?app=wallet" in adapter.url) else "https://demo.dev2.mulink.top/next?app=wallet"
 
     try:
         await page.goto(shell_url, wait_until="networkidle", timeout=GOTO_TIMEOUT_MS)
     except Exception:
         pass
     await wait_text_ready(page, 40, max(adapter.ready_rounds or 12, 15))
-    await asyncio.sleep(4)
+    await asyncio.sleep(3)
 
-    async def wallet_visible() -> bool:
-        wl = page.get_by_text("钱包", exact=True).first
-        if not await wl.count():
-            return False
-        return await wl.is_visible()
-
-    # 新版 /os-desktop 侧边栏默认展开;若「钱包」不可见才点 Open navigation 展开 Dock
-    if not await wallet_visible():
+    async def get_wallet_container():
+        # 1. 2026-10-08 新架构: 内嵌模态卡片 (No-IFrame), 直接存在于主页面 page
         try:
-            nav_btn = page.locator('button[aria-label="Open navigation"]').first
-            if await nav_btn.count():
-                await nav_btn.click(timeout=4000)
-                await asyncio.sleep(1.5)
+            ptext = await page.evaluate("() => document.body ? document.body.innerText : ''")
+            if "额度池" in ptext:
+                return page
         except Exception:
             pass
 
-    # 点「钱包」菜单项(展开后侧边栏里可见)
-    try:
-        wallet_link = page.get_by_text("钱包", exact=True).first
-        if await wallet_link.count():
-            await wallet_link.click(timeout=4000, force=True)
-            await asyncio.sleep(4)
-    except Exception:
-        pass
-
-    # 等 /wallet iframe 出现并取 frame
-    wf = None
-    for _ in range(12):
+        # 2. 向后兼容旧架构: 检查是否有 /wallet iframe
         for f in page.frames:
             if "/wallet" in (f.url or ""):
-                wf = f
-                break
+                return f
+
+        return None
+
+    wf = await get_wallet_container()
+
+    # 若未直接展示额度池模态(例如跳转到了纯 /next)，尝试在主页面点击「钱包」唤起模态
+    if wf is None:
+        for sel in [
+            'button:text-is("钱包")',
+            'button[title="钱包"]',
+            'a[title="钱包"]',
+            'button:has-text("钱包")',
+            'a:has-text("钱包")',
+        ]:
+            try:
+                wallet_btn = page.locator(sel).first
+                if await wallet_btn.count() and await wallet_btn.is_visible():
+                    await wallet_btn.click(timeout=4000, force=True)
+                    await asyncio.sleep(2)
+                    wf = await get_wallet_container()
+                    if wf is not None:
+                        break
+            except Exception:
+                continue
+
+    # 等待钱包容器 (页面模态或 iframe) 就绪
+    for _ in range(8):
         if wf is not None:
             break
         await asyncio.sleep(1)
+        wf = await get_wallet_container()
+
     if wf is None:
         text = await page_text(page, 700)
         return fail_result("no_wallet_frame", detail=text[:120], adapter=kind, stage="action")
@@ -10949,15 +11012,30 @@ async def checkin_on_page(
 # Tasks
 # ---------------------------------------------------------------------------
 
-DEFAULT_TASKS_DIR = os.environ.get(
-    "DAILY_CHECKIN_TASKS_DIR",
-    str(Path.home() / "Documents" / "daily-checkin" / "tasks"),
-)
+def _resolve_default_tasks_dir() -> Path:
+    env_dir = (os.environ.get("DAILY_CHECKIN_TASKS_DIR") or "").strip()
+    if env_dir:
+        return Path(env_dir)
+    try:
+        from checkin_core.store import obsidian_vault_root
+        return Path(obsidian_vault_root()) / "Note" / "Task" / "daily"
+    except Exception:
+        return Path.home() / "Documents" / "daily-checkin" / "tasks"
+
+
+DEFAULT_TASKS_DIR = str(_resolve_default_tasks_dir())
 
 
 def default_task_file_path(day: str | None = None) -> str:
     day = day or datetime.now().strftime("%Y-%m-%d")
-    return str(Path(DEFAULT_TASKS_DIR) / f"{day} 每日任务.md")
+    env_dir = (os.environ.get("DAILY_CHECKIN_TASKS_DIR") or "").strip()
+    if env_dir:
+        return str(Path(env_dir) / f"{day} 每日任务.md")
+    try:
+        from checkin_core.store import obsidian_daily_task_path
+        return str(obsidian_daily_task_path(day))
+    except Exception:
+        return str(Path(DEFAULT_TASKS_DIR) / f"{day} 每日任务.md")
 
 
 def _reset_daily_task_content(content: str, day: str) -> str:
@@ -11112,9 +11190,26 @@ def _materialize_icloud(path: Path) -> None:
 
 
 def read_accounts_file() -> str:
-    """Read the credential doc as UTF-8 text. Materializes an iCloud placeholder first."""
-    _materialize_icloud(ACCOUNTS_FILE)
-    return ACCOUNTS_FILE.read_text(encoding="utf-8")
+    """Read the credential doc as UTF-8 text. Materializes an iCloud placeholder first,
+    and falls back/merges staging accounts.md if present so CLI/cron runs share creds."""
+    content = ""
+    if ACCOUNTS_FILE.is_file():
+        try:
+            _materialize_icloud(ACCOUNTS_FILE)
+            content = ACCOUNTS_FILE.read_text(encoding="utf-8")
+        except Exception:
+            pass
+    # Staging fallback / merge
+    staging_file = Path.home() / "daily-checkin-staging" / "data" / "accounts.md"
+    if staging_file.is_file() and staging_file.resolve() != ACCOUNTS_FILE.resolve():
+        try:
+            staging_content = staging_file.read_text(encoding="utf-8")
+            content = f"{content}\n\n{staging_content}" if content else staging_content
+        except Exception:
+            pass
+    if not content and ACCOUNTS_FILE.is_file():
+        return ACCOUNTS_FILE.read_text(encoding="utf-8")
+    return content
 
 
 def parse_accounts_doc(content: str) -> dict[str, tuple[str, str]]:
@@ -12280,7 +12375,7 @@ async def run(argv: list[str] | None = None) -> int:
     batch_timeout = float(getattr(args, "batch_timeout", BATCH_TIMEOUT_S) or 0) or BATCH_TIMEOUT_S
     batch_deadline = run_started + batch_timeout
 
-    async with async_playwright() as p:
+    async with PlaywrightHolder() as p:
         browser = None
         try:
             browser = await safe_connect(p)

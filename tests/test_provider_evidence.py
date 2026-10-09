@@ -236,6 +236,48 @@ class ProviderEvidenceTests(unittest.TestCase):
         finally:
             module.http_call = original
 
+    def test_browser_alive_detects_broken_wire_cdp(self):
+        module = load_runner("provider_runner_wire_alive_test")
+        # Mock browser with new_browser_cdp_session that raises TargetClosedError (pipe broken)
+        class BrokenSessionBrowser:
+            def __init__(self):
+                self.contexts = [object()]
+            async def new_browser_cdp_session(self):
+                raise RuntimeError("Target page, context or browser has been closed")
+
+        browser = BrokenSessionBrowser()
+        original = module.http_call
+        try:
+            module.http_call = lambda *args, **kwargs: {
+                "webSocketDebuggerUrl": "ws://fixture/devtools/browser/1"
+            }
+            # Even though HTTP endpoint is responsive, broken wire probe must report False!
+            self.assertFalse(asyncio.run(module.browser_alive(browser)))
+        finally:
+            module.http_call = original
+
+    def test_browser_alive_passes_when_wire_cdp_healthy(self):
+        module = load_runner("provider_runner_wire_ok_test")
+        class HealthySession:
+            async def detach(self):
+                pass
+
+        class HealthyBrowser:
+            def __init__(self):
+                self.contexts = [object()]
+            async def new_browser_cdp_session(self):
+                return HealthySession()
+
+        browser = HealthyBrowser()
+        original = module.http_call
+        try:
+            module.http_call = lambda *args, **kwargs: {
+                "webSocketDebuggerUrl": "ws://fixture/devtools/browser/1"
+            }
+            self.assertTrue(asyncio.run(module.browser_alive(browser)))
+        finally:
+            module.http_call = original
+
     def test_owned_target_cleanup_closes_only_opener_descendants(self):
         module = load_runner("provider_runner_target_test")
 
@@ -275,6 +317,26 @@ class ProviderEvidenceTests(unittest.TestCase):
         finally:
             module.cdp_target_list = original_list
             module.page_cdp_target_id = original_id
+
+
+    def test_classify_page_block_detects_chrome_neterror_pages(self):
+        module = load_runner("provider_runner_neterror_test")
+        classify = module.classify_page_block
+
+        # Chrome ERR_CONNECTION_CLOSED
+        res1 = classify("无法访问此网站\n\nyuanshen.我爱你 意外终止了连接。\nERR_CONNECTION_CLOSED")
+        self.assertIsNotNone(res1)
+        self.assertEqual(res1[0], "upstream_unavailable")
+
+        # Chrome ERR_TIMED_OUT
+        res2 = classify("无法访问此网站\nmotomoto.lol 的响应时间过长。\nERR_TIMED_OUT\n重新加载")
+        self.assertIsNotNone(res2)
+        self.assertEqual(res2[0], "upstream_unavailable")
+
+        # English Chrome net-error
+        res3 = classify("This site can’t be reached\nERR_NAME_NOT_RESOLVED")
+        self.assertIsNotNone(res3)
+        self.assertEqual(res3[0], "upstream_unavailable")
 
 
 if __name__ == "__main__":

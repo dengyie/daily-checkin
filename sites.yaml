@@ -592,7 +592,7 @@ sites:
       - 'text=今日已签到'
       - 'text=今日已签'
   - name: 'mulink'
-    url: https://demo.dev2.mulink.top/wallet
+    url: https://demo.dev2.mulink.top/next?app=wallet
     kind: browser
     prefer_cta_before_auth: true
     signs:

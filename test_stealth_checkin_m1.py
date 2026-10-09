@@ -4771,6 +4771,16 @@ class TestMulinkClaimSelector(unittest.TestCase):
         self.assertIn('"今日已打卡" in wtext2', src)
         self.assertIn('"今天已打卡" in wtext2', src)
 
+    def test_mulink_supports_no_iframe_in_page_modal_and_next_url(self):
+        """2026-10-08 前端 SPA 架构改版回归:
+        支持 /next?app=wallet 直达与 No-IFrame 内嵌模态卡片 (顶级 document)。
+        """
+        src = TARGET.read_text(encoding="utf-8")
+        self.assertIn('next?app=wallet', src)
+        self.assertIn('get_wallet_container', src)
+        self.assertIn('"额度池" in ptext', src)
+
+
 class TestIsAbntSite(unittest.TestCase):
     """abnt.it(Aether API)尊属适配的站点判定与接线。
 
