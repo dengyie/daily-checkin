@@ -38,7 +38,7 @@ def default_db_path() -> Path:
 
 
 DEFAULT_DB = default_db_path()
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 logger = logging.getLogger("checkin.store")
 
 DEFAULT_SYSTEM_CONFIGS: dict[str, str] = {
@@ -118,6 +118,9 @@ class SystemStore:
                     credential_ref TEXT,
                     checkin_mode TEXT NOT NULL DEFAULT 'auto',
                     tags TEXT NOT NULL DEFAULT '',
+                    last_balance REAL,
+                    last_balance_text TEXT NOT NULL DEFAULT '',
+                    balance_updated_at TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -199,10 +202,22 @@ class SystemStore:
                     remediation_log TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS account_balances(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+                    day TEXT NOT NULL,
+                    amount REAL,
+                    raw_text TEXT NOT NULL DEFAULT '',
+                    currency TEXT NOT NULL DEFAULT 'USD',
+                    source TEXT NOT NULL DEFAULT 'api',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(site_id, day)
+                );
                 CREATE INDEX IF NOT EXISTS idx_tasks_day_status ON daily_tasks(day,status);
                 CREATE INDEX IF NOT EXISTS idx_items_run ON run_items(run_id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status,id);
                 CREATE INDEX IF NOT EXISTS idx_ai_inspections_day ON ai_inspections(day);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_balances_site_day ON account_balances(site_id,day);
                 """
             )
             # Version-gated schema migration: CREATE TABLE IF NOT EXISTS is a
@@ -229,6 +244,11 @@ class SystemStore:
                 if stored_version < 6:
                     # v5 -> v6: ai_inspections table for post-checkin AI inspection & auto-remediation.
                     pass
+                if stored_version < 7:
+                    # v6 -> v7: sites balance snapshot columns + account_balances table
+                    SystemStore._migrate_column(db, "sites", "last_balance", "REAL")
+                    SystemStore._migrate_column(db, "sites", "last_balance_text", "TEXT NOT NULL DEFAULT ''")
+                    SystemStore._migrate_column(db, "sites", "balance_updated_at", "TEXT NOT NULL DEFAULT ''")
             db.execute(
                 "INSERT INTO meta(key,value) VALUES('schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -347,6 +367,9 @@ class SystemStore:
                 f"""SELECT s.id site_id,s.name,s.url,s.provider,s.enabled,s.credential_ref,
                            COALESCE(s.checkin_mode,'auto') checkin_mode,
                            COALESCE(s.tags,'') tags,
+                           s.last_balance,
+                           COALESCE(s.last_balance_text,'') last_balance_text,
+                           COALESCE(s.balance_updated_at,'') balance_updated_at,
                            s.created_at site_created_at,
                            t.day,t.status,t.source,t.obsidian_path,t.last_reason,t.updated_at
                            ,COALESCE(h.status,'active') site_health_status
@@ -542,7 +565,7 @@ class SystemStore:
         evidence = {k: raw.get(k) for k in (
             "action", "confirmation", "identity", "pre_state", "post_state",
             "transition", "attribution", "business_status", "business_reason",
-            "projection_status", "projection_reason",
+            "projection_status", "projection_reason", "balance",
         )}
         if not evidence.get("attribution"):
             evidence["attribution"] = "legacy_unknown"
@@ -554,6 +577,42 @@ class SystemStore:
                 (run_id, site[0] if site else None, name, raw.get("status", "FAIL"),
                  raw.get("stage", ""), raw.get("reason", ""), raw.get("provider", ""),
                  int(raw.get("latency_ms") or 0), json.dumps(evidence, ensure_ascii=False), self.now()),
+            )
+
+    def record_site_balance(self, name: str, day: str, balance: Any) -> None:
+        """Record account balance snapshot on sites table and append to account_balances."""
+        if not balance:
+            return
+        raw = asdict(balance) if is_dataclass(balance) else dict(balance)
+        amount = raw.get("amount")
+        try:
+            amount = float(amount) if amount is not None else None
+        except (TypeError, ValueError):
+            amount = None
+        raw_text = str(raw.get("raw_text") or "").strip()
+        currency = str(raw.get("currency") or "USD").strip()
+        source = str(raw.get("source") or "api").strip()
+        now = self.now()
+        with self.connect() as db:
+            site = db.execute("SELECT id FROM sites WHERE name=?", (name,)).fetchone()
+            if not site:
+                return
+            site_id = site[0]
+            db.execute(
+                """UPDATE sites SET last_balance=?, last_balance_text=?, balance_updated_at=?
+                   WHERE id=?""",
+                (amount, raw_text, now, site_id),
+            )
+            db.execute(
+                """INSERT INTO account_balances(site_id, day, amount, raw_text, currency, source, created_at)
+                   VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(site_id, day) DO UPDATE SET
+                     amount=excluded.amount,
+                     raw_text=excluded.raw_text,
+                     currency=excluded.currency,
+                     source=excluded.source,
+                     created_at=excluded.created_at""",
+                (site_id, day, amount, raw_text, currency, source, now),
             )
 
     def finish_run(self, run_id: int, exit_code: int, reason: str) -> None:

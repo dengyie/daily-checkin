@@ -338,6 +338,85 @@ class ProviderEvidenceTests(unittest.TestCase):
         self.assertIsNotNone(res3)
         self.assertEqual(res3[0], "upstream_unavailable")
 
+    def test_extract_newapi_balance_parses_quota_correctly(self):
+        module = load_runner("provider_runner_newapi_balance_test")
+        class FakePage:
+            async def evaluate(self, script):
+                return {"quota": 1250000}
+        page = FakePage()
+        res = asyncio.run(module._extract_newapi_balance(page))
+        self.assertIsNotNone(res)
+        self.assertEqual(res.amount, 2.5)
+        self.assertEqual(res.raw_text, "$2.50")
+        self.assertEqual(res.currency, "USD")
+        self.assertEqual(res.quota_raw, 1250000)
+        self.assertEqual(res.source, "api")
+
+    def test_extract_glados_balance_parses_status_api(self):
+        module = load_runner("provider_runner_glados_balance_test")
+        class FakePage:
+            async def evaluate(self, script):
+                return {"points": 420.0, "leftDays": "18"}
+        page = FakePage()
+        res = asyncio.run(module._extract_glados_balance(page))
+        self.assertIsNotNone(res)
+        self.assertEqual(res.amount, 420.0)
+        self.assertEqual(res.raw_text, "420 积分 (剩 18 天)")
+        self.assertEqual(res.currency, "POINTS")
+        self.assertEqual(res.source, "api")
+
+    def test_extract_dom_balance_parses_currency(self):
+        module = load_runner("provider_runner_dom_balance_test")
+        class FakePage:
+            async def evaluate(self, script):
+                return {"type": "money", "raw": "当前余额: ¥99.50", "val": "¥99.50"}
+        page = FakePage()
+        res = asyncio.run(module._extract_dom_balance(page))
+        self.assertIsNotNone(res)
+        self.assertEqual(res.amount, 99.5)
+        self.assertEqual(res.currency, "CNY")
+        self.assertEqual(res.source, "dom")
+
+    def test_extract_balance_safely_handles_hang_with_timeout(self):
+        module = load_runner("provider_runner_hang_balance_test")
+        class HangingPage:
+            async def evaluate(self, script):
+                await asyncio.sleep(5)
+                return {"quota": 1000}
+        page = HangingPage()
+        adapter = type("Adapter", (), {"kind": "newapi_profile", "url": "https://api.example.com/profile"})()
+        # Should timeout at 3.0s and return None safely
+        res = asyncio.run(module.extract_balance_safely(page, adapter))
+        self.assertIsNone(res)
+
+    def test_extract_balance_safely_skips_newapi_probe_on_browser_site(self):
+        """P1: non-NewAPI sites (e.g. browser) must never be probed with /api/user/self."""
+        module = load_runner("provider_runner_guard_test")
+        probed_scripts = []
+        class FakePage:
+            async def evaluate(self, script):
+                probed_scripts.append(script)
+                return None
+        page = FakePage()
+        adapter = type("Adapter", (), {"kind": "browser", "url": "https://developer.huaweicloud.com/grow"})()
+        asyncio.run(module.extract_balance_safely(page, adapter))
+        # Ensure /api/user/self was NEVER evaluated on this browser page
+        for s in probed_scripts:
+            self.assertNotIn("/api/user/self", s)
+
+    def test_extract_dom_balance_supports_cross_container_matching(self):
+        """P2: DOM fallback supports split label and value structures from modern SPAs."""
+        module = load_runner("provider_runner_dom_split_test")
+        class FakePage:
+            async def evaluate(self, script):
+                return {"type": "money", "raw": "当前余额 150.00 元", "val": "150.00 元"}
+        page = FakePage()
+        res = asyncio.run(module._extract_dom_balance(page))
+        self.assertIsNotNone(res)
+        self.assertEqual(res.amount, 150.0)
+        self.assertEqual(res.currency, "USD")
+        self.assertEqual(res.source, "dom")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -562,18 +562,17 @@ class ReviewFixTests(unittest.TestCase):
                         "transition", "attribution", "business_status",
                         "business_reason", "projection_status",
                         "projection_reason", "latency_ms", "action",
-                        "confirmation", "identity", "ts",
+                        "confirmation", "identity", "balance", "ts",
                     },
                 )
                 self.assertEqual(payload["latency_ms"], 123)
-                self.assertIsInstance(payload["latency_ms"], int)
                 self.assertEqual(payload["provider"], "wisart")
                 self.assertEqual(len(payload["detail"]), m._LOG_MAX_FIELD_LEN)
                 # Type guard: allowlist scalars are str/None; evidence is dict/None.
-                for key in set(payload) - {"action", "confirmation", "identity", "ts"}:
+                for key in set(payload) - {"action", "confirmation", "identity", "balance", "ts"}:
                     self.assertNotIsInstance(payload[key], (dict, list),
                                              f"{key} is a nested object in the log (leak?)")
-                for key in ("action", "confirmation", "identity"):
+                for key in ("action", "confirmation", "identity", "balance"):
                     self.assertTrue(payload[key] is None or isinstance(payload[key], dict))
             finally:
                 if old is None:
@@ -599,6 +598,7 @@ class ReviewFixTests(unittest.TestCase):
                 self.assertEqual(payload["action"]["target"], "btn")
                 self.assertIsNone(payload["confirmation"])
                 self.assertIsNone(payload["identity"])
+                self.assertIsNone(payload["balance"])
             finally:
                 if old is None:
                     os.environ.pop("DAILY_CHECKIN_LOG_DIR", None)

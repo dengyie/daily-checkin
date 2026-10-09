@@ -41,6 +41,7 @@ from checkin_core.models import (
     ActionEvidence,
     ConfirmationEvidence,
     IdentityEvidence,
+    BalanceEvidence,
     evidence_dict,
     evidence_is_confirming,
 )
@@ -463,6 +464,7 @@ class CheckinResult:
     business_reason: str = ""
     projection_status: str = "not_attempted"
     projection_reason: str = ""
+    balance: BalanceEvidence | None = None
     # True → 该站当日未到窗口/暂不处理,写回时保持 daily_tasks=pending,
     # 让后续批次(如 cron 08:10)在窗口内正常重跑,而非误判 done/failed。
     keep_pending: bool = False
@@ -1286,6 +1288,26 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
         login_url="https://yunzhi.play.cn/ai/#/login",
         kind="yunzhi",
+    ),
+    # huaweicloud(developer.huaweicloud.com/grow, 华为云开发者成长中心每日签到)—— 2026-10-09 接入。
+    _B(
+        "huaweicloud",
+        "https://developer.huaweicloud.com/grow",
+        signs=[
+            'button:has-text("立即签到")',
+            '.user-message-view-userValue-item button:has-text("立即签到")',
+            '.user-message-view-userValue-item button',
+        ],
+        already=[
+            '.user-message-view-userValue-item-button:has-text("已签到")',
+            '.user-message-view-userValue-item-button',
+            'text=今日已签到',
+            'text=签到成功',
+            'text=已连续签到',
+        ],
+        prefer_catalog_url=True,
+        login_url="https://developer.huaweicloud.com/grow",
+        kind="browser",
     ),
 ]
 
@@ -8470,6 +8492,18 @@ async def sub2api_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRe
     )
 
 
+def is_huaweicloud_site(site_url: str) -> bool:
+    """developer.huaweicloud.com 华为云开发者成长中心判定."""
+    u = (site_url or "").lower()
+    return "developer.huaweicloud.com" in u or "huaweicloud.com/grow" in u
+
+
+def is_huaweicloud_name(name: str) -> bool:
+    """huaweicloud 站点名称判定."""
+    n = (name or "").lower()
+    return "huaweicloud" in n or "华为云" in n
+
+
 def is_dygyz_site(site_url: str) -> bool:
     """dygyz.pmcat.top 专属站判定."""
     u = (site_url or "").lower()
@@ -10962,6 +10996,191 @@ def apply_attribution(result: CheckinResult) -> CheckinResult:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Account Balance & Quota Extraction (RFC-043)
+# ---------------------------------------------------------------------------
+
+async def _extract_newapi_balance(page) -> BalanceEvidence | None:
+    """Fetch user quota from New-API / One-API /api/user/self in page context."""
+    try:
+        quota_data = await page.evaluate(
+            """async () => {
+                try {
+                    const r = await fetch('/api/user/self', { credentials: 'include' });
+                    if (!r.ok) return null;
+                    const j = await r.json();
+                    if (!j || !j.data) return null;
+                    if (typeof j.data.quota === 'number') {
+                        return { quota: j.data.quota };
+                    }
+                    return null;
+                } catch (e) {
+                    return null;
+                }
+            }"""
+        )
+        if isinstance(quota_data, dict) and "quota" in quota_data:
+            quota = int(quota_data["quota"])
+            dollars = round(quota / 500000.0, 4)
+            raw_text = f"${dollars:.2f}"
+            return BalanceEvidence(
+                amount=dollars,
+                raw_text=raw_text,
+                currency="USD",
+                quota_raw=quota,
+                captured_at=datetime.now().isoformat(timespec="seconds"),
+                source="api",
+            )
+    except Exception:
+        pass
+    return None
+
+
+async def _extract_glados_balance(page) -> BalanceEvidence | None:
+    """Fetch user points and VIP remaining days from GLaDOS status API."""
+    try:
+        status_data = await page.evaluate(
+            """async () => {
+                try {
+                    const r = await fetch('/api/user/status', { credentials: 'include' });
+                    if (!r.ok) return null;
+                    const j = await r.json();
+                    if (!j || !j.data) return null;
+                    return {
+                        points: j.data.points !== undefined ? Number(j.data.points) : null,
+                        leftDays: j.data.leftDays !== undefined ? String(j.data.leftDays) : null,
+                    };
+                } catch (e) {
+                    return null;
+                }
+            }"""
+        )
+        if isinstance(status_data, dict) and status_data.get("points") is not None:
+            pts = float(status_data["points"])
+            left_days = status_data.get("leftDays")
+            raw_text = f"{int(pts)} 积分" if pts.is_integer() else f"{pts} 积分"
+            if left_days:
+                raw_text += f" (剩 {left_days} 天)"
+            return BalanceEvidence(
+                amount=pts,
+                raw_text=raw_text,
+                currency="POINTS",
+                captured_at=datetime.now().isoformat(timespec="seconds"),
+                source="api",
+            )
+    except Exception:
+        pass
+    return None
+
+
+async def _extract_dom_balance(page) -> BalanceEvidence | None:
+    """Fallback extractor inspecting rendered DOM text for balance or credit tokens."""
+    try:
+        extracted = await page.evaluate(
+            r"""() => {
+                try {
+                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                    let node;
+                    const reMoney = /(?:当前余额|可用额度|账户余额|我的余额|钱包余额|可用代币|总代币|可用金额)\s*[:：]?\s*([¥$€￥]?\s*[\d,]+(?:\.\d+)?)/i;
+                    const rePoints = /(?:剩余积分|我的积分|当前积分|可用积分)\s*[:：]?\s*([\d,]+(?:\.\d+)?)/i;
+                    const reLabelMoney = /(?:当前余额|可用额度|账户余额|我的余额|钱包余额|可用代币|总代币|可用金额)/i;
+                    const reLabelPoints = /(?:剩余积分|我的积分|当前积分|可用积分)/i;
+                    const reValMoney = /([¥$€￥]\s*[\d,]+(?:\.\d+)?|[\d,]+(?:\.\d+)?\s*(?:元|刀|tokens?))/i;
+                    const reValPoints = /([\d,]+(?:\.\d+)?)\s*(?:积分|points?)/i;
+
+                    while ((node = walker.nextNode())) {
+                        const text = (node.textContent || '').trim();
+                        if (!text || text.length > 80) continue;
+                        
+                        // 1. 单节点内包含完整 "当前余额: $10.00"
+                        const mMoney = text.match(reMoney);
+                        if (mMoney) return { type: 'money', raw: mMoney[0], val: mMoney[1] };
+                        const mPoints = text.match(rePoints);
+                        if (mPoints) return { type: 'points', raw: mPoints[0], val: mPoints[1] };
+
+                        // 2. 现代组件库父级容器穿透: <span>当前余额</span> <span>¥128.50</span>
+                        if (reLabelMoney.test(text) && node.parentElement) {
+                            const pText = (node.parentElement.innerText || node.parentElement.textContent || '').trim();
+                            if (pText && pText.length <= 100) {
+                                const mP = pText.match(reMoney) || pText.match(reValMoney);
+                                if (mP) return { type: 'money', raw: mP[0], val: mP[1] };
+                            }
+                        }
+                        if (reLabelPoints.test(text) && node.parentElement) {
+                            const pText = (node.parentElement.innerText || node.parentElement.textContent || '').trim();
+                            if (pText && pText.length <= 100) {
+                                const mP = pText.match(rePoints) || pText.match(reValPoints);
+                                if (mP) return { type: 'points', raw: mP[0], val: mP[1] };
+                            }
+                        }
+                    }
+                } catch (e) {}
+                return null;
+            }"""
+        )
+        if isinstance(extracted, dict):
+            raw = str(extracted.get("raw") or "").strip()
+            val_str = str(extracted.get("val") or "").replace(",", "").strip()
+            m_cur = re.search(r"^([¥$€￥])", val_str)
+            cur = "USD"
+            if m_cur:
+                sym = m_cur.group(1)
+                cur = "CNY" if sym in ("¥", "￥") else ("EUR" if sym == "€" else "USD")
+                num_str = val_str[1:].strip()
+            else:
+                num_str = val_str
+            # 清理后缀单位
+            num_str = re.sub(r"[^\d.]", "", num_str)
+            try:
+                amt = float(num_str) if num_str else None
+            except ValueError:
+                amt = None
+            if extracted.get("type") == "points":
+                cur = "POINTS"
+            return BalanceEvidence(
+                amount=amt,
+                raw_text=raw or val_str,
+                currency=cur,
+                captured_at=datetime.now().isoformat(timespec="seconds"),
+                source="dom",
+            )
+    except Exception:
+        pass
+    return None
+
+
+NEWAPI_COMPATIBLE_KINDS = {
+    "newapi_profile", "bohe", "relayfor", "relayfor_go", "pool", "mzlone", "abnt", "darkforger",
+}
+
+
+async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | None:
+    kind = getattr(adapter, "kind", "browser")
+    if kind == "glados":
+        b = await _extract_glados_balance(page)
+        if b:
+            return b
+
+    # 严格门禁：仅对已确认兼容 New-API / One-API 架构的站点尝试 /api/user/self 接口
+    if kind in NEWAPI_COMPATIBLE_KINDS or "newapi" in kind or "/profile" in getattr(adapter, "url", ""):
+        b = await _extract_newapi_balance(page)
+        if b:
+            return b
+
+    # DOM 文本启发式兜底
+    return await _extract_dom_balance(page)
+
+
+async def extract_balance_safely(page, adapter: SiteAdapter) -> BalanceEvidence | None:
+    """Safely extract account balance with strict 3.0s timeout and soft fallback."""
+    if page is None:
+        return None
+    try:
+        return await asyncio.wait_for(_do_extract_balance(page, adapter), timeout=3.0)
+    except Exception:
+        return None
+
+
 async def checkin_on_page(
     page,
     adapter: SiteAdapter,
@@ -10985,7 +11204,13 @@ async def checkin_on_page(
         browser=browser,
     )
     if PROVIDER_ENGINE == "legacy":
-        return await legacy_performer(ctx)
+        result = await legacy_performer(ctx)
+        if result.ok:
+            try:
+                result.balance = await extract_balance_safely(page, adapter)
+            except Exception:
+                pass
+        return result
 
     registry = ProviderRegistry(
         [WisartProvider(legacy_performer), LegacyBrowserProvider(legacy_performer)]
@@ -11005,6 +11230,11 @@ async def checkin_on_page(
             adapter=result.adapter, provider=provider.name, stage="confirm",
             action=result.action,
         )
+    if result.ok:
+        try:
+            result.balance = await extract_balance_safely(page, adapter)
+        except Exception:
+            pass
     return result
 
 
@@ -11725,6 +11955,29 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
                 prefer_catalog_url=True,
                 login_url="https://api.ilovecat520.me/login",
             )
+        if is_huaweicloud_site(url_from_note) or is_huaweicloud_name(name):
+            # 华为云开发者成长中心 (developer.huaweicloud.com/grow).
+            match = next((a for a in _BUILTIN_SITE_ADAPTERS if a.name == "huaweicloud"), None)
+            if match:
+                return match
+            return _B(
+                name,
+                "https://developer.huaweicloud.com/grow",
+                signs=[
+                    'button:has-text("立即签到")',
+                    '.user-message-view-userValue-item button:has-text("立即签到")',
+                    '.user-message-view-userValue-item button',
+                ],
+                already=[
+                    '.user-message-view-userValue-item-button:has-text("已签到")',
+                    '.user-message-view-userValue-item-button',
+                    'text=今日已签到',
+                    'text=签到成功',
+                    'text=已连续签到',
+                ],
+                prefer_catalog_url=True,
+                login_url="https://developer.huaweicloud.com/grow",
+            )
         if "99442200.xyz" in (url_from_note or "").lower() or name.lower() in ("si", "furry", "furry api"):
             return _N(name, "https://si.99442200.xyz/profile", prefer_catalog_url=True)
         if "yuheng.site" in (url_from_note or "").lower() or name.lower() in ("yuheng", "玉衡", "玉衡中转"):
@@ -11767,6 +12020,7 @@ def append_checkin_log(result: CheckinResult, day: str | None = None) -> None:
         payload["action"] = evidence_dict(result.action)
         payload["confirmation"] = evidence_dict(result.confirmation)
         payload["identity"] = evidence_dict(result.identity)
+        payload["balance"] = evidence_dict(result.balance)
         payload["ts"] = datetime.now().isoformat(timespec="seconds")
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -12559,6 +12813,8 @@ async def run(argv: list[str] | None = None) -> int:
                             result.projection_reason = ""
                         try:
                             store.set_task_result(today_str, name, "done")
+                            if getattr(result, "balance", None):
+                                store.record_site_balance(name, today_str, result.balance)
                         except Exception as db_err:
                             # SQLite write failed (timeout/disk-full) AFTER the
                             # sign-in actually succeeded. Rethrowing here would

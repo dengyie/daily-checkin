@@ -383,6 +383,86 @@ class StoreTests(unittest.TestCase):
             row = store.tasks("2026-08-04")
             self.assertEqual(row, [])
 
+    def test_record_site_balance_updates_snapshot_and_appends_history(self):
+        """RFC-043: record_site_balance sets latest balance and appends to account_balances."""
+        with TemporaryDirectory() as td:
+            db_path = Path(td) / "system.db"
+            store = SystemStore(db_path)
+            store.upsert_task("2026-10-10", "SiteA", "https://sitea.example")
+
+            # Initial task list has no balance
+            tasks = store.tasks("2026-10-10")
+            self.assertEqual(len(tasks), 1)
+            self.assertIsNone(tasks[0]["last_balance"])
+            self.assertEqual(tasks[0]["last_balance_text"], "")
+
+            # Record balance
+            store.record_site_balance("SiteA", "2026-10-10", {
+                "amount": 15.2,
+                "raw_text": "$15.20",
+                "currency": "USD",
+                "source": "api",
+            })
+
+            # Check snapshot in tasks(day)
+            tasks_updated = store.tasks("2026-10-10")
+            self.assertEqual(tasks_updated[0]["last_balance"], 15.2)
+            self.assertEqual(tasks_updated[0]["last_balance_text"], "$15.20")
+            self.assertTrue(tasks_updated[0]["balance_updated_at"])
+
+            # Check history in account_balances table
+            with store.connect() as db:
+                rows = db.execute("SELECT amount, raw_text, currency, source FROM account_balances WHERE day='2026-10-10'").fetchall()
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["amount"], 15.2)
+                self.assertEqual(rows[0]["raw_text"], "$15.20")
+                self.assertEqual(rows[0]["currency"], "USD")
+                self.assertEqual(rows[0]["source"], "api")
+
+            # P2: Repeated record_site_balance updates the existing row via ON CONFLICT without bloating
+            store.record_site_balance("SiteA", "2026-10-10", {
+                "amount": 16.5,
+                "raw_text": "$16.50",
+                "currency": "USD",
+                "source": "api",
+            })
+            with store.connect() as db:
+                rows_repeat = db.execute("SELECT amount, raw_text FROM account_balances WHERE day='2026-10-10'").fetchall()
+                self.assertEqual(len(rows_repeat), 1)
+                self.assertEqual(rows_repeat[0]["amount"], 16.5)
+                self.assertEqual(rows_repeat[0]["raw_text"], "$16.50")
+
+    def test_add_run_item_persists_balance_in_evidence_json(self):
+        """RFC-043: run_items.evidence_json includes serialized balance evidence."""
+        with TemporaryDirectory() as td:
+            db_path = Path(td) / "system.db"
+            store = SystemStore(db_path)
+            store.upsert_task("2026-10-10", "SiteB", "https://siteb.example")
+            run_id = store.create_run("2026-10-10", "cli")
+            store.add_run_item(run_id, {
+                "site": "SiteB",
+                "status": "OK",
+                "stage": "confirm",
+                "provider": "legacy_browser",
+                "reason": "",
+                "latency_ms": 150,
+                "action": {"kind": "dom_click"},
+                "confirmation": {"kind": "dom_strong"},
+                "balance": {
+                    "amount": 25.0,
+                    "raw_text": "$25.00",
+                    "currency": "USD",
+                    "source": "api",
+                },
+            })
+            store.finish_run(run_id, 0, "done")
+            runs = store.recent_runs(1)
+            item = runs[0]["items"][0]
+            evidence = json.loads(item["evidence_json"])
+            self.assertIn("balance", evidence)
+            self.assertEqual(evidence["balance"]["amount"], 25.0)
+            self.assertEqual(evidence["balance"]["raw_text"], "$25.00")
+
 
 class KeychainTests(unittest.TestCase):
     def test_keychain_commands_and_errors_never_return_secret(self):

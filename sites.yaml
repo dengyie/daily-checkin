@@ -1047,5 +1047,26 @@ sites:
     already:
       - 'text=今日已领取'
       - 'text=明天再来'
+  # huaweicloud(developer.huaweicloud.com/grow, 华为云开发者成长中心每日签到)—— 2026-10-09 接入。
+  # 共享 9222 Chrome 会话(账号: yd_289657918 / qp2625451)。
+  # 签到入口: /grow 页面「立即签到」按钮(button:has-text("立即签到"))。
+  # 签到成功后变为「已签到」(.user-message-view-userValue-item-button:has-text("已签到"))。
+  # 严禁清空 Cookie/localStorage; SSO ticket 一次性消费后靠共享 SessionID/vk/HWWAFSESTIME 保持登录态。
+  - name: 'huaweicloud'
+    url: https://developer.huaweicloud.com/grow
+    kind: browser
+    prefer_catalog_url: true
+    login_url: https://developer.huaweicloud.com/grow
+    signs:
+      - 'button:has-text("立即签到")'
+      - '.user-message-view-userValue-item button:has-text("立即签到")'
+      - '.user-message-view-userValue-item button'
+    already:
+      - '.user-message-view-userValue-item-button:has-text("已签到")'
+      - '.user-message-view-userValue-item-button'
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=已连续签到'
+
 
 

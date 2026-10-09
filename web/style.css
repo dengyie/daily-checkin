@@ -701,6 +701,32 @@ code, pre {
   color: #fbbf24;
 }
 
+.tile-balance-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: #34d399;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.tile-balance-badge.lg {
+  font-size: 13px;
+  padding: 3px 10px;
+}
+
+html[data-resolved-theme="light"] .tile-balance-badge {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #059669;
+}
+
 /* Tag Picker Checkboxes & Tags Cloud */
 .tags-picker-group {
   display: flex;

@@ -7136,6 +7136,55 @@ class IloveCatCheckinTest(unittest.TestCase):
             m.bypass_chrome_interstitial_if_needed = orig_bypass
 
 
+class TestHuaweicloud(unittest.TestCase):
+    """华为云开发者成长中心 (developer.huaweicloud.com/grow) 测试集."""
+
+    def setUp(self):
+        self.m = load_mod()
+
+    def test_yaml_registers_huaweicloud_entry(self):
+        """sites.yaml 的 huaweicloud 条目解析为 kind=browser 且带立即签到/已签到回执。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "huaweicloud"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 huaweicloud 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://developer.huaweicloud.com/grow")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertEqual(a.login_url, "https://developer.huaweicloud.com/grow")
+        self.assertTrue(any("立即签到" in s for s in a.sign_selectors))
+        self.assertTrue(any("已签到" in s for s in a.already_selectors))
+
+        # 字段等价 (sites.yaml 与 _BUILTIN_SITE_ADAPTERS 严格同步)
+        b = next((x for x in _BUILTIN_SITE_ADAPTERS if x.name == "huaweicloud"), None)
+        self.assertIsNotNone(b, "内置 adapter 应包含 huaweicloud")
+        self.assertEqual(b.kind, "browser")
+        for k in vars(b):
+            self.assertEqual(getattr(a, k), getattr(b, k), f"字段 {k} 不等价")
+
+    def test_huaweicloud_predicates_and_resolve(self):
+        """is_huaweicloud_site / is_huaweicloud_name 与 resolve_site 判定正确."""
+        m = self.m
+        self.assertTrue(m.is_huaweicloud_site("https://developer.huaweicloud.com/grow"))
+        self.assertTrue(m.is_huaweicloud_site("https://huaweicloud.com/grow?sms"))
+        self.assertFalse(m.is_huaweicloud_site("https://example.com/"))
+
+        self.assertTrue(m.is_huaweicloud_name("huaweicloud"))
+        self.assertTrue(m.is_huaweicloud_name("华为云"))
+        self.assertFalse(m.is_huaweicloud_name("other"))
+
+        resolved = m.resolve_site("huaweicloud", "https://developer.huaweicloud.com/grow")
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.name, "huaweicloud")
+        self.assertEqual(resolved.kind, "browser")
+        self.assertTrue(resolved.prefer_catalog_url)
+
+
 if __name__ == "__main__":
 
     py_compile.compile(str(TARGET), doraise=True)

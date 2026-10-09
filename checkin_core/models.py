@@ -47,6 +47,16 @@ class IdentityEvidence:
 
 
 @dataclass
+class BalanceEvidence:
+    amount: float | None = None
+    raw_text: str = ""
+    currency: str = "USD"
+    quota_raw: int | None = None
+    captured_at: str = ""
+    source: str = "api"
+
+
+@dataclass
 class ProviderInspection:
     authenticated: bool | None = None
     identity: IdentityEvidence | None = None
@@ -60,7 +70,7 @@ def evidence_dict(value: Any) -> dict[str, Any] | None:
     """Return a JSON-safe dataclass mapping without accepting arbitrary secrets."""
     if value is None:
         return None
-    if not isinstance(value, (ActionEvidence, ConfirmationEvidence, IdentityEvidence)):
+    if not isinstance(value, (ActionEvidence, ConfirmationEvidence, IdentityEvidence, BalanceEvidence)):
         raise TypeError(f"unsupported evidence type: {type(value).__name__}")
     return asdict(value)
 

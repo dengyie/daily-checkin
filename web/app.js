@@ -35,6 +35,7 @@ const ICONS = {
   'clipboard-list': '<path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6m-6 4h6"/>',
   'clock': '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>',
   'code': '<path d="m8 9-3 3 3 3m8-6 3 3-3 3M14 5l-4 14"/>',
+  'coin': '<circle cx="12" cy="12" r="9"/><path d="M14.8 9A2 2 0 0 0 13 8h-2a2 2 0 1 0 0 4h2a2 2 0 1 1 0 4h-2a2 2 0 0 1-1.8-1"/><path d="M12 6v2m0 8v2"/>',
   'copy': '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
   'eye': '<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/>',
   'eye-off': '<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24m-3.12-6.36A9.75 9.75 0 0 1 12 5.5c4.76 0 8.27 3.32 9.5 6.5a11.99 11.99 0 0 1-3.18 4.36M6.53 6.53C4.24 7.92 2.76 10.15 2.5 12c1.23 3.18 4.74 6.5 9.5 6.5 1.57 0 3.03-.36 4.35-1m3.65 3.65L2 2"/>',
@@ -617,6 +618,10 @@ function openSiteDetailDrawer(siteName) {
         <div>
           <div class="tile-prop-label">数据库关联路径</div>
           <div class="tile-prop-val font-mono">${esc(task.obsidian_path || `system.db (Site ID: ${task.site_id || "-"})`)}</div>
+        </div>
+        <div>
+          <div class="tile-prop-label">当前账户余额 (BALANCE)</div>
+          <div class="tile-prop-val">${task.last_balance_text ? `<span class="tile-balance-badge lg">${uiIcon("coin", { size: 13 })} <strong>${esc(task.last_balance_text)}</strong></span> <span class="tile-prop-label text-xs">(${esc(task.balance_updated_at || '未记录时间')})</span>` : `<span class="tile-prop-label">尚未采集余额</span>`}</div>
         </div>
         <div>
           <div class="tile-prop-label">任务来源 (SOURCE)</div>
@@ -1385,6 +1390,7 @@ function renderTile(task, showAction = true) {
               <span class="tile-title">${esc(task.name)}</span>
               <span class="tile-category-tag">${esc(category)}</span>
               ${isManual ? `<span class="tile-category-tag manual">${uiIcon("user-check", { size: 11 })} 人工签到</span>` : ""}
+              ${task.last_balance_text ? `<span class="tile-balance-badge" title="账户余额 (更新于 ${esc(task.balance_updated_at || '最近')})">${uiIcon("coin", { size: 11 })} ${esc(task.last_balance_text)}</span>` : ""}
             </div>
             ${safeUrl ? `<a href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer" class="tile-url-link" data-stop-prop="true">${esc(safeUrl)} ${uiIcon("external-link", { size: 11 })}</a>` : `<span class="tile-url-link">无直接 URL</span>`}
           </div>
