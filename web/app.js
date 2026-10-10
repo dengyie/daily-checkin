@@ -908,16 +908,20 @@ function openSiteDetailDrawer(siteName) {
       </div>
     `;
 
-    // Guess default currency for selector
+    // Default currency for selector
     const curSelect = $("#site-balance-currency");
-    if (curSelect && task.last_balance_text) {
-      const lower = task.last_balance_text.toLowerCase();
-      if (lower.includes("¥") || lower.includes("cny") || lower.includes("元")) {
-        curSelect.value = "CNY";
-      } else if (lower.includes("积分") || lower.includes("point") || lower.includes("点")) {
-        curSelect.value = "POINTS";
-      } else if (lower.includes("$") || lower.includes("usd")) {
-        curSelect.value = "USD";
+    if (curSelect) {
+      if (task.last_balance_currency) {
+        curSelect.value = task.last_balance_currency;
+      } else if (task.last_balance_text) {
+        const lower = task.last_balance_text.toLowerCase();
+        if (lower.includes("¥") || lower.includes("cny") || lower.includes("元")) {
+          curSelect.value = "CNY";
+        } else if (lower.includes("积分") || lower.includes("point") || lower.includes("点")) {
+          curSelect.value = "POINTS";
+        } else if (lower.includes("$") || lower.includes("usd")) {
+          curSelect.value = "USD";
+        }
       }
     }
 
@@ -937,11 +941,15 @@ function openSiteDetailDrawer(siteName) {
       }
     });
 
-    // Fetch balance history records
+    // Fetch balance history records with race-condition guard
+    const historyWrapInit = $("#site-drawer-balance-history-wrap");
+    if (historyWrapInit) {
+      historyWrapInit.dataset.currentSite = siteName;
+    }
     api(`/api/sites/balance/history?site=${encodeURIComponent(siteName)}`, null, "GET")
       .then((res) => {
         const historyWrap = $("#site-drawer-balance-history-wrap");
-        if (!historyWrap) return;
+        if (!historyWrap || historyWrap.dataset.currentSite !== siteName) return;
         const list = (res && res.history) || [];
         if (!list.length) {
           historyWrap.innerHTML = `<div class="empty-cell">暂无该站点的资产变动记录</div>`;
@@ -983,7 +991,7 @@ function openSiteDetailDrawer(siteName) {
       })
       .catch((err) => {
         const historyWrap = $("#site-drawer-balance-history-wrap");
-        if (historyWrap) {
+        if (historyWrap && historyWrap.dataset.currentSite === siteName) {
           historyWrap.innerHTML = `<div class="empty-cell text-danger">读取资产历史记录失败: ${esc(err.message)}</div>`;
         }
       });
@@ -1715,10 +1723,11 @@ function computeTaskStats() {
 
     if (task.last_balance != null) {
       const amt = Number(task.last_balance);
+      const cur = (task.last_balance_currency || "").toUpperCase();
       const text = (task.last_balance_text || "").toLowerCase();
-      if (text.includes("¥") || text.includes("cny") || text.includes("元")) {
+      if (cur === "CNY" || text.includes("¥") || text.includes("cny") || text.includes("元")) {
         totalCny += amt;
-      } else if (text.includes("积分") || text.includes("point") || text.includes("点")) {
+      } else if (cur === "POINTS" || text.includes("积分") || text.includes("point") || text.includes("点")) {
         totalPoints += amt;
       } else {
         totalUsd += amt;

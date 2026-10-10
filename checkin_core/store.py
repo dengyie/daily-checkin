@@ -38,7 +38,7 @@ def default_db_path() -> Path:
 
 
 DEFAULT_DB = default_db_path()
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 logger = logging.getLogger("checkin.store")
 
 DEFAULT_SYSTEM_CONFIGS: dict[str, str] = {
@@ -120,6 +120,7 @@ class SystemStore:
                     tags TEXT NOT NULL DEFAULT '',
                     last_balance REAL,
                     last_balance_text TEXT NOT NULL DEFAULT '',
+                    last_balance_currency TEXT NOT NULL DEFAULT 'USD',
                     balance_updated_at TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -249,6 +250,9 @@ class SystemStore:
                     SystemStore._migrate_column(db, "sites", "last_balance", "REAL")
                     SystemStore._migrate_column(db, "sites", "last_balance_text", "TEXT NOT NULL DEFAULT ''")
                     SystemStore._migrate_column(db, "sites", "balance_updated_at", "TEXT NOT NULL DEFAULT ''")
+                if stored_version < 8:
+                    # v7 -> v8: sites last_balance_currency column
+                    SystemStore._migrate_column(db, "sites", "last_balance_currency", "TEXT NOT NULL DEFAULT 'USD'")
             db.execute(
                 "INSERT INTO meta(key,value) VALUES('schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -369,6 +373,7 @@ class SystemStore:
                            COALESCE(s.tags,'') tags,
                            s.last_balance,
                            COALESCE(s.last_balance_text,'') last_balance_text,
+                           COALESCE(s.last_balance_currency,'USD') last_balance_currency,
                            COALESCE(s.balance_updated_at,'') balance_updated_at,
                            s.created_at site_created_at,
                            t.day,t.status,t.source,t.obsidian_path,t.last_reason,t.updated_at
@@ -599,9 +604,9 @@ class SystemStore:
                 return
             site_id = site[0]
             db.execute(
-                """UPDATE sites SET last_balance=?, last_balance_text=?, balance_updated_at=?
+                """UPDATE sites SET last_balance=?, last_balance_text=?, last_balance_currency=?, balance_updated_at=?
                    WHERE id=?""",
-                (amount, raw_text, now, site_id),
+                (amount, raw_text, currency, now, site_id),
             )
             db.execute(
                 """INSERT INTO account_balances(site_id, day, amount, raw_text, currency, source, created_at)
@@ -617,6 +622,10 @@ class SystemStore:
 
     def get_site_balance_history(self, name: str, limit: int = 30) -> list[dict[str, Any]]:
         """Return historical balance records for a site."""
+        try:
+            safe_limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            safe_limit = 30
         with self.connect() as db:
             site = db.execute("SELECT id FROM sites WHERE name=?", (name,)).fetchone()
             if not site:
@@ -628,7 +637,7 @@ class SystemStore:
                    WHERE site_id=?
                    ORDER BY day DESC, id DESC
                    LIMIT ?""",
-                (site_id, max(1, min(limit, 100))),
+                (site_id, safe_limit),
             ).fetchall()
             return [dict(r) for r in rows]
 

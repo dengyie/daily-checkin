@@ -414,7 +414,7 @@ class ProviderEvidenceTests(unittest.TestCase):
         res = asyncio.run(module._extract_dom_balance(page))
         self.assertIsNotNone(res)
         self.assertEqual(res.amount, 150.0)
-        self.assertEqual(res.currency, "USD")
+        self.assertEqual(res.currency, "CNY")
         self.assertEqual(res.source, "dom")
 
 

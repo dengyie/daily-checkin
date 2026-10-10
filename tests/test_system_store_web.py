@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import http.client
 import json
 import os
@@ -408,6 +409,7 @@ class StoreTests(unittest.TestCase):
             tasks_updated = store.tasks("2026-10-10")
             self.assertEqual(tasks_updated[0]["last_balance"], 15.2)
             self.assertEqual(tasks_updated[0]["last_balance_text"], "$15.20")
+            self.assertEqual(tasks_updated[0]["last_balance_currency"], "USD")
             self.assertTrue(tasks_updated[0]["balance_updated_at"])
 
             # Check history in account_balances table
@@ -493,6 +495,35 @@ class StoreTests(unittest.TestCase):
             self.assertIn("balance", evidence)
             self.assertEqual(evidence["balance"]["amount"], 25.0)
             self.assertEqual(evidence["balance"]["raw_text"], "$25.00")
+
+    def test_extract_dom_balance_currency_detection(self):
+        """RFC-043 Finding 3: Suffix units ('元', '刀') and symbols are correctly parsed."""
+        from unittest.mock import AsyncMock
+        from stealth_checkin_runner import _extract_dom_balance
+
+        # 1. Chinese Yuan suffix
+        page_cny = AsyncMock()
+        page_cny.evaluate = AsyncMock(return_value={"raw": "当前余额: 12.50 元", "val": "12.50 元"})
+        b_cny = asyncio.run(_extract_dom_balance(page_cny))
+        self.assertIsNotNone(b_cny)
+        self.assertEqual(b_cny.amount, 12.5)
+        self.assertEqual(b_cny.currency, "CNY")
+
+        # 2. USD dollar suffix
+        page_usd = AsyncMock()
+        page_usd.evaluate = AsyncMock(return_value={"raw": "可用额度: 30.00 刀", "val": "30.00 刀"})
+        b_usd = asyncio.run(_extract_dom_balance(page_usd))
+        self.assertIsNotNone(b_usd)
+        self.assertEqual(b_usd.amount, 30.0)
+        self.assertEqual(b_usd.currency, "USD")
+
+        # 3. Points suffix
+        page_pts = AsyncMock()
+        page_pts.evaluate = AsyncMock(return_value={"raw": "剩余积分: 500 积分", "val": "500 积分", "type": "points"})
+        b_pts = asyncio.run(_extract_dom_balance(page_pts))
+        self.assertIsNotNone(b_pts)
+        self.assertEqual(b_pts.amount, 500.0)
+        self.assertEqual(b_pts.currency, "POINTS")
 
 
 class KeychainTests(unittest.TestCase):
@@ -1718,8 +1749,18 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
         self.conn.request("POST", "/api/sites/balance", json.dumps({"amount": 10.5}).encode(), headers)
         self.assertEqual(self.conn.getresponse().status, 400)
 
-        # 3. Reject invalid amount
+        # 3. Reject invalid amount (including NaN and Infinity)
         self.conn.request("POST", "/api/sites/balance", json.dumps({"name": "auto-site", "amount": "abc"}).encode(), headers)
+        self.assertEqual(self.conn.getresponse().status, 400)
+        self.conn.request("POST", "/api/sites/balance", json.dumps({"name": "auto-site", "amount": "nan"}).encode(), headers)
+        self.assertEqual(self.conn.getresponse().status, 400)
+        self.conn.request("POST", "/api/sites/balance", json.dumps({"name": "auto-site", "amount": "inf"}).encode(), headers)
+        self.assertEqual(self.conn.getresponse().status, 400)
+
+        # 3b. Reject invalid day format
+        self.conn.request("POST", "/api/sites/balance", json.dumps({"name": "auto-site", "amount": 10.0, "day": "2026/10/10"}).encode(), headers)
+        self.assertEqual(self.conn.getresponse().status, 400)
+        self.conn.request("POST", "/api/sites/balance", json.dumps({"name": "auto-site", "amount": 10.0, "day": "invalid-date"}).encode(), headers)
         self.assertEqual(self.conn.getresponse().status, 400)
 
         # 4. Successful manual balance update
@@ -1738,8 +1779,8 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
         self.assertEqual(data.get("name"), "auto-site")
         self.assertEqual(data["balance"]["amount"], 42.5)
 
-        # 5. Query history for site
-        self.conn.request("GET", "/api/sites/balance/history?site=auto-site")
+        # 5. Query history for site (including limit parameter testing)
+        self.conn.request("GET", "/api/sites/balance/history?site=auto-site&limit=10")
         h_resp = self.conn.getresponse()
         self.assertEqual(h_resp.status, 200)
         h_data = json.loads(h_resp.read())
@@ -1748,6 +1789,13 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
         self.assertEqual(h_data["history"][0]["amount"], 42.5)
         self.assertEqual(h_data["history"][0]["raw_text"], "$42.50")
         self.assertEqual(h_data["history"][0]["source"], "manual")
+
+        # 5b. Query history with invalid limit parameter gracefully defaults
+        self.conn.request("GET", "/api/sites/balance/history?site=auto-site&limit=invalid")
+        h_resp2 = self.conn.getresponse()
+        self.assertEqual(h_resp2.status, 200)
+        h_data2 = json.loads(h_resp2.read())
+        self.assertTrue(h_data2.get("ok"))
 
 
 

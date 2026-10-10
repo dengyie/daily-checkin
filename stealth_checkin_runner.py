@@ -11121,21 +11121,28 @@ async def _extract_dom_balance(page) -> BalanceEvidence | None:
         if isinstance(extracted, dict):
             raw = str(extracted.get("raw") or "").strip()
             val_str = str(extracted.get("val") or "").replace(",", "").strip()
-            m_cur = re.search(r"^([¥$€￥])", val_str)
+            raw_combined = (raw + " " + val_str).lower()
+            m_cur = re.search(r"([¥$€￥])", val_str)
             cur = "USD"
             if m_cur:
                 sym = m_cur.group(1)
                 cur = "CNY" if sym in ("¥", "￥") else ("EUR" if sym == "€" else "USD")
-                num_str = val_str[1:].strip()
-            else:
-                num_str = val_str
-            # 清理后缀单位
-            num_str = re.sub(r"[^\d.]", "", num_str)
-            try:
-                amt = float(num_str) if num_str else None
-            except ValueError:
-                amt = None
-            if extracted.get("type") == "points":
+            elif "元" in raw_combined or "cny" in raw_combined or "rmb" in raw_combined:
+                cur = "CNY"
+            elif "€" in raw_combined or "eur" in raw_combined:
+                cur = "EUR"
+            elif "刀" in raw_combined or "$" in raw_combined or "usd" in raw_combined or "token" in raw_combined:
+                cur = "USD"
+
+            # 提取干净的浮点数部分
+            m_num = re.search(r"(\d+(?:\.\d+)?)", val_str)
+            amt = None
+            if m_num:
+                try:
+                    amt = float(m_num.group(1))
+                except ValueError:
+                    amt = None
+            if extracted.get("type") == "points" or "积分" in raw_combined or "point" in raw_combined:
                 cur = "POINTS"
             return BalanceEvidence(
                 amount=amt,

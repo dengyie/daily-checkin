@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -389,7 +390,14 @@ class CheckinWebApp:
                         self.send_json({"error": "site parameter required"}, HTTPStatus.BAD_REQUEST)
                         return
                     site_name = unquote(site_name_raw).strip()
-                    history = app.store.get_site_balance_history(site_name)
+                    limit_raw = (params.get("limit") or [None])[0]
+                    limit = 30
+                    if limit_raw:
+                        try:
+                            limit = max(1, min(int(limit_raw), 100))
+                        except (ValueError, TypeError):
+                            limit = 30
+                    history = app.store.get_site_balance_history(site_name, limit=limit)
                     self.send_json({"ok": True, "site": site_name, "history": history})
                     return
                 self.send_error(HTTPStatus.NOT_FOUND)
@@ -512,11 +520,15 @@ class CheckinWebApp:
                         if amount_raw is not None and str(amount_raw).strip() != "":
                             try:
                                 amount = float(amount_raw)
+                                if not math.isfinite(amount):
+                                    raise ValueError("amount must be a finite number")
                             except (ValueError, TypeError):
-                                raise ValueError("amount must be a valid number")
+                                raise ValueError("amount must be a valid finite number")
                         currency = str(body.get("currency") or "USD").strip().upper()
                         raw_text = str(body.get("raw_text") or "").strip()
                         day = str(body.get("day") or "").strip()
+                        if day and not re.fullmatch(r"^\d{4}-\d{2}-\d{2}$", day):
+                            raise ValueError(f"invalid day format (expected YYYY-MM-DD): {day}")
                         res = app.store.update_site_balance_manual(
                             name,
                             amount=amount,
