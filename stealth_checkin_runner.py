@@ -11000,29 +11000,111 @@ def apply_attribution(result: CheckinResult) -> CheckinResult:
 # Account Balance & Quota Extraction (RFC-043)
 # ---------------------------------------------------------------------------
 
+def _extract_reward_from_text(text: str) -> str:
+    """Extract check-in reward/gain text (e.g. '+BTC 0.84', '+$0.50', '罐头+49.71', '+1 积分')."""
+    if not text:
+        return ""
+    # 特别处理 ilovecat 双项 (摸猫+占卜) 罐头累加
+    cans = re.findall(r"罐头\+([\d.]+)", text)
+    if cans:
+        try:
+            total_can = sum(float(c) for c in cans)
+            return f"罐头+{total_can:.2f}"
+        except Exception:
+            return f"罐头+{cans[0]}"
+
+    units = r"(?:元|刀|tokens?|BTC|积分|点|罐头|个鸡腿|鸡腿|铜币|银币|金币)"
+    patterns = [
+        # 1. "今天 +BTC 0.8435" 或 "今日 +$0.50" 或 "今天 +0.50 刀"
+        rf"(?:今天|今日)\s*\+\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
+        # 2. "签到成功获得 0.50 元" 或 "今日签到获得 2 个鸡腿"
+        rf"(?:签到成功|今日签到|打卡成功|签到|已成功签到)\s*[:：,，!！]?\s*(?:获得|奖励|赠送|获得收益)\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
+        # 3. GLaDOS "Got 1 Points"
+        r"(?:Checkin!\s*Got|Got)\s*(\d+\s*Points?)",
+        # 4. "获得 2 个鸡腿" 或 "获得鸡腿 5 个"
+        rf"(?:获得|奖励|赠送)\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units})",
+        rf"(?:获得|奖励|赠送)\s*({units}\s*[\d.]+\s*(?:个|点|枚)?)",
+        # 5. 通用 "+$0.50" 或 "+BTC 0.8435" 或 "+1 积分"
+        rf"\+\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
+    ]
+    for p in patterns:
+        m = re.search(p, text, re.IGNORECASE)
+        if m:
+            val = m.group(1).strip()
+            if not val:
+                continue
+            if not val.startswith("+") and not any(k in val for k in ["罐头", "鸡腿"]):
+                return f"+{val}"
+            return val
+    return ""
+
+
 async def _extract_newapi_balance(page) -> BalanceEvidence | None:
-    """Fetch user quota from New-API / One-API /api/user/self in page context."""
+    """Fetch user quota from New-API / One-API in page context.
+    
+    Robust strategy:
+    1. Read localStorage['user'] to directly parse cached quota (immune to 401).
+    2. Fallback to fetch('/api/user/self') with headers Authorization / New-Api-User if available.
+    3. Inspect page text for today's checkin reward increment.
+    """
     try:
         quota_data = await page.evaluate(
-            """async () => {
+            r"""async () => {
+                let quota = null;
+                let rewardText = '';
+
+                // 1. 尝试从 localStorage 读取已缓存的用户信息
                 try {
-                    const r = await fetch('/api/user/self', { credentials: 'include' });
-                    if (!r.ok) return null;
-                    const j = await r.json();
-                    if (!j || !j.data) return null;
-                    if (typeof j.data.quota === 'number') {
-                        return { quota: j.data.quota };
+                    const uStr = localStorage.getItem('user');
+                    if (uStr) {
+                        const u = JSON.parse(uStr);
+                        if (u && typeof u.quota === 'number') {
+                            quota = u.quota;
+                        }
                     }
-                    return null;
-                } catch (e) {
-                    return null;
+                } catch (e) {}
+
+                // 2. 若未从缓存拿到 quota，尝试发送带鉴权头的 fetch 请求
+                if (quota === null) {
+                    try {
+                        const headers = {};
+                        const token = localStorage.getItem('token');
+                        if (token) headers['Authorization'] = 'Bearer ' + token;
+                        const uid = localStorage.getItem('uid') || localStorage.getItem('user_id');
+                        if (uid) headers['New-Api-User'] = uid;
+
+                        const r = await fetch('/api/user/self', { credentials: 'include', headers });
+                        if (r.ok) {
+                            const j = await r.json();
+                            if (j && j.data && typeof j.data.quota === 'number') {
+                                quota = j.data.quota;
+                            }
+                        }
+                    } catch (e) {}
                 }
+
+                // 3. 抓取页面可能渲染的今日签到增量文案 (如 "今天 +BTC 0.8435" 或 "今日签到 +$0.50")
+                try {
+                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                    let node;
+                    const reReward = /(?:今天|今日)\s*\+\s*[¥$￥€A-Za-z0-9.]+/i;
+                    while ((node = walker.nextNode())) {
+                        const t = (node.textContent || '').trim();
+                        if (t && t.length <= 60 && reReward.test(t)) {
+                            rewardText = t;
+                            break;
+                        }
+                    }
+                } catch (e) {}
+
+                return { quota, rewardText };
             }"""
         )
-        if isinstance(quota_data, dict) and "quota" in quota_data:
+        if isinstance(quota_data, dict) and quota_data.get("quota") is not None:
             quota = int(quota_data["quota"])
             dollars = round(quota / 500000.0, 4)
             raw_text = f"${dollars:.2f}"
+            reward_text = _extract_reward_from_text(str(quota_data.get("rewardText") or ""))
             return BalanceEvidence(
                 amount=dollars,
                 raw_text=raw_text,
@@ -11030,6 +11112,7 @@ async def _extract_newapi_balance(page) -> BalanceEvidence | None:
                 quota_raw=quota,
                 captured_at=datetime.now().isoformat(timespec="seconds"),
                 source="api",
+                reward_text=reward_text,
             )
     except Exception:
         pass
@@ -11067,6 +11150,7 @@ async def _extract_glados_balance(page) -> BalanceEvidence | None:
                 currency="POINTS",
                 captured_at=datetime.now().isoformat(timespec="seconds"),
                 source="api",
+                reward_text="+1 积分",
             )
     except Exception:
         pass
@@ -11074,7 +11158,7 @@ async def _extract_glados_balance(page) -> BalanceEvidence | None:
 
 
 async def _extract_dom_balance(page) -> BalanceEvidence | None:
-    """Fallback extractor inspecting rendered DOM text for balance or credit tokens."""
+    """Fallback extractor inspecting rendered DOM text for balance, credit tokens, and reward."""
     try:
         extracted = await page.evaluate(
             r"""() => {
@@ -11087,32 +11171,61 @@ async def _extract_dom_balance(page) -> BalanceEvidence | None:
                     const reLabelPoints = /(?:剩余积分|我的积分|当前积分|可用积分)/i;
                     const reValMoney = /([¥$€￥]\s*[\d,]+(?:\.\d+)?|[\d,]+(?:\.\d+)?\s*(?:元|刀|tokens?))/i;
                     const reValPoints = /([\d,]+(?:\.\d+)?)\s*(?:积分|points?)/i;
+                    const reReward = /(?:今天|今日)\s*\+\s*[¥$￥€A-Za-z0-9.]+|获得[\d.]+\s*(?:元|刀|积分|点|个鸡腿|罐头)/i;
+
+                    let balanceResult = null;
+                    let rewardText = '';
 
                     while ((node = walker.nextNode())) {
                         const text = (node.textContent || '').trim();
                         if (!text || text.length > 80) continue;
+
+                        if (!rewardText && reReward.test(text)) {
+                            rewardText = text;
+                        }
                         
                         // 1. 单节点内包含完整 "当前余额: $10.00"
-                        const mMoney = text.match(reMoney);
-                        if (mMoney) return { type: 'money', raw: mMoney[0], val: mMoney[1] };
-                        const mPoints = text.match(rePoints);
-                        if (mPoints) return { type: 'points', raw: mPoints[0], val: mPoints[1] };
+                        if (!balanceResult) {
+                            const mMoney = text.match(reMoney);
+                            if (mMoney) {
+                                balanceResult = { type: 'money', raw: mMoney[0], val: mMoney[1] };
+                                continue;
+                            }
+                            const mPoints = text.match(rePoints);
+                            if (mPoints) {
+                                balanceResult = { type: 'points', raw: mPoints[0], val: mPoints[1] };
+                                continue;
+                            }
 
-                        // 2. 现代组件库父级容器穿透: <span>当前余额</span> <span>¥128.50</span>
-                        if (reLabelMoney.test(text) && node.parentElement) {
-                            const pText = (node.parentElement.innerText || node.parentElement.textContent || '').trim();
-                            if (pText && pText.length <= 100) {
-                                const mP = pText.match(reMoney) || pText.match(reValMoney);
-                                if (mP) return { type: 'money', raw: mP[0], val: mP[1] };
+                            // 2. 现代组件库父级容器穿透: <span>当前余额</span> <span>¥128.50</span>
+                            if (reLabelMoney.test(text) && node.parentElement) {
+                                const pText = (node.parentElement.innerText || node.parentElement.textContent || '').trim();
+                                if (pText && pText.length <= 100) {
+                                    const mP = pText.match(reMoney) || pText.match(reValMoney);
+                                    if (mP) {
+                                        balanceResult = { type: 'money', raw: mP[0], val: mP[1] };
+                                        continue;
+                                    }
+                                }
+                            }
+                            if (reLabelPoints.test(text) && node.parentElement) {
+                                const pText = (node.parentElement.innerText || node.parentElement.textContent || '').trim();
+                                if (pText && pText.length <= 100) {
+                                    const mP = pText.match(rePoints) || pText.match(reValPoints);
+                                    if (mP) {
+                                        balanceResult = { type: 'points', raw: mP[0], val: mP[1] };
+                                        continue;
+                                    }
+                                }
                             }
                         }
-                        if (reLabelPoints.test(text) && node.parentElement) {
-                            const pText = (node.parentElement.innerText || node.parentElement.textContent || '').trim();
-                            if (pText && pText.length <= 100) {
-                                const mP = pText.match(rePoints) || pText.match(reValPoints);
-                                if (mP) return { type: 'points', raw: mP[0], val: mP[1] };
-                            }
-                        }
+                    }
+                    if (balanceResult) {
+                        balanceResult.rewardText = rewardText;
+                        return balanceResult;
+                    }
+                    if (rewardText) {
+                        return { type: 'reward_only', rewardText };
                     }
                 } catch (e) {}
                 return null;
@@ -11122,6 +11235,7 @@ async def _extract_dom_balance(page) -> BalanceEvidence | None:
             raw = str(extracted.get("raw") or "").strip()
             val_str = str(extracted.get("val") or "").replace(",", "").strip()
             raw_combined = (raw + " " + val_str).lower()
+            reward_text = _extract_reward_from_text(str(extracted.get("rewardText") or ""))
             m_cur = re.search(r"([¥$€￥])", val_str)
             cur = "USD"
             if m_cur:
@@ -11150,6 +11264,7 @@ async def _extract_dom_balance(page) -> BalanceEvidence | None:
                 currency=cur,
                 captured_at=datetime.now().isoformat(timespec="seconds"),
                 source="dom",
+                reward_text=reward_text,
             )
     except Exception:
         pass
@@ -11188,6 +11303,29 @@ async def extract_balance_safely(page, adapter: SiteAdapter) -> BalanceEvidence 
         return None
 
 
+async def _enrich_result_balance(page, adapter: SiteAdapter, result: CheckinResult) -> CheckinResult:
+    """Safely enrich a successful checkin result with balance and incremental reward evidence."""
+    if not result.ok:
+        return result
+    try:
+        result.balance = await extract_balance_safely(page, adapter)
+    except Exception:
+        pass
+    reward_candidate = _extract_reward_from_text(result.detail or "")
+    if not reward_candidate and getattr(result, "confirmation", None):
+        reward_candidate = _extract_reward_from_text(getattr(result.confirmation, "summary", "") or "")
+    if reward_candidate:
+        if result.balance is None:
+            result.balance = BalanceEvidence(
+                reward_text=reward_candidate,
+                source="detail",
+                captured_at=datetime.now().isoformat(timespec="seconds"),
+            )
+        elif not result.balance.reward_text:
+            result.balance.reward_text = reward_candidate
+    return result
+
+
 async def checkin_on_page(
     page,
     adapter: SiteAdapter,
@@ -11212,12 +11350,7 @@ async def checkin_on_page(
     )
     if PROVIDER_ENGINE == "legacy":
         result = await legacy_performer(ctx)
-        if result.ok:
-            try:
-                result.balance = await extract_balance_safely(page, adapter)
-            except Exception:
-                pass
-        return result
+        return await _enrich_result_balance(page, adapter, result)
 
     registry = ProviderRegistry(
         [WisartProvider(legacy_performer), LegacyBrowserProvider(legacy_performer)]
@@ -11237,12 +11370,7 @@ async def checkin_on_page(
             adapter=result.adapter, provider=provider.name, stage="confirm",
             action=result.action,
         )
-    if result.ok:
-        try:
-            result.balance = await extract_balance_safely(page, adapter)
-        except Exception:
-            pass
-    return result
+    return await _enrich_result_balance(page, adapter, result)
 
 
 # ---------------------------------------------------------------------------

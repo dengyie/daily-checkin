@@ -38,7 +38,7 @@ def default_db_path() -> Path:
 
 
 DEFAULT_DB = default_db_path()
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 logger = logging.getLogger("checkin.store")
 
 DEFAULT_SYSTEM_CONFIGS: dict[str, str] = {
@@ -121,6 +121,7 @@ class SystemStore:
                     last_balance REAL,
                     last_balance_text TEXT NOT NULL DEFAULT '',
                     last_balance_currency TEXT NOT NULL DEFAULT 'USD',
+                    last_reward_text TEXT NOT NULL DEFAULT '',
                     balance_updated_at TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -133,6 +134,7 @@ class SystemStore:
                     obsidian_path TEXT,
                     obsidian_name TEXT,
                     last_reason TEXT NOT NULL DEFAULT '',
+                    last_reward_text TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(day, site_id)
                 );
@@ -211,6 +213,8 @@ class SystemStore:
                     raw_text TEXT NOT NULL DEFAULT '',
                     currency TEXT NOT NULL DEFAULT 'USD',
                     source TEXT NOT NULL DEFAULT 'api',
+                    reward_amount REAL,
+                    reward_text TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     UNIQUE(site_id, day)
                 );
@@ -253,6 +257,12 @@ class SystemStore:
                 if stored_version < 8:
                     # v7 -> v8: sites last_balance_currency column
                     SystemStore._migrate_column(db, "sites", "last_balance_currency", "TEXT NOT NULL DEFAULT 'USD'")
+                if stored_version < 9:
+                    # v8 -> v9: sites last_reward_text, daily_tasks last_reward_text, account_balances reward fields
+                    SystemStore._migrate_column(db, "sites", "last_reward_text", "TEXT NOT NULL DEFAULT ''")
+                    SystemStore._migrate_column(db, "daily_tasks", "last_reward_text", "TEXT NOT NULL DEFAULT ''")
+                    SystemStore._migrate_column(db, "account_balances", "reward_amount", "REAL")
+                    SystemStore._migrate_column(db, "account_balances", "reward_text", "TEXT NOT NULL DEFAULT ''")
             db.execute(
                 "INSERT INTO meta(key,value) VALUES('schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -374,9 +384,12 @@ class SystemStore:
                            s.last_balance,
                            COALESCE(s.last_balance_text,'') last_balance_text,
                            COALESCE(s.last_balance_currency,'USD') last_balance_currency,
+                           COALESCE(s.last_reward_text,'') last_reward_text,
                            COALESCE(s.balance_updated_at,'') balance_updated_at,
                            s.created_at site_created_at,
-                           t.day,t.status,t.source,t.obsidian_path,t.last_reason,t.updated_at
+                           t.day,t.status,t.source,t.obsidian_path,t.last_reason,
+                           CASE WHEN t.last_reward_text<>'' THEN t.last_reward_text ELSE s.last_reward_text END task_reward_text,
+                           t.updated_at
                            ,COALESCE(h.status,'active') site_health_status
                            ,COALESCE(h.failures,0) site_health_failures
                            ,COALESCE(h.last_reason,'') site_health_reason
@@ -597,6 +610,12 @@ class SystemStore:
         raw_text = str(raw.get("raw_text") or "").strip()
         currency = str(raw.get("currency") or "USD").strip()
         source = str(raw.get("source") or "api").strip()
+        reward_amount = raw.get("reward_amount")
+        try:
+            reward_amount = float(reward_amount) if reward_amount is not None else None
+        except (TypeError, ValueError):
+            reward_amount = None
+        reward_text = str(raw.get("reward_text") or "").strip()
         now = self.now()
         with self.connect() as db:
             site = db.execute("SELECT id FROM sites WHERE name=?", (name,)).fetchone()
@@ -604,20 +623,34 @@ class SystemStore:
                 return
             site_id = site[0]
             db.execute(
-                """UPDATE sites SET last_balance=?, last_balance_text=?, last_balance_currency=?, balance_updated_at=?
+                """UPDATE sites SET
+                     last_balance=CASE WHEN ? IS NOT NULL THEN ? ELSE last_balance END,
+                     last_balance_text=CASE WHEN ?<>'' THEN ? ELSE last_balance_text END,
+                     last_balance_currency=CASE WHEN ?<>'' THEN ? ELSE last_balance_currency END,
+                     last_reward_text=CASE WHEN ?<>'' THEN ? ELSE last_reward_text END,
+                     balance_updated_at=?
                    WHERE id=?""",
-                (amount, raw_text, currency, now, site_id),
+                (amount, amount, raw_text, raw_text, currency, currency, reward_text, reward_text, now, site_id),
             )
+            if reward_text:
+                db.execute(
+                    """UPDATE daily_tasks SET last_reward_text=?
+                       WHERE day=? AND site_id=?""",
+                    (reward_text, day, site_id),
+                )
             db.execute(
-                """INSERT INTO account_balances(site_id, day, amount, raw_text, currency, source, created_at)
-                   VALUES(?,?,?,?,?,?,?)
+                """INSERT INTO account_balances(site_id, day, amount, raw_text, currency, source,
+                                                reward_amount, reward_text, created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(site_id, day) DO UPDATE SET
-                     amount=excluded.amount,
-                     raw_text=excluded.raw_text,
-                     currency=excluded.currency,
+                     amount=COALESCE(excluded.amount, account_balances.amount),
+                     raw_text=CASE WHEN excluded.raw_text<>'' THEN excluded.raw_text ELSE account_balances.raw_text END,
+                     currency=CASE WHEN excluded.currency<>'' THEN excluded.currency ELSE account_balances.currency END,
                      source=excluded.source,
+                     reward_amount=COALESCE(excluded.reward_amount, account_balances.reward_amount),
+                     reward_text=CASE WHEN excluded.reward_text<>'' THEN excluded.reward_text ELSE account_balances.reward_text END,
                      created_at=excluded.created_at""",
-                (site_id, day, amount, raw_text, currency, source, now),
+                (site_id, day, amount, raw_text, currency, source, reward_amount, reward_text, now),
             )
 
     def get_site_balance_history(self, name: str, limit: int = 30) -> list[dict[str, Any]]:
@@ -632,7 +665,8 @@ class SystemStore:
                 return []
             site_id = site[0]
             rows = db.execute(
-                """SELECT id, site_id, day, amount, raw_text, currency, source, created_at
+                """SELECT id, site_id, day, amount, raw_text, currency, source,
+                          reward_amount, reward_text, created_at
                    FROM account_balances
                    WHERE site_id=?
                    ORDER BY day DESC, id DESC

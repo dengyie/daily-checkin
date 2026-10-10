@@ -1467,6 +1467,8 @@ class FrontendStaticAssetIntegrityTests(unittest.TestCase):
         self.assertIn(".balance-stat-icon.coverage", self.style_css)
         self.assertIn(".balance-leaderboard-card", self.style_css)
         self.assertIn(".balance-history-badge.manual", self.style_css)
+        self.assertIn(".tile-reward-badge", self.style_css)
+        self.assertIn(".tile-balance-badge", self.style_css)
 
         # JS assertions
         self.assertIn('currentSort === "balance_desc"', self.app_js)
@@ -1476,6 +1478,133 @@ class FrontendStaticAssetIntegrityTests(unittest.TestCase):
         self.assertIn('/api/sites/balance/history', self.app_js)
         self.assertIn('site-drawer-balance-form', self.app_js)
         self.assertIn('site-drawer-balance-history-wrap', self.app_js)
+        self.assertIn('tile-reward-badge', self.app_js)
+        self.assertIn('task_reward_text', self.app_js)
+        self.assertIn('isDone && (task.task_reward_text || task.last_reward_text)', self.app_js)
+
+    def test_reward_and_balance_store_persistence(self):
+        """Schema v9: Verify last_reward_text and reward fields persist to sites and account_balances."""
+        with TemporaryDirectory() as td:
+            db_path = Path(td) / "test_reward_store.db"
+            store = SystemStore(db_path)
+            day = "2026-10-10"
+            site_name = "test-reward-site"
+            store.upsert_task(day, site_name, "https://example.com")
+
+            from checkin_core.models import BalanceEvidence
+            evidence = BalanceEvidence(
+                amount=12.50,
+                raw_text="$12.50",
+                currency="USD",
+                source="api",
+                reward_text="+BTC 0.84",
+            )
+            store.record_site_balance(site_name, day, evidence)
+
+            tasks = store.tasks(day)
+            matched = next((t for t in tasks if t["name"] == site_name), None)
+            self.assertIsNotNone(matched)
+            self.assertEqual(matched.get("last_reward_text"), "+BTC 0.84")
+            self.assertEqual(matched.get("task_reward_text"), "+BTC 0.84")
+            self.assertEqual(matched.get("last_balance_text"), "$12.50")
+
+            history = store.get_site_balance_history(site_name)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0].get("reward_text"), "+BTC 0.84")
+
+    def test_partial_balance_update_does_not_wipe_existing_balance(self):
+        """P1 root-cause regression: reward-only updates must not wipe existing balances to NULL or empty string."""
+        with TemporaryDirectory() as td:
+            db_path = Path(td) / "test_p1_store.db"
+            store = SystemStore(db_path)
+            day = "2026-10-10"
+            site_name = "p1-balance-site"
+            store.upsert_task(day, site_name, "https://example.com")
+
+            from checkin_core.models import BalanceEvidence
+            # First, record a full account balance
+            store.record_site_balance(
+                site_name,
+                day,
+                BalanceEvidence(amount=25.0, raw_text="$25.00", currency="USD", source="api")
+            )
+            site = store.tasks(day)[0]
+            self.assertEqual(site["last_balance"], 25.0)
+            self.assertEqual(site["last_balance_text"], "$25.00")
+
+            # Second, record a reward-only update where amount is None and raw_text is empty
+            store.record_site_balance(
+                site_name,
+                day,
+                BalanceEvidence(amount=None, raw_text="", currency="USD", reward_text="+10 积分", source="detail")
+            )
+            site = store.tasks(day)[0]
+            # Existing balance must be preserved!
+            self.assertEqual(site["last_balance"], 25.0)
+            self.assertEqual(site["last_balance_text"], "$25.00")
+            self.assertEqual(site["last_reward_text"], "+10 积分")
+
+            # History on conflict should also retain amount and raw_text
+            history = store.get_site_balance_history(site_name)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["amount"], 25.0)
+            self.assertEqual(history[0]["raw_text"], "$25.00")
+            self.assertEqual(history[0]["reward_text"], "+10 积分")
+
+    def test_tasks_query_empty_task_reward_text_falls_back_to_site_reward(self):
+        """P2 root-cause regression: empty string in task.last_reward_text must fall back to site.last_reward_text."""
+        with TemporaryDirectory() as td:
+            db_path = Path(td) / "test_p2_store.db"
+            store = SystemStore(db_path)
+            day = "2026-10-10"
+            site_name = "p2-fallback-site"
+            store.upsert_task("2026-10-09", site_name, "https://example.com")
+
+            from checkin_core.models import BalanceEvidence
+            # Record reward on site for yesterday
+            store.record_site_balance(
+                site_name,
+                "2026-10-09",
+                BalanceEvidence(amount=10.0, raw_text="$10.00", reward_text="+BTC 0.84")
+            )
+
+            # Today's task is created with empty task_reward_text (default '')
+            store.materialize_day(day)
+            tasks = store.tasks(day)
+            matched = next(t for t in tasks if t["name"] == site_name)
+            self.assertEqual(matched["task_reward_text"], "+BTC 0.84")
+
+            # If today's task has its own reward, it overrides site reward
+            store.record_site_balance(
+                site_name,
+                day,
+                BalanceEvidence(reward_text="+BTC 1.20")
+            )
+            tasks = store.tasks(day)
+            matched = next(t for t in tasks if t["name"] == site_name)
+            self.assertEqual(matched["task_reward_text"], "+BTC 1.20")
+
+    def test_enrich_result_balance_uses_confirmation_summary(self):
+        """P2 root-cause regression: confirmation.summary must be parsed when result.detail is empty."""
+        import asyncio
+        from checkin_core.models import ConfirmationEvidence
+        from stealth_checkin_runner import CheckinResult, SiteAdapter, _enrich_result_balance
+
+        class DummyAdapter:
+            name = "dummy-site"
+            kind = "dummy"
+            url = "https://example.com"
+
+        conf = ConfirmationEvidence(
+            kind="dom_strong",
+            source="dom",
+            summary="签到成功！获得鸡腿 5 个",
+            observed_at="2026-10-10T12:00:00",
+        )
+        result = CheckinResult(status="OK", detail="", confirmation=conf)
+        enriched = asyncio.run(_enrich_result_balance(None, DummyAdapter(), result))
+        self.assertIsNotNone(enriched.balance)
+        self.assertEqual(enriched.balance.reward_text, "鸡腿 5 个")
 
 
 

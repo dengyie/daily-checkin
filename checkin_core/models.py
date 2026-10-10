@@ -54,6 +54,8 @@ class BalanceEvidence:
     quota_raw: int | None = None
     captured_at: str = ""
     source: str = "api"
+    reward_amount: float | None = None
+    reward_text: str = ""
 
 
 @dataclass
