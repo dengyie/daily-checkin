@@ -615,6 +615,58 @@ class SystemStore:
                 (site_id, day, amount, raw_text, currency, source, now),
             )
 
+    def get_site_balance_history(self, name: str, limit: int = 30) -> list[dict[str, Any]]:
+        """Return historical balance records for a site."""
+        with self.connect() as db:
+            site = db.execute("SELECT id FROM sites WHERE name=?", (name,)).fetchone()
+            if not site:
+                return []
+            site_id = site[0]
+            rows = db.execute(
+                """SELECT id, site_id, day, amount, raw_text, currency, source, created_at
+                   FROM account_balances
+                   WHERE site_id=?
+                   ORDER BY day DESC, id DESC
+                   LIMIT ?""",
+                (site_id, max(1, min(limit, 100))),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_site_balance_manual(
+        self,
+        name: str,
+        amount: float | None,
+        currency: str = "USD",
+        raw_text: str = "",
+        day: str = "",
+        source: str = "manual",
+    ) -> dict[str, Any] | None:
+        """Manually update or adjust a site balance and record to daily history."""
+        day = day or self.now()[:10]
+        currency = (currency or "USD").strip().upper()
+        if not raw_text and amount is not None:
+            if currency == "USD":
+                raw_text = f"${amount:.2f}"
+            elif currency == "CNY":
+                raw_text = f"¥{amount:.2f}"
+            elif currency == "POINTS":
+                formatted_amt = int(amount) if amount.is_integer() else f"{amount:.1f}"
+                raw_text = f"{formatted_amt} 积分"
+            else:
+                raw_text = f"{amount:.2f} {currency}"
+        evidence = {
+            "amount": amount,
+            "raw_text": raw_text,
+            "currency": currency,
+            "source": source,
+        }
+        with self.connect() as db:
+            site = db.execute("SELECT id FROM sites WHERE name=?", (name,)).fetchone()
+            if not site:
+                raise ValueError(f"site not found: {name}")
+        self.record_site_balance(name, day, evidence)
+        return evidence
+
     def finish_run(self, run_id: int, exit_code: int, reason: str) -> None:
         with self.connect() as db:
             db.execute(

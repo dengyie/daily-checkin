@@ -37,6 +37,7 @@ const ICONS = {
   'code': '<path d="m8 9-3 3 3 3m8-6 3 3-3 3M14 5l-4 14"/>',
   'coin': '<circle cx="12" cy="12" r="9"/><path d="M14.8 9A2 2 0 0 0 13 8h-2a2 2 0 1 0 0 4h2a2 2 0 1 1 0 4h-2a2 2 0 0 1-1.8-1"/><path d="M12 6v2m0 8v2"/>',
   'copy': '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+  'edit': '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',
   'eye': '<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/>',
   'eye-off': '<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24m-3.12-6.36A9.75 9.75 0 0 1 12 5.5c4.76 0 8.27 3.32 9.5 6.5a11.99 11.99 0 0 1-3.18 4.36M6.53 6.53C4.24 7.92 2.76 10.15 2.5 12c1.23 3.18 4.74 6.5 9.5 6.5 1.57 0 3.03-.36 4.35-1m3.65 3.65L2 2"/>',
   'external-link': '<path d="M14 5h5v5M19 5l-8 8M19 14v3a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h3"/>',
@@ -844,6 +845,150 @@ function openSiteDetailDrawer(siteName) {
     });
   }
 
+  // 2.5 Balance & Ledger Pane (RFC-043 资产快照、历史明细与手动调整)
+  const paneBalance = $("#site-pane-balance");
+  if (paneBalance) {
+    const hasBalance = task.last_balance != null || (task.last_balance_text && task.last_balance_text.trim() !== "");
+    const currentBalanceText = task.last_balance_text || (task.last_balance != null ? `$${Number(task.last_balance).toFixed(2)}` : "");
+    paneBalance.innerHTML = `
+      <div class="tile-info-grid tile-info-col1 mb-md">
+        <div>
+          <div class="tile-prop-label">当前账户余额快照 (CURRENT BALANCE)</div>
+          <div class="tile-prop-val">
+            ${hasBalance ? `
+              <span class="tile-balance-badge lg">${uiIcon("coin", { size: 14 })} <strong>${esc(currentBalanceText)}</strong></span>
+              <span class="tile-prop-label text-xs ml-xs">(${esc(task.balance_updated_at || '最近更新')})</span>
+            ` : `
+              <span class="tile-prop-label">尚未采集或录入该站点余额数据</span>
+            `}
+          </div>
+        </div>
+        <div>
+          <div class="tile-prop-label">数值额度解析 (PARSED AMOUNT)</div>
+          <div class="tile-prop-val font-mono">${task.last_balance != null ? Number(task.last_balance).toFixed(4) : "-"}</div>
+        </div>
+      </div>
+
+      <!-- Manual Balance Adjustment Form -->
+      <div class="content-card mb-md">
+        <div class="card-title mb-sm">${uiIcon("edit", { size: 15 })} 手动调整与录入账户资产 (Manual Adjustment)</div>
+        <form id="site-drawer-balance-form">
+          <input type="hidden" name="name" value="${esc(task.name)}">
+          <div class="form-group-item">
+            <label for="site-balance-amount">资产金额 / 积分数值 *</label>
+            <input type="number" step="any" id="site-balance-amount" name="amount" placeholder="例如: 15.50 或 500" value="${task.last_balance != null ? Number(task.last_balance) : ""}" required>
+          </div>
+          <div class="form-group-item">
+            <label for="site-balance-currency">计费币种 / 单位</label>
+            <select id="site-balance-currency" name="currency">
+              <option value="USD">USD ($ 美元 · New API / One API 标准)</option>
+              <option value="CNY">CNY (¥ 人民币 · 国内平台)</option>
+              <option value="POINTS">POINTS (积分 / 算力点 · GLaDOS 等)</option>
+              <option value="OTHER">其他币种 / 自定义</option>
+            </select>
+          </div>
+          <div class="form-group-item">
+            <label for="site-balance-raw-text">自定义展示文案 (可选，留空则按币种自动生成)</label>
+            <input type="text" id="site-balance-raw-text" name="raw_text" placeholder="例如: $15.50 / 500 积分 (剩 30 天)" value="${esc(task.last_balance_text || "")}">
+          </div>
+          <div class="form-group-item">
+            <label for="site-balance-day">归属记录日期 (可选，留空默认今日)</label>
+            <input type="text" id="site-balance-day" name="day" placeholder="例如: 2026-10-10">
+          </div>
+          <button type="submit" class="btn primary sm block">${uiIcon("coin", { size: 13 })} 保存资产调整记录</button>
+        </form>
+      </div>
+
+      <!-- Balance History Records Table -->
+      <div class="content-card">
+        <div class="card-title mb-sm">${uiIcon("history", { size: 15 })} 资产变动时序流水账本 (Ledger History)</div>
+        <div id="site-drawer-balance-history-wrap">
+          <div class="empty-cell">正在读取该站点资产历史记录...</div>
+        </div>
+      </div>
+    `;
+
+    // Guess default currency for selector
+    const curSelect = $("#site-balance-currency");
+    if (curSelect && task.last_balance_text) {
+      const lower = task.last_balance_text.toLowerCase();
+      if (lower.includes("¥") || lower.includes("cny") || lower.includes("元")) {
+        curSelect.value = "CNY";
+      } else if (lower.includes("积分") || lower.includes("point") || lower.includes("点")) {
+        curSelect.value = "POINTS";
+      } else if (lower.includes("$") || lower.includes("usd")) {
+        curSelect.value = "USD";
+      }
+    }
+
+    // Bind manual update form submit
+    $("#site-drawer-balance-form")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        const formData = new FormData(e.target);
+        const formObj = Object.fromEntries(formData);
+        const res = await api("/api/sites/balance", formObj);
+        showToast(`站点「${task.name}」资产已更新为 ${res.balance?.raw_text || formObj.amount}`, "success");
+        await load();
+        openSiteDetailDrawer(siteName);
+        switchSiteDrawerTab("balance");
+      } catch (err) {
+        showToast(`更新资产失败: ${err.message}`, "error");
+      }
+    });
+
+    // Fetch balance history records
+    api(`/api/sites/balance/history?site=${encodeURIComponent(siteName)}`, null, "GET")
+      .then((res) => {
+        const historyWrap = $("#site-drawer-balance-history-wrap");
+        if (!historyWrap) return;
+        const list = (res && res.history) || [];
+        if (!list.length) {
+          historyWrap.innerHTML = `<div class="empty-cell">暂无该站点的资产变动记录</div>`;
+          return;
+        }
+        historyWrap.innerHTML = `
+          <div class="table-responsive balance-history-table-wrap">
+            <table class="modern-table">
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>变动快照</th>
+                  <th>解析数值</th>
+                  <th>币种</th>
+                  <th>记录来源</th>
+                  <th>记录时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${list.map((h) => {
+                  const src = (h.source || "api").toLowerCase();
+                  const srcBadgeClass = src === "manual" ? "manual" : src === "dom" ? "dom" : "api";
+                  const srcText = src === "manual" ? "手动调整" : src === "dom" ? "页面解析" : "接口采集";
+                  return `
+                    <tr>
+                      <td><strong>${esc(h.day || "-")}</strong></td>
+                      <td><span class="tile-balance-badge">${esc(h.raw_text || "-")}</span></td>
+                      <td class="font-mono">${h.amount != null ? Number(h.amount).toFixed(2) : "-"}</td>
+                      <td><code>${esc(h.currency || "USD")}</code></td>
+                      <td><span class="balance-history-badge ${srcBadgeClass}">${srcText}</span></td>
+                      <td class="text-xs text-muted font-mono">${esc(h.created_at || "-")}</td>
+                    </tr>
+                  `;
+                }).join("")}
+              </tbody>
+            </table>
+          </div>
+        `;
+      })
+      .catch((err) => {
+        const historyWrap = $("#site-drawer-balance-history-wrap");
+        if (historyWrap) {
+          historyWrap.innerHTML = `<div class="empty-cell text-danger">读取资产历史记录失败: ${esc(err.message)}</div>`;
+        }
+      });
+  }
+
   // 3. Health & Diagnostics Pane
   const paneHealth = $("#site-pane-health");
   if (paneHealth) {
@@ -1304,6 +1449,8 @@ function getFilteredTasks() {
     list = list.filter((t) => (t.status === "failed" || t.status === "FAIL") && t.site_health_status !== "suppressed");
   } else if (currentFilter === "确定性失败抑制" || currentFilter === "熔断") {
     list = list.filter((t) => t.site_health_status === "suppressed");
+  } else if (currentFilter === "含资产") {
+    list = list.filter((t) => t.last_balance != null || (t.last_balance_text && t.last_balance_text.trim() !== ""));
   } else if (currentFilter !== "全部") {
     // Check if filtering by category tag
     list = list.filter((t) => categorizeSite(t) === currentFilter);
@@ -1316,12 +1463,25 @@ function getFilteredTasks() {
       (t.url && t.url.toLowerCase().includes(q)) ||
       (t.provider && t.provider.toLowerCase().includes(q)) ||
       (categorizeSite(t).toLowerCase().includes(q)) ||
+      (t.last_balance_text && t.last_balance_text.toLowerCase().includes(q)) ||
       (t.last_reason && t.last_reason.toLowerCase().includes(q))
     );
   }
 
   // Sorting logic
   list.sort((a, b) => {
+    if (currentSort === "balance_desc") {
+      const balA = a.last_balance != null ? Number(a.last_balance) : -Infinity;
+      const balB = b.last_balance != null ? Number(b.last_balance) : -Infinity;
+      if (balA !== balB) return balB - balA;
+      return (a.name || "").localeCompare(b.name || "", "zh-CN", { numeric: true, sensitivity: "base" });
+    }
+    if (currentSort === "balance_asc") {
+      const balA = a.last_balance != null ? Number(a.last_balance) : Infinity;
+      const balB = b.last_balance != null ? Number(b.last_balance) : Infinity;
+      if (balA !== balB) return balA - balB;
+      return (a.name || "").localeCompare(b.name || "", "zh-CN", { numeric: true, sensitivity: "base" });
+    }
     if (currentSort === "import_desc") {
       // Newest import first: by site_created_at descending, fallback to site_id desc
       const timeA = a.site_created_at || "";
@@ -1537,13 +1697,35 @@ function getTaskFilterCount(filterKey, tasks, counts) {
   if (filterKey === "已完成") return counts.done;
   if (filterKey === "失败") return counts.failed;
   if (filterKey === "熔断" || filterKey === "确定性失败抑制") return counts.suppressed;
+  if (filterKey === "含资产") return counts.withBalance || 0;
   return tasks.filter((t) => categorizeSite(t) === filterKey).length;
 }
 
 function computeTaskStats() {
   const autoTasks = (state.tasks || []).filter((t) => !isManualTask(t));
   const totalTasks = autoTasks.length;
-  const counts = { pending: 0, done: 0, failed: 0, suppressed: 0 };
+  const counts = { pending: 0, done: 0, failed: 0, suppressed: 0, withBalance: 0 };
+  let totalUsd = 0;
+  let totalCny = 0;
+  let totalPoints = 0;
+
+  (state.tasks || []).forEach((task) => {
+    const hasBal = task.last_balance != null || (task.last_balance_text && task.last_balance_text.trim() !== "");
+    if (hasBal) counts.withBalance++;
+
+    if (task.last_balance != null) {
+      const amt = Number(task.last_balance);
+      const text = (task.last_balance_text || "").toLowerCase();
+      if (text.includes("¥") || text.includes("cny") || text.includes("元")) {
+        totalCny += amt;
+      } else if (text.includes("积分") || text.includes("point") || text.includes("点")) {
+        totalPoints += amt;
+      } else {
+        totalUsd += amt;
+      }
+    }
+  });
+
   autoTasks.forEach((task) => {
     if (task.site_health_status === "suppressed") counts.suppressed++;
     if (task.status === "done" || task.status === "OK" || task.status === "ALREADY") counts.done++;
@@ -1551,7 +1733,9 @@ function computeTaskStats() {
     else counts.pending++;
   });
   const successRate = totalTasks ? Math.round((counts.done / totalTasks) * 100) : 0;
-  return { autoTasks, totalTasks, counts, successRate };
+  const totalAllSites = (state.tasks || []).length;
+  const balanceCoveragePct = totalAllSites ? Math.round((counts.withBalance / totalAllSites) * 100) : 0;
+  return { autoTasks, totalTasks, counts, successRate, totalUsd, totalCny, totalPoints, balanceCoveragePct };
 }
 
 function renderGlobalBadges(stats) {
@@ -1572,11 +1756,106 @@ function renderGlobalBadges(stats) {
   $("#overview-health-count").textContent = String(counts.suppressed);
 }
 
-function renderOverviewView() {
+function renderOverviewView(stats = computeTaskStats()) {
   const overviewTrendChart = $("#overview-trend-chart");
   if (overviewTrendChart) {
     overviewTrendChart.innerHTML = generateTrendSvg(state.history || [], true);
   }
+
+  // RFC-043: Account Balances & Quota Overview
+  const overviewBalanceBody = $("#overview-balance-body");
+  if (overviewBalanceBody) {
+    const allTasks = state.tasks || [];
+    const withBalTasks = allTasks.filter((t) => t.last_balance != null || (t.last_balance_text && t.last_balance_text.trim() !== ""));
+    const { totalUsd, totalCny, totalPoints, counts, balanceCoveragePct } = stats;
+
+    // Top 6 balance sites (highest numeric value first)
+    const topSites = [...withBalTasks]
+      .filter((t) => t.last_balance != null)
+      .sort((a, b) => Number(b.last_balance) - Number(a.last_balance))
+      .slice(0, 6);
+
+    overviewBalanceBody.innerHTML = `
+      <div class="balance-stat-grid">
+        <div class="balance-stat-box">
+          <div class="balance-stat-icon usd">${uiIcon("coin", { size: 22 })}</div>
+          <div class="balance-stat-content">
+            <div class="balance-stat-val">$${totalUsd.toFixed(2)}</div>
+            <div class="balance-stat-label">美元资产聚合 (USD · New API)</div>
+          </div>
+        </div>
+        <div class="balance-stat-box">
+          <div class="balance-stat-icon cny">${uiIcon("coin", { size: 22 })}</div>
+          <div class="balance-stat-content">
+            <div class="balance-stat-val">¥${totalCny.toFixed(2)}</div>
+            <div class="balance-stat-label">人民币余额汇总 (CNY 国内平台)</div>
+          </div>
+        </div>
+        <div class="balance-stat-box">
+          <div class="balance-stat-icon points">${uiIcon("sparkles", { size: 22 })}</div>
+          <div class="balance-stat-content">
+            <div class="balance-stat-val">${Math.round(totalPoints)}</div>
+            <div class="balance-stat-label">积分与点数总计 (POINTS)</div>
+          </div>
+        </div>
+        <div class="balance-stat-box">
+          <div class="balance-stat-icon coverage">${uiIcon("shield-check", { size: 22 })}</div>
+          <div class="balance-stat-content">
+            <div class="balance-stat-val">${counts.withBalance} / ${allTasks.length} <span class="text-xs text-muted">(${balanceCoveragePct}%)</span></div>
+            <div class="balance-stat-label">资产采集覆盖率 (Quota Coverage)</div>
+          </div>
+        </div>
+      </div>
+
+      ${topSites.length ? `
+        <div class="balance-leaderboard-card">
+          <div class="balance-leaderboard-head">
+            <div class="balance-leaderboard-title">
+              ${uiIcon("trending-up", { size: 16, className: "text-success" })}
+              <span>头部资产站点快照 (Top Balance Sites)</span>
+            </div>
+            <span class="text-xs text-muted">点击卡片可直接调出资产流水与抽屉调整</span>
+          </div>
+          <div class="balance-top-items-grid">
+            ${topSites.map((s) => `
+              <div class="balance-top-item" data-open-balance-site="${esc(s.name)}">
+                <div class="balance-top-item-name" title="${esc(s.name)}">
+                  <strong>${esc(s.name)}</strong>
+                </div>
+                <div>
+                  <span class="tile-balance-badge">${uiIcon("coin", { size: 12 })} ${esc(s.last_balance_text || `$${Number(s.last_balance).toFixed(2)}`)}</span>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      ` : `
+        <div class="empty-cell">
+          暂无已记录资产的站点，可通过每日自动化签到采集或在站点抽屉中手动录入。
+        </div>
+      `}
+    `;
+
+    overviewBalanceBody.querySelectorAll("[data-open-balance-site]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const name = el.getAttribute("data-open-balance-site");
+        if (name) {
+          openSiteDetailDrawer(name);
+          switchSiteDrawerTab("balance");
+        }
+      });
+    });
+  }
+
+  // Jump to balance tasks button
+  $("#jump-to-balance-tasks-btn")?.addEventListener("click", () => {
+    currentFilter = "含资产";
+    currentSort = "balance_desc";
+    const sortSelect = $("#tasks-sort-select");
+    if (sortSelect) sortSelect.value = "balance_desc";
+    switchView("tasks");
+    render("tasks");
+  });
 
   const overviewRunsTbody = $("#overview-runs-tbody");
   if (overviewRunsTbody) {
@@ -1726,6 +2005,7 @@ function renderTasksView(stats) {
       `失败 (${counts.failed})`,
     ];
     if (counts.suppressed > 0) suggestions.push(`熔断 (${counts.suppressed})`);
+    if (counts.withBalance > 0) suggestions.push(`含资产 (${counts.withBalance})`);
     chips.setAttribute("suggestions", JSON.stringify(suggestions));
     const activeCount = getTaskFilterCount(currentFilter, autoTasks, counts);
     chips.setAttribute("active", `${currentFilter} (${activeCount})`);
@@ -1972,7 +2252,7 @@ function render(target = null) {
 
   // Full render pipeline
   renderGlobalBadges(stats);
-  renderOverviewView();
+  renderOverviewView(stats);
   renderTasksView(stats);
   renderManualView();
   renderHistoryView(stats);

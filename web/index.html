@@ -211,6 +211,21 @@
             </div>
           </div>
 
+          <!-- Overview Balance & Assets Card (今日账户资产与配额多维大盘) -->
+          <div class="content-card mt-md" id="overview-balance-card">
+            <div class="content-card-head">
+              <div class="card-title">
+                <span><ui-icon name="coin" size="16"></ui-icon> 账户资产与额度多维统计 (Asset & Quota Overview)</span>
+              </div>
+              <button class="btn sm" id="jump-to-balance-tasks-btn">
+                <ui-icon name="clipboard-list" size="13"></ui-icon> 筛选含资产站点 <ui-icon name="arrow-right" size="13"></ui-icon>
+              </button>
+            </div>
+            <div id="overview-balance-body">
+              <div class="empty-cell">加载资产统计中...</div>
+            </div>
+          </div>
+
           <!-- Overview AI Inspection Card (今日 AI 质检与自愈决策总览) -->
           <div class="content-card mt-md" id="overview-ai-card">
             <div class="content-card-head">
@@ -267,6 +282,8 @@
                 <select id="tasks-sort-select" class="sort-field-select" title="选择站点排序规则">
                   <option value="import_desc">导入时间 (从新到旧)</option>
                   <option value="import_asc">导入时间 (从旧到新)</option>
+                  <option value="balance_desc">账户资产 (从多到少)</option>
+                  <option value="balance_asc">账户资产 (从少到多)</option>
                   <option value="alpha_asc">首字母 (A → Z / 拼音升序)</option>
                   <option value="alpha_desc">首字母 (Z → A / 拼音降序)</option>
                   <option value="status">运行状态 (待办/失败优先)</option>
@@ -957,6 +974,7 @@
     <div class="drawer-tabs-bar">
       <button class="drawer-tab-btn is-active" data-site-tab="config"><ui-icon name="globe" size="14"></ui-icon> 站点资料与配置</button>
       <button class="drawer-tab-btn" data-site-tab="credentials"><ui-icon name="key" size="14"></ui-icon> Keychain 凭据</button>
+      <button class="drawer-tab-btn" data-site-tab="balance"><ui-icon name="coin" size="14"></ui-icon> 资产与额度流水</button>
       <button class="drawer-tab-btn" data-site-tab="health"><ui-icon name="shield" size="14"></ui-icon> 健康度与诊断</button>
       <button class="drawer-tab-btn" data-site-tab="history"><ui-icon name="history" size="14"></ui-icon> 历史签到流水</button>
     </div>
@@ -965,6 +983,7 @@
     <div class="drawer-body">
       <div class="drawer-tab-pane is-active" id="site-pane-config"></div>
       <div class="drawer-tab-pane" id="site-pane-credentials"></div>
+      <div class="drawer-tab-pane" id="site-pane-balance"></div>
       <div class="drawer-tab-pane" id="site-pane-health"></div>
       <div class="drawer-tab-pane" id="site-pane-history"></div>
     </div>

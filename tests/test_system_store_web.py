@@ -432,6 +432,37 @@ class StoreTests(unittest.TestCase):
                 self.assertEqual(rows_repeat[0]["amount"], 16.5)
                 self.assertEqual(rows_repeat[0]["raw_text"], "$16.50")
 
+    def test_get_site_balance_history_and_update_manual(self):
+        """RFC-043: get_site_balance_history returns ledger rows; update_site_balance_manual records adjustment."""
+        with TemporaryDirectory() as td:
+            db_path = Path(td) / "system.db"
+            store = SystemStore(db_path)
+            store.upsert_task("2026-10-10", "SiteLedger", "https://ledger.example")
+
+            # Nonexistent site returns empty history and raises on manual update
+            self.assertEqual(store.get_site_balance_history("NonExistent"), [])
+            with self.assertRaises(ValueError):
+                store.update_site_balance_manual("NonExistent", 10.0)
+
+            # Record manual balance
+            res = store.update_site_balance_manual("SiteLedger", 28.5, currency="USD", day="2026-10-10")
+            self.assertEqual(res["amount"], 28.5)
+            self.assertEqual(res["currency"], "USD")
+            self.assertEqual(res["raw_text"], "$28.50")
+            self.assertEqual(res["source"], "manual")
+
+            # Snapshot updated
+            tasks = store.tasks("2026-10-10")
+            self.assertEqual(tasks[0]["last_balance"], 28.5)
+            self.assertEqual(tasks[0]["last_balance_text"], "$28.50")
+
+            # History query
+            hist = store.get_site_balance_history("SiteLedger")
+            self.assertEqual(len(hist), 1)
+            self.assertEqual(hist[0]["day"], "2026-10-10")
+            self.assertEqual(hist[0]["amount"], 28.5)
+            self.assertEqual(hist[0]["source"], "manual")
+
     def test_add_run_item_persists_balance_in_evidence_json(self):
         """RFC-043: run_items.evidence_json includes serialized balance evidence."""
         with TemporaryDirectory() as td:
@@ -1385,6 +1416,36 @@ class FrontendStaticAssetIntegrityTests(unittest.TestCase):
         self.assertNotIn("class KpiCardElement", self.app_js)
         self.assertNotIn("class SiteTileElement", self.app_js)
 
+    def test_balance_overview_and_sort_markup_integrity(self):
+        """RFC-043: Verify markup, styling, and JS logic for balance overview, sorting and drawer."""
+        # HTML assertions
+        self.assertIn('id="overview-balance-card"', self.index_html)
+        self.assertIn('id="overview-balance-body"', self.index_html)
+        self.assertIn('id="jump-to-balance-tasks-btn"', self.index_html)
+        self.assertIn('value="balance_desc"', self.index_html)
+        self.assertIn('value="balance_asc"', self.index_html)
+        self.assertIn('data-site-tab="balance"', self.index_html)
+        self.assertIn('id="site-pane-balance"', self.index_html)
+
+        # CSS assertions
+        self.assertIn(".balance-stat-grid", self.style_css)
+        self.assertIn(".balance-stat-box", self.style_css)
+        self.assertIn(".balance-stat-icon.usd", self.style_css)
+        self.assertIn(".balance-stat-icon.cny", self.style_css)
+        self.assertIn(".balance-stat-icon.points", self.style_css)
+        self.assertIn(".balance-stat-icon.coverage", self.style_css)
+        self.assertIn(".balance-leaderboard-card", self.style_css)
+        self.assertIn(".balance-history-badge.manual", self.style_css)
+
+        # JS assertions
+        self.assertIn('currentSort === "balance_desc"', self.app_js)
+        self.assertIn('currentSort === "balance_asc"', self.app_js)
+        self.assertIn('currentFilter === "含资产"', self.app_js)
+        self.assertIn('api("/api/sites/balance"', self.app_js)
+        self.assertIn('/api/sites/balance/history', self.app_js)
+        self.assertIn('site-drawer-balance-form', self.app_js)
+        self.assertIn('site-drawer-balance-history-wrap', self.app_js)
+
 
 
 class SiteConfigUpdateApiTests(unittest.TestCase):
@@ -1644,6 +1705,49 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
             self.assertTrue(data.get("ok"))
             self.assertEqual(data.get("channel_name"), "TestPrimary")
             self.assertEqual(data.get("reply"), "pong")
+
+    def test_api_site_balance_endpoints(self):
+        """RFC-043: Verify POST /api/sites/balance and GET /api/sites/balance/history."""
+        # 1. Get CSRF token
+        self.conn.request("GET", "/api/state")
+        res = self.conn.getresponse()
+        csrf = json.loads(res.read())["csrf"]
+        headers = {"Content-Type": "application/json", "X-CSRF-Token": csrf}
+
+        # 2. Reject missing site name
+        self.conn.request("POST", "/api/sites/balance", json.dumps({"amount": 10.5}).encode(), headers)
+        self.assertEqual(self.conn.getresponse().status, 400)
+
+        # 3. Reject invalid amount
+        self.conn.request("POST", "/api/sites/balance", json.dumps({"name": "auto-site", "amount": "abc"}).encode(), headers)
+        self.assertEqual(self.conn.getresponse().status, 400)
+
+        # 4. Successful manual balance update
+        body = json.dumps({
+            "name": "auto-site",
+            "amount": 42.5,
+            "currency": "USD",
+            "raw_text": "$42.50",
+            "day": self.day,
+        }).encode()
+        self.conn.request("POST", "/api/sites/balance", body, headers)
+        resp = self.conn.getresponse()
+        self.assertEqual(resp.status, 200)
+        data = json.loads(resp.read())
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(data.get("name"), "auto-site")
+        self.assertEqual(data["balance"]["amount"], 42.5)
+
+        # 5. Query history for site
+        self.conn.request("GET", "/api/sites/balance/history?site=auto-site")
+        h_resp = self.conn.getresponse()
+        self.assertEqual(h_resp.status, 200)
+        h_data = json.loads(h_resp.read())
+        self.assertTrue(h_data.get("ok"))
+        self.assertEqual(len(h_data.get("history", [])), 1)
+        self.assertEqual(h_data["history"][0]["amount"], 42.5)
+        self.assertEqual(h_data["history"][0]["raw_text"], "$42.50")
+        self.assertEqual(h_data["history"][0]["source"], "manual")
 
 
 

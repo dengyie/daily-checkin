@@ -15,7 +15,7 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from checkin_core.keychain import CredentialStore, make_ref, credential_store_from_env
 from checkin_core.notify import _send_telegram_raw
@@ -381,6 +381,17 @@ class CheckinWebApp:
                     inspection = app.store.get_latest_ai_inspection(day)
                     self.send_json({"ok": True, "inspection": inspection})
                     return
+                if path == "/api/sites/balance/history":
+                    parsed = urlparse(self.path)
+                    params = parse_qs(parsed.query)
+                    site_name_raw = (params.get("site") or [None])[0]
+                    if not site_name_raw:
+                        self.send_json({"error": "site parameter required"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    site_name = unquote(site_name_raw).strip()
+                    history = app.store.get_site_balance_history(site_name)
+                    self.send_json({"ok": True, "site": site_name, "history": history})
+                    return
                 self.send_error(HTTPStatus.NOT_FOUND)
 
             def do_OPTIONS(self):
@@ -491,6 +502,30 @@ class CheckinWebApp:
                             updates["provider"] = str(body["provider"]).strip()
                         res = app.store.update_site_config(name, **updates)
                         self.send_json({"ok": True, "site": res})
+                        return
+                    if path == "/api/sites/balance":
+                        name = _clean_site_name(body.get("name"))
+                        if not name:
+                            raise ValueError("name required")
+                        amount_raw = body.get("amount")
+                        amount = None
+                        if amount_raw is not None and str(amount_raw).strip() != "":
+                            try:
+                                amount = float(amount_raw)
+                            except (ValueError, TypeError):
+                                raise ValueError("amount must be a valid number")
+                        currency = str(body.get("currency") or "USD").strip().upper()
+                        raw_text = str(body.get("raw_text") or "").strip()
+                        day = str(body.get("day") or "").strip()
+                        res = app.store.update_site_balance_manual(
+                            name,
+                            amount=amount,
+                            currency=currency,
+                            raw_text=raw_text,
+                            day=day,
+                            source="manual",
+                        )
+                        self.send_json({"ok": True, "name": name, "balance": res})
                         return
                     if path == "/api/sites/delete":
                         name = _clean_site_name(body.get("name"))
