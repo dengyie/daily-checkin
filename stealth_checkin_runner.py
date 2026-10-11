@@ -8381,7 +8381,7 @@ async def sub2api_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRe
         pass
     await bypass_chrome_interstitial_if_needed(page)
     await wait_text_ready(page, 30, adapter.ready_rounds)
-    await dismiss_obstructing_dialogs(page)
+    await dismiss_obstructing_dialogs(page, stage="sub2api_init")
 
     cur_url = (await page_url(page) or "").lower()
     if "/login" in cur_url or await page.locator("input[type='password']").count() > 0:
@@ -8394,7 +8394,7 @@ async def sub2api_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRe
         except Exception:
             pass
         await wait_text_ready(page, 30, adapter.ready_rounds)
-        await dismiss_obstructing_dialogs(page)
+        await dismiss_obstructing_dialogs(page, stage="sub2api_post_login")
 
     cf = await wait_out_cloudflare(page, CF_WAIT_S)
     if cf:
@@ -9728,7 +9728,7 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
     await bypass_chrome_interstitial_if_needed(page)
     await wait_text_ready(page, 30, adapter.ready_rounds)
     # 【关键】进入后首先关闭可能遮挡的公告弹窗 (公共/公告)
-    await dismiss_obstructing_dialogs(page)
+    await dismiss_obstructing_dialogs(page, stage="ilovecat_init")
 
     cur_url = await page_url(page)
     cur_text = await page_text(page, 600)
@@ -9742,7 +9742,7 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
         try:
             await page.goto(start_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
             await wait_text_ready(page, 30, adapter.ready_rounds)
-            await dismiss_obstructing_dialogs(page)
+            await dismiss_obstructing_dialogs(page, stage="ilovecat_post_sso")
         except Exception:
             pass
 
@@ -9753,7 +9753,7 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
         try:
             await page.goto(playground_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
             await wait_text_ready(page, 30, adapter.ready_rounds)
-            await dismiss_obstructing_dialogs(page)
+            await dismiss_obstructing_dialogs(page, stage="ilovecat_playground")
         except Exception as nav_err:
             print(f"  ilovecat: failed to navigate to playground: {nav_err}", flush=True)
 
@@ -9787,7 +9787,7 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
         return confirmed_done_result("; ".join(details), adapter=kind)
 
     # 4. 执行未完成的签到动作前，再次确保没有弹出遮挡的公告弹窗
-    await dismiss_obstructing_dialogs(page)
+    await dismiss_obstructing_dialogs(page, stage="ilovecat_pre_action")
 
     actions_taken = []
     action_evidences = []
@@ -9801,7 +9801,7 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
                 await pet_btn.click(timeout=5000)
             except Exception as e:
                 print(f"  ilovecat pet click fallback force: {e}", flush=True)
-                await dismiss_obstructing_dialogs(page)
+                await dismiss_obstructing_dialogs(page, stage="ilovecat_pet_retry")
                 await pet_btn.click(force=True, timeout=5000)
             actions_taken.append("pet")
             action_evidences.append(ActionEvidence(kind="dom_click", target="button.cat-pet__cat", attempted_at=datetime.now().isoformat(timespec="seconds")))
@@ -9811,7 +9811,7 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
 
     # 4.2 猫咪占卜
     if not fortune_played:
-        await dismiss_obstructing_dialogs(page)
+        await dismiss_obstructing_dialogs(page, stage="ilovecat_pre_fortune")
         print("  ilovecat: clicking 猫咪占卜 (cat-fortune__drum)...", flush=True)
         fortune_btn = page.locator("button.cat-fortune__drum, button[aria-label*='抽']").first
         if await fortune_btn.count() > 0 and await fortune_btn.is_visible(timeout=3000):
@@ -9819,7 +9819,7 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
                 await fortune_btn.click(timeout=5000)
             except Exception as e:
                 print(f"  ilovecat fortune click fallback force: {e}", flush=True)
-                await dismiss_obstructing_dialogs(page)
+                await dismiss_obstructing_dialogs(page, stage="ilovecat_fortune_retry")
                 await fortune_btn.click(force=True, timeout=5000)
             actions_taken.append("fortune")
             action_evidences.append(ActionEvidence(kind="dom_click", target="button.cat-fortune__drum", attempted_at=datetime.now().isoformat(timespec="seconds")))
@@ -10202,10 +10202,26 @@ _DIALOG_DISMISS_JS = """() => {
     if (!text && !d.querySelector('button, [role="button"]')) continue;
 
     // 严禁关闭正在承载真实签到/抽奖/领取的业务组件
-    if (/立即签到|开始转动|今日签到|去签到|签到奖励|今日已签/.test(text)) continue;
-    if (/每日签到/.test(text) && /签到|领取|积分/.test(text)) continue;
+    // 1. 检查是否存在真实的签到/抽奖/领奖动作按钮 (精确定位在 button / [role="button"] 上，而非整篇公告正文)
+    const actionBtns = [...d.querySelectorAll('button, [role="button"], a')];
+    const hasActiveAction = actionBtns.some(b => {
+      const t = (b.innerText || b.textContent || '').trim();
+      return /^(立即签到|开始转动|今日签到|去签到|立即打卡|打卡|点击翻牌|开始抽签)$/.test(t) ||
+             (!/全部已读|我知道了|我已阅读|我已知悉|关闭|Close|Got it|确定|OK/i.test(t) && /立即签到|开始转动|去签到/.test(t));
+    });
+    if (hasActiveAction) continue;
+
+    // 2. 检查是否为纯签到状态展示卡片 (存在 "今日已签" 等状态按钮且无公告特征)
+    const hasStatusAction = actionBtns.some(b => {
+      const t = (b.innerText || b.textContent || '').trim();
+      return /^(今日已签|今日已签到|已签到)$/.test(t);
+    });
+    const looksAnnouncement = /公告|通知|notice|activity|规则|升级|维护|充值、兑换与消费记录|更新|重要|玩法说明|欢迎|提示|声明|免责/i.test(text);
+    if (hasStatusAction && !looksAnnouncement) continue;
+
+    // 3. 严禁关闭小游戏交互面板 (如摸猫/猫咪占卜/抽卡)
     if (/摸猫|猫咪占卜|抽一支签|再摸一下猫/.test(text) && /连续摸猫|喵乐园/.test(text)) continue;
-    if (/翻牌|开宝箱|翻卡|点击翻牌|幸运大转盘/.test(text)) continue;
+    if (/翻牌|开宝箱|翻卡|点击翻牌|幸运大转盘/.test(text) && !looksAnnouncement) continue;
 
     // 定位关闭/知悉按钮
     let btn = d.querySelector('[data-slot="dialog-close"], button[aria-label*="关闭" i], button[aria-label*="close" i], button[aria-label*="dismiss" i], button[title*="关闭" i], button[title*="close" i]');
@@ -10222,7 +10238,6 @@ _DIALOG_DISMISS_JS = """() => {
       btn = d.querySelector('button.absolute.top-2.right-2, button.absolute.top-3.right-3, button.absolute.top-4.right-4, button[class*="close"], button.close');
     }
 
-    const looksAnnouncement = /公告|通知|notice|activity|规则|升级|维护|充值、兑换与消费记录|更新|重要|玩法说明|欢迎|提示|声明|免责/i.test(text);
     const hasExplicitDismiss = /全部已读|我知道了|我已阅读|我已知悉|关闭|Close/i.test(text) || (btn && /关闭|close|dismiss/i.test((btn.getAttribute('aria-label')||'') + ' ' + (btn.getAttribute('title')||'') + ' ' + (btn.innerText||'')));
 
     // 仅在具备真实关闭控件且符合公告特征或显式弹窗槽位时执行关闭
@@ -10238,7 +10253,7 @@ _DIALOG_DISMISS_JS = """() => {
 }"""
 
 
-async def dismiss_obstructing_dialogs(page) -> int:
+async def dismiss_obstructing_dialogs(page, stage: str = "interaction") -> int:
     """Close announcement-style modal dialogs and full-screen overlays that would
     swallow interactions. Returns how many dialogs were dismissed (0 = nothing to do)."""
     if page is None or not hasattr(page, "evaluate") or not callable(getattr(page, "evaluate", None)):
@@ -10250,7 +10265,8 @@ async def dismiss_obstructing_dialogs(page) -> int:
         print(f"  ! dialog dismiss skipped: {dismiss_err}", flush=True)
         return 0
     if count:
-        print(f"  dismissed {count} obstruction dialog(s) before CTA click", flush=True)
+        stage_desc = f" [{stage}]" if stage else ""
+        print(f"  dismissed {count} obstruction dialog(s){stage_desc}", flush=True)
         await asyncio.sleep(0.5)
     return count
 
@@ -10407,7 +10423,7 @@ async def _click_cta_and_confirm(
         )
     # Announcement dialogs (cngov 系统公告) open over the page and swallow the
     # CTA click, so the check-in POST never fires. Close them before clicking.
-    await dismiss_obstructing_dialogs(page)
+    await dismiss_obstructing_dialogs(page, stage="pre_click")
     # Fengwind: 签到前先勾选额度有效期(2天)
     await maybe_select_fengwind_validity(page, site_url)
     if adapter.use_native_click:
@@ -10649,7 +10665,7 @@ async def legacy_checkin_on_page(
             pass
         await bypass_chrome_interstitial_if_needed(page)
         await wait_text_ready(page, 40, adapter.ready_rounds)
-        await dismiss_obstructing_dialogs(page)
+        await dismiss_obstructing_dialogs(page, stage="post_load")
 
         cf = await wait_out_cloudflare(page, CF_WAIT_S)
         if cf:
@@ -10699,7 +10715,7 @@ async def legacy_checkin_on_page(
             try:
                 await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
                 await wait_text_ready(page, 40, 12)
-                await dismiss_obstructing_dialogs(page)
+                await dismiss_obstructing_dialogs(page, stage="post_sso")
             except Exception:
                 pass
 
@@ -10719,7 +10735,7 @@ async def legacy_checkin_on_page(
                 await asyncio.sleep(2.5)
                 await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
                 await wait_text_ready(page, 40, 12)
-                await dismiss_obstructing_dialogs(page)
+                await dismiss_obstructing_dialogs(page, stage="post_sso")
             elif sso_status in ("CLOUDFLARE", "TIMEOUT", "UPSTREAM_UNAVAILABLE") or (
                 sso_status and str(sso_status).startswith("FAIL")
             ):
@@ -10785,7 +10801,7 @@ async def legacy_checkin_on_page(
             # FAIL (network): transient — fall through so the normal CTA scan
             # can retry/finish; rare, and never double-fires (we already tried).
 
-        await dismiss_obstructing_dialogs(page)
+        await dismiss_obstructing_dialogs(page, stage="pre_already")
         already_sig = await already_done(
             page, already_selectors, trusted_already=adapter.trusted_already_selectors
         )
@@ -10816,7 +10832,7 @@ async def legacy_checkin_on_page(
             except Exception:
                 pass
 
-        await dismiss_obstructing_dialogs(page)
+        await dismiss_obstructing_dialogs(page, stage="pre_cta")
         btn, used = await wait_for_any_visible(
             page, sign_selectors, SIGN_WAIT_S, allow_generic_sign_cta=True, trusted_sign=adapter.trusted_sign_selectors
         )
@@ -11424,7 +11440,7 @@ async def checkin_on_page(
         url=adapter.url,
         adapter_kind=adapter.kind,
     )
-    await dismiss_obstructing_dialogs(page)
+    await dismiss_obstructing_dialogs(page, stage="provider_inspect")
     await provider.inspect(ctx)
     result = await provider.perform(ctx)
     result.provider = provider.name

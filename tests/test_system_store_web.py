@@ -541,6 +541,10 @@ class StoreTests(unittest.TestCase):
         self.assertIn('立即签到', _DIALOG_DISMISS_JS)
         self.assertIn('今日已签', _DIALOG_DISMISS_JS)
         self.assertIn('摸猫', _DIALOG_DISMISS_JS)
+        self.assertIn('hasActiveAction', _DIALOG_DISMISS_JS)
+        self.assertIn('hasStatusAction', _DIALOG_DISMISS_JS)
+        # 验证已消除对正文含每日签到与积分的过度跳过 (P2 根因防护)
+        self.assertNotIn('/每日签到/.test(text) && /签到|领取|积分/.test(text)', _DIALOG_DISMISS_JS)
 
     def test_ilovecat_adapter_overview_resolution(self):
         """Ensure ilovecat resolves /dashboard/overview without forced override to /playground."""
@@ -555,16 +559,23 @@ class StoreTests(unittest.TestCase):
 
     def test_dismiss_obstructing_dialogs_loop(self):
         """Ensure dismiss_obstructing_dialogs handles dialog dismissal and returns count."""
-        from unittest.mock import AsyncMock
+        import io
+        from unittest.mock import AsyncMock, patch
         from stealth_checkin_runner import dismiss_obstructing_dialogs
 
         page = AsyncMock()
         page.evaluate = AsyncMock(return_value=1)
-        closed = asyncio.run(dismiss_obstructing_dialogs(page))
-        self.assertEqual(closed, 1)
+        with patch("sys.stdout", new_callable=io.StringIO) as fake_out:
+            closed = asyncio.run(dismiss_obstructing_dialogs(page, stage="post_load"))
+            self.assertEqual(closed, 1)
+            self.assertIn("dismissed 1 obstruction dialog(s) [post_load]", fake_out.getvalue())
         self.assertEqual(page.evaluate.call_count, 1)
 
-        # Non-callable or empty object returns 0 without raising
+        # Default stage and non-callable or empty object returns 0 without raising
+        with patch("sys.stdout", new_callable=io.StringIO) as fake_out2:
+            closed_default = asyncio.run(dismiss_obstructing_dialogs(page))
+            self.assertEqual(closed_default, 1)
+            self.assertIn("dismissed 1 obstruction dialog(s) [interaction]", fake_out2.getvalue())
         self.assertEqual(asyncio.run(dismiss_obstructing_dialogs(None)), 0)
         self.assertEqual(asyncio.run(dismiss_obstructing_dialogs(object())), 0)
 
