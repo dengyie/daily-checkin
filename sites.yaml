@@ -1088,6 +1088,23 @@ sites:
       - 'button#ckBtn:has-text("今日已签到")'
       - 'text=今日已签到'
       - 'text=签到成功'
+  # hixinghai(platform.ai.hixinghai.com, 星海 Router · 统一大模型网关)—— 2026-10-12 接入。
+  # 自研 Vue SPA(非标准 New API, /api/status 404), LinuxDo OAuth(9222 共享 profile 已登录)。
+  # 签到页 /console/checkin: 未签「今天可以签到」+ button.liquid-button「立即签到」。
+  # 点击先做「最长 2 秒网络检测」再弹「请拖动滑块完成拼图」人机验证, 自动化无法过滑块,
+  # 应用户要求配置为手动签到(DB checkin_mode=manual, 自动批次自动排除, 用户人工完成)。
+  # 目录仍登记精确选择器, 供站方取消滑块后切回 auto 一键启用。
+  - name: 'hixinghai'
+    url: https://platform.ai.hixinghai.com/console/checkin
+    kind: browser
+    prefer_catalog_url: true
+    signs:
+      - 'button.liquid-button:has-text("立即签到")'
+      - 'button:has-text("立即签到")'
+    already:
+      - 'text=签到成功'
+      - 'text=今日已签到'
+      - 'text=已连续签到'
 
 
 
