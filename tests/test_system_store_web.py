@@ -525,6 +525,24 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(b_pts.amount, 500.0)
         self.assertEqual(b_pts.currency, "POINTS")
 
+    def test_confirm_signal_line_keeps_reward_context(self):
+        """pap.pmcat.top Finding: toast line 「签到成功，获得 $0.106」 carries the reward
+        amount; ok_result must keep the full line (not just the matched snippet) so
+        _enrich_result_balance can parse reward_text."""
+        from stealth_checkin_runner import _extract_reward_from_text, confirm_signal_line
+
+        page_text = "签到成功，获得 $0.106\n今日已签到\n已连续签到 1 天 · 累计获得 $0.106"
+        line = confirm_signal_line(page_text, "签到成功")
+        self.assertEqual(line, "签到成功，获得 $0.106")
+        self.assertEqual(_extract_reward_from_text(line), "+$0.106")
+
+        # weak "today+weak" signal and missing-line fallback pass through unchanged
+        self.assertEqual(confirm_signal_line("已签到 1 天", "today+weak"), "today+weak")
+        self.assertEqual(confirm_signal_line("nothing here", "签到成功"), "签到成功")
+
+        # cumulative totals on other lines must NOT leak into the reward
+        self.assertEqual(_extract_reward_from_text("已连续签到 1 天 · 累计获得 $0.106"), "")
+
     def test_dialog_dismiss_js_rules(self):
         """Ensure _DIALOG_DISMISS_JS covers semantic dialogs, Tailwind fixed overlays and guards."""
         from stealth_checkin_runner import _DIALOG_DISMISS_JS

@@ -1070,6 +1070,24 @@ sites:
       - 'text=今日已签到'
       - 'text=签到成功'
       - 'text=已连续签到'
+  # pap(pap.pmcat.top, PM-API)—— 2026-10-11 接入。dygyz 同家族(pmcat.top)升级版站,
+  # LinuxDo-only OAuth 登录(linuxdo_only_auth=true, 复用 9222 共享 profile 的
+  # linux.do 会话;不开放注册,注册码内测)。自研 SPA(hash 路由,非标准 New API 前台),
+  # 钱包页 #/console/wallet「每日签到」卡片: 未签 button#ckBtn「立即签到」
+  # → POST /api/me/checkin → toast「签到成功，获得 $X」;
+  # 已签 button#ckBtn 变「今日已签到」(disabled) + 副标题「已连续签到 N 天」。
+  # 副标题「累计获得 $0.0000」是历史累计统计,绝不能当当日收益判据。
+  - name: 'pap'
+    url: https://pap.pmcat.top/#/console/wallet
+    kind: browser
+    prefer_catalog_url: true
+    signs:
+      - 'button#ckBtn:has-text("立即签到")'
+      - 'button:has-text("立即签到")'
+    already:
+      - 'button#ckBtn:has-text("今日已签到")'
+      - 'text=今日已签到'
+      - 'text=签到成功'
 
 
 

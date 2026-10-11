@@ -2984,6 +2984,21 @@ def confirm_signal(text: str) -> str:
     return ""
 
 
+def confirm_signal_line(text: str, sig: str) -> str:
+    """Return the full rendered line that produced `sig`, falling back to sig.
+
+    Toasts like 「签到成功，获得 $0.106」 carry the reward amount on the same
+    rendered line as the confirm signal; keeping only the matched snippet drops
+    the amount before _enrich_result_balance can parse it into reward_text.
+    """
+    if not sig or sig == "today+weak":
+        return sig
+    for ln in (text or "").splitlines():
+        if sig in ln:
+            return ln.strip()[:160]
+    return sig
+
+
 def dom_confirmation(summary: str, *, done_state: bool = False) -> ConfirmationEvidence:
     return ConfirmationEvidence(
         kind="dom_done_state" if done_state else "dom_strong",
@@ -10495,7 +10510,7 @@ async def _click_cta_and_confirm(
                 return flip
             return ok_result(
                 "OK", adapter=kind, detail=sig, action=action,
-                confirmation=dom_confirmation(sig),
+                confirmation=dom_confirmation(confirm_signal_line(text2, sig)),
                 pre_state="PENDING", post_state="DONE",
                 transition="PENDING_TO_DONE", attribution="runner",
             )
@@ -10540,7 +10555,7 @@ async def _click_cta_and_confirm(
                 print(f"  confirm(after reload): {sig}", flush=True)
                 return ok_result(
                     "OK", adapter=kind, detail=sig, action=action,
-                    confirmation=dom_confirmation(sig),
+                    confirmation=dom_confirmation(confirm_signal_line(text_r, sig)),
                     pre_state="PENDING", post_state="DONE",
                     transition="PENDING_TO_DONE", attribution="runner",
                 )
@@ -11278,25 +11293,34 @@ async def _extract_dom_balance(page) -> BalanceEvidence | None:
                             }
 
                             // 2. 现代组件库父级容器穿透: <span>当前余额</span> <span>¥128.50</span>
+                            //    以及「label div + value div」兄弟卡片结构(pap.pmcat.top
+                            //    钱包页 <div>当前余额</div><div>$0.106</div> 同级),
+                            //    parentElement 取不到值时上溯一层 grandparent(≤120 字符)。
                             if (reLabelMoney.test(text) && node.parentElement) {
-                                const pText = (node.parentElement.innerText || node.parentElement.textContent || '').trim();
-                                if (pText && pText.length <= 100) {
+                                let hop = node.parentElement;
+                                for (let i = 0; i < 2 && hop && !balanceResult; i++) {
+                                    const pText = (hop.innerText || hop.textContent || '').trim();
+                                    hop = hop.parentElement;
+                                    if (!pText || pText.length > 120) continue;
                                     const mP = pText.match(reMoney) || pText.match(reValMoney);
                                     if (mP) {
                                         balanceResult = { type: 'money', raw: mP[0], val: mP[1] };
-                                        continue;
                                     }
                                 }
+                                if (balanceResult) continue;
                             }
                             if (reLabelPoints.test(text) && node.parentElement) {
-                                const pText = (node.parentElement.innerText || node.parentElement.textContent || '').trim();
-                                if (pText && pText.length <= 100) {
+                                let hop = node.parentElement;
+                                for (let i = 0; i < 2 && hop && !balanceResult; i++) {
+                                    const pText = (hop.innerText || hop.textContent || '').trim();
+                                    hop = hop.parentElement;
+                                    if (!pText || pText.length > 120) continue;
                                     const mP = pText.match(rePoints) || pText.match(reValPoints);
                                     if (mP) {
                                         balanceResult = { type: 'points', raw: mP[0], val: mP[1] };
-                                        continue;
                                     }
                                 }
+                                if (balanceResult) continue;
                             }
                         }
                     }
