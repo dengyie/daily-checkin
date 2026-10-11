@@ -529,12 +529,21 @@ class StoreTests(unittest.TestCase):
         """pap.pmcat.top Finding: toast line 「签到成功，获得 $0.106」 carries the reward
         amount; ok_result must keep the full line (not just the matched snippet) so
         _enrich_result_balance can parse reward_text."""
-        from stealth_checkin_runner import _extract_reward_from_text, confirm_signal_line
+        from stealth_checkin_runner import (
+            _extract_reward_from_text,
+            confirm_signal_line,
+            reward_context_summary,
+        )
 
         page_text = "签到成功，获得 $0.106\n今日已签到\n已连续签到 1 天 · 累计获得 $0.106"
         line = confirm_signal_line(page_text, "签到成功")
         self.assertEqual(line, "签到成功，获得 $0.106")
         self.assertEqual(_extract_reward_from_text(line), "+$0.106")
+
+        # prefer the reward-bearing line when the confirm word repeats across
+        # lines (review P3: first-hit could pick a reward-free legend line)
+        repeated = "签到成功规则：签到成功后领取\n签到成功，获得 $0.106"
+        self.assertEqual(confirm_signal_line(repeated, "签到成功"), "签到成功，获得 $0.106")
 
         # weak "today+weak" signal and missing-line fallback pass through unchanged
         self.assertEqual(confirm_signal_line("已签到 1 天", "today+weak"), "today+weak")
@@ -542,6 +551,42 @@ class StoreTests(unittest.TestCase):
 
         # cumulative totals on other lines must NOT leak into the reward
         self.assertEqual(_extract_reward_from_text("已连续签到 1 天 · 累计获得 $0.106"), "")
+
+    def test_reward_context_summary_closes_toast_timing_window(self):
+        """Review P3: 「今日已签到」 is matched first in STRONG_SUCCESS_PATTERNS, so sig
+        can resolve from the flipped button line while the reward toast still sits on
+        another line of the merged text; reward_context_summary must salvage it."""
+        from stealth_checkin_runner import _extract_reward_from_text, reward_context_summary
+
+        text = "签到成功，获得 $0.106\n今日已签到\n已连续签到 1 天 · 累计获得 $0.106"
+        summary = reward_context_summary(text, "今日已签到")
+        self.assertEqual(summary, "今日已签到\n签到成功，获得 $0.106")
+        self.assertEqual(_extract_reward_from_text(summary), "+$0.106")
+
+        # no reward line anywhere (toast expired) → unchanged; cumulative line never appended
+        self.assertEqual(reward_context_summary("今日已签到\n已连续签到 1 天 · 累计获得 $0.106", "今日已签到"), "今日已签到")
+
+        # summary already carrying a reward → returned as-is
+        self.assertEqual(reward_context_summary(text, "签到成功，获得 $0.106"), "签到成功，获得 $0.106")
+
+        # output never exceeds dom_confirmation's 160-char cap
+        long_text = "x" * 200 + "\n签到成功，获得 $0.106"
+        self.assertLessEqual(len(reward_context_summary(long_text, "今日已签到")), 160)
+
+    def test_dom_extractor_and_toast_selector_regression_anchors(self):
+        """Review P3: DOM extractor JS is inline (evaluate mocks bypass it); lock the
+        sibling-card grandparent hop and the pap-style snack toast selector against
+        silent regression."""
+        import inspect
+        from stealth_checkin_runner import _extract_dom_balance, page_text
+
+        extractor_src = inspect.getsource(_extract_dom_balance)
+        self.assertIn("let hop = node.parentElement", extractor_src)
+        self.assertIn("i === 0", extractor_src)
+        self.assertIn("grandparent", extractor_src)
+
+        page_text_src = inspect.getsource(page_text)
+        self.assertIn(".snack", page_text_src)
 
     def test_dialog_dismiss_js_rules(self):
         """Ensure _DIALOG_DISMISS_JS covers semantic dialogs, Tailwind fixed overlays and guards."""

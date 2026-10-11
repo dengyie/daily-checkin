@@ -2449,6 +2449,7 @@ async def page_text(page, n: int = 1200) -> str:
         "[role='status']",
         "[role='alert']",
         ".n-message",
+        ".snack",
         ".ant-message",
         ".semi-toast",
         ".Toastify",
@@ -2985,18 +2986,46 @@ def confirm_signal(text: str) -> str:
 
 
 def confirm_signal_line(text: str, sig: str) -> str:
-    """Return the full rendered line that produced `sig`, falling back to sig.
+    """Return the rendered line that produced `sig`, falling back to sig.
 
     Toasts like 「签到成功，获得 $0.106」 carry the reward amount on the same
     rendered line as the confirm signal; keeping only the matched snippet drops
     the amount before _enrich_result_balance can parse it into reward_text.
+    When the confirm word repeats across lines (calendar legend / flipped
+    button vs toast), prefer the line whose text also parses into a reward.
     """
     if not sig or sig == "today+weak":
         return sig
+    lines = [ln.strip() for ln in (text or "").splitlines() if sig in ln]
+    if not lines:
+        return sig
+    for ln in lines:
+        if _extract_reward_from_text(ln):
+            return ln[:160]
+    return lines[0][:160]
+
+
+def reward_context_summary(text: str, summary_line: str) -> str:
+    """Append a reward-bearing line when the confirm line lacks one.
+
+    Closes the timing window where sig resolved from the flipped button line
+    (「今日已签到」 is matched first in STRONG_SUCCESS_PATTERNS) while the
+    reward toast (「签到成功，获得 $0.106」, ~2.8s lifetime) still sat on
+    another line of the merged text. Output stays within dom_confirmation's
+    160-char cap; cumulative-total lines (「累计获得 $X」) never parse as a
+    reward, so they are never appended.
+    """
+    if _extract_reward_from_text(summary_line):
+        return summary_line
     for ln in (text or "").splitlines():
-        if sig in ln:
-            return ln.strip()[:160]
-    return sig
+        ln = ln.strip()
+        if not ln or ln == summary_line:
+            continue
+        reward_line = ln[:80]
+        if _extract_reward_from_text(reward_line):
+            base = summary_line[:78] if len(summary_line) + 1 + len(reward_line) > 160 else summary_line
+            return f"{base}\n{reward_line}"
+    return summary_line
 
 
 def dom_confirmation(summary: str, *, done_state: bool = False) -> ConfirmationEvidence:
@@ -10508,9 +10537,10 @@ async def _click_cta_and_confirm(
             flip = await lucky_flip_if_needed(page, site_url)
             if flip is not None:
                 return flip
+            summary_line = confirm_signal_line(text2, sig)
             return ok_result(
                 "OK", adapter=kind, detail=sig, action=action,
-                confirmation=dom_confirmation(confirm_signal_line(text2, sig)),
+                confirmation=dom_confirmation(reward_context_summary(text2, summary_line)),
                 pre_state="PENDING", post_state="DONE",
                 transition="PENDING_TO_DONE", attribution="runner",
             )
@@ -10553,9 +10583,10 @@ async def _click_cta_and_confirm(
             if is_valid_checkin_confirm(text_r):
                 sig = confirm_signal(text_r)
                 print(f"  confirm(after reload): {sig}", flush=True)
+                summary_line = confirm_signal_line(text_r, sig)
                 return ok_result(
                     "OK", adapter=kind, detail=sig, action=action,
-                    confirmation=dom_confirmation(confirm_signal_line(text_r, sig)),
+                    confirmation=dom_confirmation(reward_context_summary(text_r, summary_line)),
                     pre_state="PENDING", post_state="DONE",
                     transition="PENDING_TO_DONE", attribution="runner",
                 )
@@ -11295,14 +11326,18 @@ async def _extract_dom_balance(page) -> BalanceEvidence | None:
                             // 2. 现代组件库父级容器穿透: <span>当前余额</span> <span>¥128.50</span>
                             //    以及「label div + value div」兄弟卡片结构(pap.pmcat.top
                             //    钱包页 <div>当前余额</div><div>$0.106</div> 同级),
-                            //    parentElement 取不到值时上溯一层 grandparent(≤120 字符)。
+                            //    parentElement 取不到值时上溯一层 grandparent(≤120 字符);
+                            //    grandparent 层仅接受 label 锚定匹配, 裸金额兜底(reValMoney/
+                            //    reValPoints)只留在 parent 层, 防止大容器把兄弟指标的值错误关联。
                             if (reLabelMoney.test(text) && node.parentElement) {
                                 let hop = node.parentElement;
                                 for (let i = 0; i < 2 && hop && !balanceResult; i++) {
                                     const pText = (hop.innerText || hop.textContent || '').trim();
                                     hop = hop.parentElement;
                                     if (!pText || pText.length > 120) continue;
-                                    const mP = pText.match(reMoney) || pText.match(reValMoney);
+                                    const mP = i === 0
+                                        ? (pText.match(reMoney) || pText.match(reValMoney))
+                                        : pText.match(reMoney);
                                     if (mP) {
                                         balanceResult = { type: 'money', raw: mP[0], val: mP[1] };
                                     }
@@ -11315,7 +11350,9 @@ async def _extract_dom_balance(page) -> BalanceEvidence | None:
                                     const pText = (hop.innerText || hop.textContent || '').trim();
                                     hop = hop.parentElement;
                                     if (!pText || pText.length > 120) continue;
-                                    const mP = pText.match(rePoints) || pText.match(reValPoints);
+                                    const mP = i === 0
+                                        ? (pText.match(rePoints) || pText.match(reValPoints))
+                                        : pText.match(rePoints);
                                     if (mP) {
                                         balanceResult = { type: 'points', raw: mP[0], val: mP[1] };
                                     }
