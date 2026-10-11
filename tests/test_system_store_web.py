@@ -525,6 +525,38 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(b_pts.amount, 500.0)
         self.assertEqual(b_pts.currency, "POINTS")
 
+    def test_dialog_dismiss_js_rules(self):
+        """Ensure _DIALOG_DISMISS_JS includes SnowAPI / Base UI modal rules and close slots."""
+        from stealth_checkin_runner import _DIALOG_DISMISS_JS
+        self.assertIn('data-slot="dialog-close"', _DIALOG_DISMISS_JS)
+        self.assertIn('.snowapi-dialog-content', _DIALOG_DISMISS_JS)
+        self.assertIn('role="dialog"', _DIALOG_DISMISS_JS)
+        self.assertIn('公告', _DIALOG_DISMISS_JS)
+        self.assertIn('通知', _DIALOG_DISMISS_JS)
+        self.assertIn('data-dismissed', _DIALOG_DISMISS_JS)
+
+    def test_ilovecat_adapter_overview_resolution(self):
+        """Ensure ilovecat resolves /dashboard/overview without forced override to /playground."""
+        from stealth_checkin_runner import resolve_site, is_ilovecat_site
+        self.assertTrue(is_ilovecat_site("https://api.ilovecat520.me/dashboard/overview"))
+        self.assertTrue(is_ilovecat_site("https://api.ilovecat520.me/playground"))
+
+        adapter = resolve_site("靴貓公益站", "https://api.ilovecat520.me/dashboard/overview")
+        self.assertIsNotNone(adapter)
+        self.assertEqual(adapter.kind, "ilovecat")
+        self.assertEqual(adapter.url, "https://api.ilovecat520.me/dashboard/overview")
+
+    def test_dismiss_obstructing_dialogs_loop(self):
+        """Ensure dismiss_obstructing_dialogs handles dialog dismissal and returns count."""
+        from unittest.mock import AsyncMock
+        from stealth_checkin_runner import dismiss_obstructing_dialogs
+
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=1)
+        closed = asyncio.run(dismiss_obstructing_dialogs(page))
+        self.assertEqual(closed, 1)
+        self.assertEqual(page.evaluate.call_count, 1)
+
 
 class KeychainTests(unittest.TestCase):
     def test_keychain_commands_and_errors_never_return_secret(self):

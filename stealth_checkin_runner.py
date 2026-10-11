@@ -802,7 +802,7 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     ),
     _B(
         "靴貓公益站",
-        "https://api.ilovecat520.me/playground",
+        "https://api.ilovecat520.me/dashboard/overview",
         signs=[
             "button.cat-pet__cat",
             "button.cat-fortune__drum",
@@ -811,7 +811,7 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
             "text=明天再来摸摸吧",
             "text=今天已经抽过了，明天再来抽一支吧。",
         ],
-        prefer_catalog_url=True,
+        prefer_catalog_url=False,
         login_url="https://api.ilovecat520.me/login",
         kind="ilovecat",
     ),
@@ -1036,6 +1036,7 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     ),
     _N("cngov", "https://cngov.cc.cd/profile"),
     _N("快跑", "https://kuaipao.ai/console/personal"),
+    _N("amnew", "https://api.amnew.dpdns.org/console/personal"),
     _N("CHY", "https://chybenzun.top/profile"),
     _B(
         "chybenzun VPN",
@@ -1567,7 +1568,7 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
         # 1. 每日摸猫 (cat-pet): 点击 button.cat-pet__cat
         # 2. 猫咪占卜 (cat-fortune): 点击 button.cat-fortune__drum
         return _B(
-            name, url,
+            name, url or "https://api.ilovecat520.me/dashboard/overview",
             signs=list(signs) if signs is not None else [
                 "button.cat-pet__cat",
                 "button.cat-fortune__drum",
@@ -1577,7 +1578,7 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
                 "text=今天已经抽过了，明天再来抽一支吧。",
             ],
             ready_rounds=rr,
-            prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
+            prefer_catalog_url=bool(entry.get("prefer_catalog_url", False)),
             login_url=str(entry.get("login_url", "") or "https://api.ilovecat520.me/login"),
             kind="ilovecat",
         )
@@ -9686,21 +9687,24 @@ async def _ilovecat_fetch_status(page) -> dict:
 
 
 async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
-    """靴貓公益站 (api.ilovecat520.me/playground) 每日摸猫 + 猫咪占卜 专属签到流程.
+    """靴貓公益站 (api.ilovecat520.me) 每日摸猫 + 猫咪占卜 专属签到流程.
 
     业务机制:
-    1. 页面入口: /playground (前端展示两个卡片: 每日摸猫 + 猫咪占卜)
-    2. 每日摸猫: 点击 button.cat-pet__cat (摸猫)，成功后获得鱼罐头，按钮变为 .is-done
-    3. 猫咪占卜: 点击 button.cat-fortune__drum (抽签)，成功后抽取签文并获得鱼罐头，按钮变为 .is-done 且 disabled
-    4. 权威状态: GET /api/cat/status 返回 pet.played 与 fortune.played
-    5. SSO 维护: 未登录或掉登录时前往 /login 走 LinuxDO OAuth 回跳
+    1. 页面入口: /playground (或 /dashboard/overview，支持从 overview 导航至 playground)
+    2. 优先关闭公共/公告: 进入页面及操作前优先调用 dismiss_obstructing_dialogs 关闭公告弹窗
+    3. 每日摸猫: 点击 button.cat-pet__cat (摸猫)，成功后获得鱼罐头，按钮变为 .is-done
+    4. 猫咪占卜: 点击 button.cat-fortune__drum (抽签)，成功后抽取签文并获得鱼罐头，按钮变为 .is-done 且 disabled
+    5. 权威状态: GET /api/cat/status 返回 pet.played 与 fortune.played
+    6. SSO 维护: 未登录或掉登录时前往 /login 走 LinuxDO OAuth 回跳
     """
     kind = adapter.kind or "ilovecat"
-    site_url = adapter.url or "https://api.ilovecat520.me/playground"
-    if "/playground" not in site_url:
-        site_url = "https://api.ilovecat520.me/playground"
+    configured_url = (adapter.url or "").strip()
+    playground_url = "https://api.ilovecat520.me/playground"
+    overview_url = "https://api.ilovecat520.me/dashboard/overview"
+    # 若配置为 overview 或未指定，先进入 overview 关闭公告，再前往 playground；若直指 playground 则直接加载
+    start_url = configured_url if configured_url else overview_url
 
-    print(f"  ilovecat flow: {adapter.name} ({site_url})", flush=True)
+    print(f"  ilovecat flow: {adapter.name} (start: {start_url})", flush=True)
 
     async def _ensure_sso():
         if "/login" not in (page.url or "") and "/sign-in" not in (page.url or ""):
@@ -9714,13 +9718,15 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
         sso_status = await try_linuxdo_sso(page, origin_host="api.ilovecat520.me", browser=browser)
         return sso_status
 
-    # 1. 打开 /playground
+    # 1. 打开初始页面 (overview 或 playground)
     try:
-        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+        await page.goto(start_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
     except Exception:
         pass
     await bypass_chrome_interstitial_if_needed(page)
     await wait_text_ready(page, 30, adapter.ready_rounds)
+    # 【关键】进入后首先关闭可能遮挡的公告弹窗 (公共/公告)
+    await dismiss_obstructing_dialogs(page)
 
     cur_url = await page_url(page)
     cur_text = await page_text(page, 600)
@@ -9732,10 +9738,22 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
         if sso_res not in ("OK", "ALREADY"):
             return fail_result("auth_failed", detail=f"SSO: {sso_res}", adapter=kind)
         try:
-            await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+            await page.goto(start_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
             await wait_text_ready(page, 30, adapter.ready_rounds)
+            await dismiss_obstructing_dialogs(page)
         except Exception:
             pass
+
+    # 若当前在 overview 或其他非 playground 页面，前往 playground 准备签到
+    cur_url = await page_url(page)
+    if "/playground" not in cur_url:
+        print(f"  ilovecat: navigating from {cur_url} to {playground_url}...", flush=True)
+        try:
+            await page.goto(playground_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+            await wait_text_ready(page, 30, adapter.ready_rounds)
+            await dismiss_obstructing_dialogs(page)
+        except Exception as nav_err:
+            print(f"  ilovecat: failed to navigate to playground: {nav_err}", flush=True)
 
     # 3. 检查当前两项状态 (权威 API + DOM 双保险)
     api_stat = await _ilovecat_fetch_status(page)
@@ -9766,7 +9784,9 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
             details.append("占卜已完成")
         return confirmed_done_result("; ".join(details), adapter=kind)
 
-    # 4. 执行未完成的签到动作
+    # 4. 执行未完成的签到动作前，再次确保没有弹出遮挡的公告弹窗
+    await dismiss_obstructing_dialogs(page)
+
     actions_taken = []
     action_evidences = []
 
@@ -9779,6 +9799,7 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
                 await pet_btn.click(timeout=5000)
             except Exception as e:
                 print(f"  ilovecat pet click fallback force: {e}", flush=True)
+                await dismiss_obstructing_dialogs(page)
                 await pet_btn.click(force=True, timeout=5000)
             actions_taken.append("pet")
             action_evidences.append(ActionEvidence(kind="dom_click", target="button.cat-pet__cat", attempted_at=datetime.now().isoformat(timespec="seconds")))
@@ -9788,6 +9809,7 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
 
     # 4.2 猫咪占卜
     if not fortune_played:
+        await dismiss_obstructing_dialogs(page)
         print("  ilovecat: clicking 猫咪占卜 (cat-fortune__drum)...", flush=True)
         fortune_btn = page.locator("button.cat-fortune__drum, button[aria-label*='抽']").first
         if await fortune_btn.count() > 0 and await fortune_btn.is_visible(timeout=3000):
@@ -9795,6 +9817,7 @@ async def ilovecat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinR
                 await fortune_btn.click(timeout=5000)
             except Exception as e:
                 print(f"  ilovecat fortune click fallback force: {e}", flush=True)
+                await dismiss_obstructing_dialogs(page)
                 await fortune_btn.click(force=True, timeout=5000)
             actions_taken.append("fortune")
             action_evidences.append(ActionEvidence(kind="dom_click", target="button.cat-fortune__drum", attempted_at=datetime.now().isoformat(timespec="seconds")))
@@ -10151,26 +10174,34 @@ async def wait_turnstile_token(page, max_s: float = TURNSTILE_TOKEN_WAIT_S) -> b
 # (cngov 2026-08-16 failure). A dialog that is neither recognisably an
 # announcement nor recognisably a sign widget is left ALONE (fail-safe).
 _DIALOG_DISMISS_JS = """() => {
-  const dialogs = [...document.querySelectorAll('[data-slot="dialog-content"], [role="dialog"]')];
+  const dialogs = [...document.querySelectorAll('[data-slot="dialog-content"], [role="dialog"], .snowapi-dialog-content, div[class*="dialog-content"]')];
   let closed = 0;
   for (const d of dialogs) {
     if (d.getAttribute('aria-hidden') === 'true') continue;
-    const text = (d.innerText || '').replace(/\\s+/g, ' ');
+    const text = (d.innerText || d.textContent || '').replace(/\\s+/g, ' ');
     // Never close a dialog that hosts the check-in widget itself.
     if (/立即签到|开始转动|今日签到|去签到|签到奖励|今日已签/.test(text)) continue;
     if (/每日签到/.test(text) && /签到|领取|积分/.test(text)) continue;
-    const btn = [...d.querySelectorAll('button')].find(b => {
-      const t = (b.innerText || '').trim();
-      const aria = b.getAttribute('aria-label') || '';
-      return ['我已阅读','我知道了','知道了','我已知悉','知悉','关闭','Close','Got it','确定'].some(
-        k => t.includes(k) || aria.includes(k)
-      );
-    });
-    const looksAnnouncement = /公告|通知|notice|activity|规则|升级|维护|充值、兑换与消费记录/.test(text);
+    if (/摸猫|猫咪占卜|抽一支签|再摸一下猫/.test(text) && /连续摸猫|喵乐园/.test(text)) continue;
+
+    let btn = d.querySelector('[data-slot="dialog-close"]');
+    if (!btn) {
+      btn = [...d.querySelectorAll('button')].find(b => {
+        const t = (b.innerText || b.textContent || '').trim();
+        const aria = b.getAttribute('aria-label') || '';
+        return ['我已阅读','我知道了','知道了','我已知悉','知悉','关闭','Close','Got it','确定'].some(
+          k => t.includes(k) || aria.toLowerCase().includes(k.toLowerCase())
+        );
+      });
+    }
+    if (!btn) {
+      btn = d.querySelector('button.absolute.top-2.right-2, button[aria-label*="close" i], button[aria-label*="关"]');
+    }
+
+    const looksAnnouncement = /公告|通知|notice|activity|规则|升级|维护|充值、兑换与消费记录|更新|重要/.test(text);
     // Close only when we have a real dismiss control AND the text marks this
-    // as an announcement-style overlay. A dialog with 确定/OK but no 公告/通知
-    // marker is a modal decision — leave it alone (fail-safe).
-    if (btn && (looksAnnouncement || /我已阅读|我知道了|我已知悉/.test(text))) {
+    // as an announcement-style overlay or has an explicit dialog-close slot.
+    if (btn && (looksAnnouncement || /我已阅读|我知道了|我已知悉/.test(text) || btn.getAttribute('data-slot') === 'dialog-close')) {
       if (!d.getAttribute('data-dismissed')) {
         btn.click();
         d.setAttribute('data-dismissed', '1');
@@ -10186,13 +10217,14 @@ async def dismiss_obstructing_dialogs(page) -> int:
     """Close announcement-style modal dialogs that would swallow the sign-CTA
     click. Returns how many dialogs were dismissed (0 = nothing to do)."""
     try:
-        count = await page.evaluate(_DIALOG_DISMISS_JS)
+        raw = await page.evaluate(_DIALOG_DISMISS_JS)
+        count = int(raw) if isinstance(raw, (int, float)) or (isinstance(raw, str) and raw.isdigit()) else 0
     except Exception as dismiss_err:
         print(f"  ! dialog dismiss skipped: {dismiss_err}", flush=True)
         return 0
     if count:
         print(f"  dismissed {count} obstruction dialog(s) before CTA click", flush=True)
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.5)
     return count
 
 
@@ -12072,10 +12104,11 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
                 login_url="https://ai.xmiaom.com/sign-in",
             )
         if is_ilovecat_site(url_from_note) or is_ilovecat_name(name):
-            # 靴貓公益站 (api.ilovecat520.me): 每日摸猫 + 猫咪占卜 位于 /playground.
+            # 靴貓公益站 (api.ilovecat520.me): 支持 /dashboard/overview 与 /playground 入口.
+            cat_url = (url_from_note or "").strip() or "https://api.ilovecat520.me/dashboard/overview"
             return SiteAdapter(
                 name=name,
-                url="https://api.ilovecat520.me/playground",
+                url=cat_url,
                 kind="ilovecat",
                 sign_selectors=[
                     "button.cat-pet__cat",
@@ -12087,7 +12120,7 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
                 ],
                 trusted_sign_selectors=True,
                 trusted_already_selectors=True,
-                prefer_catalog_url=True,
+                prefer_catalog_url=False,
                 login_url="https://api.ilovecat520.me/login",
             )
         if is_huaweicloud_site(url_from_note) or is_huaweicloud_name(name):

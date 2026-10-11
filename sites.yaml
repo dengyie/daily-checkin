@@ -219,7 +219,7 @@ sites:
     prefer_catalog_url: true
     login_url: https://ai.xmiaom.com/sign-in
   - name: '靴貓公益站'
-    url: https://api.ilovecat520.me/playground
+    url: https://api.ilovecat520.me/dashboard/overview
     kind: ilovecat
     signs:
       - 'button.cat-pet__cat'
@@ -227,7 +227,7 @@ sites:
     already:
       - 'text=明天再来摸摸吧'
       - 'text=今天已经抽过了，明天再来抽一支吧。'
-    prefer_catalog_url: true
+    prefer_catalog_url: false
     login_url: https://api.ilovecat520.me/login
   - name: '午夜'
     url: https://api.lyjxka.top/profile
@@ -548,6 +548,9 @@ sites:
     kind: newapi_profile
   - name: '快跑'
     url: https://kuaipao.ai/console/personal
+    kind: newapi_profile
+  - name: 'amnew'
+    url: https://api.amnew.dpdns.org/console/personal
     kind: newapi_profile
   # Cloud Studio(腾讯云)个人中心「完成任务送机时」任务卡:已登录用户在
   # 每日签到行右侧点「领取奖励」领取 +2 机时。领取中按钮临时变「领取中」(disabled),
