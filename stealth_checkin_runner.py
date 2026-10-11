@@ -8381,6 +8381,7 @@ async def sub2api_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRe
         pass
     await bypass_chrome_interstitial_if_needed(page)
     await wait_text_ready(page, 30, adapter.ready_rounds)
+    await dismiss_obstructing_dialogs(page)
 
     cur_url = (await page_url(page) or "").lower()
     if "/login" in cur_url or await page.locator("input[type='password']").count() > 0:
@@ -8393,6 +8394,7 @@ async def sub2api_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRe
         except Exception:
             pass
         await wait_text_ready(page, 30, adapter.ready_rounds)
+        await dismiss_obstructing_dialogs(page)
 
     cf = await wait_out_cloudflare(page, CF_WAIT_S)
     if cf:
@@ -10174,34 +10176,57 @@ async def wait_turnstile_token(page, max_s: float = TURNSTILE_TOKEN_WAIT_S) -> b
 # (cngov 2026-08-16 failure). A dialog that is neither recognisably an
 # announcement nor recognisably a sign widget is left ALONE (fail-safe).
 _DIALOG_DISMISS_JS = """() => {
-  const dialogs = [...document.querySelectorAll('[data-slot="dialog-content"], [role="dialog"], .snowapi-dialog-content, div[class*="dialog-content"]')];
+  const candidates = [
+    // 1. 语义化弹窗与模态对话框容器 (Base UI, Radix, ARIA, NewAPI, Element UI, AntD, Semi, Naive)
+    ...document.querySelectorAll('[data-slot="dialog-content"], [role="dialog"], dialog, .snowapi-dialog-content, div[class*="dialog-content"], div[class*="modal-content"], div[class*="modal-dialog"], div.ant-modal, div.ant-modal-content, div.el-dialog, div.semi-modal, div.n-modal'),
+    // 2. 现代全屏固定遮罩层与居中公告容器 (Tailwind / Vue / React / Nuxt fixed overlays，如 fluxion welfare)
+    ...document.querySelectorAll('div.fixed.inset-0, div.fixed.top-0.left-0, div[class*="fixed"][class*="inset-0"]')
+  ];
+  const dialogs = [...new Set(candidates)];
   let closed = 0;
   for (const d of dialogs) {
     if (d.getAttribute('aria-hidden') === 'true') continue;
+    let style;
+    try {
+      style = window.getComputedStyle(d);
+    } catch (_) {
+      continue;
+    }
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+    if (style.pointerEvents === 'none') continue;
+
+    const rect = d.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+
     const text = (d.innerText || d.textContent || '').replace(/\\s+/g, ' ');
-    // Never close a dialog that hosts the check-in widget itself.
+    if (!text && !d.querySelector('button, [role="button"]')) continue;
+
+    // 严禁关闭正在承载真实签到/抽奖/领取的业务组件
     if (/立即签到|开始转动|今日签到|去签到|签到奖励|今日已签/.test(text)) continue;
     if (/每日签到/.test(text) && /签到|领取|积分/.test(text)) continue;
     if (/摸猫|猫咪占卜|抽一支签|再摸一下猫/.test(text) && /连续摸猫|喵乐园/.test(text)) continue;
+    if (/翻牌|开宝箱|翻卡|点击翻牌|幸运大转盘/.test(text)) continue;
 
-    let btn = d.querySelector('[data-slot="dialog-close"]');
+    // 定位关闭/知悉按钮
+    let btn = d.querySelector('[data-slot="dialog-close"], button[aria-label*="关闭" i], button[aria-label*="close" i], button[aria-label*="dismiss" i], button[title*="关闭" i], button[title*="close" i]');
     if (!btn) {
-      btn = [...d.querySelectorAll('button')].find(b => {
+      btn = [...d.querySelectorAll('button, [role="button"]')].find(b => {
         const t = (b.innerText || b.textContent || '').trim();
-        const aria = b.getAttribute('aria-label') || '';
-        return ['我已阅读','我知道了','知道了','我已知悉','知悉','关闭','Close','Got it','确定'].some(
+        const aria = (b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '');
+        return ['全部已读','我知道了','知道了','我已知悉','知悉','关闭','Close','Got it','确定','OK'].some(
           k => t.includes(k) || aria.toLowerCase().includes(k.toLowerCase())
         );
       });
     }
     if (!btn) {
-      btn = d.querySelector('button.absolute.top-2.right-2, button[aria-label*="close" i], button[aria-label*="关"]');
+      btn = d.querySelector('button.absolute.top-2.right-2, button.absolute.top-3.right-3, button.absolute.top-4.right-4, button[class*="close"], button.close');
     }
 
-    const looksAnnouncement = /公告|通知|notice|activity|规则|升级|维护|充值、兑换与消费记录|更新|重要/.test(text);
-    // Close only when we have a real dismiss control AND the text marks this
-    // as an announcement-style overlay or has an explicit dialog-close slot.
-    if (btn && (looksAnnouncement || /我已阅读|我知道了|我已知悉/.test(text) || btn.getAttribute('data-slot') === 'dialog-close')) {
+    const looksAnnouncement = /公告|通知|notice|activity|规则|升级|维护|充值、兑换与消费记录|更新|重要|玩法说明|欢迎|提示|声明|免责/i.test(text);
+    const hasExplicitDismiss = /全部已读|我知道了|我已阅读|我已知悉|关闭|Close/i.test(text) || (btn && /关闭|close|dismiss/i.test((btn.getAttribute('aria-label')||'') + ' ' + (btn.getAttribute('title')||'') + ' ' + (btn.innerText||'')));
+
+    // 仅在具备真实关闭控件且符合公告特征或显式弹窗槽位时执行关闭
+    if (btn && (looksAnnouncement || hasExplicitDismiss || (d.getAttribute('data-slot') === 'dialog-content') || (btn.getAttribute('data-slot') === 'dialog-close'))) {
       if (!d.getAttribute('data-dismissed')) {
         btn.click();
         d.setAttribute('data-dismissed', '1');
@@ -10214,8 +10239,10 @@ _DIALOG_DISMISS_JS = """() => {
 
 
 async def dismiss_obstructing_dialogs(page) -> int:
-    """Close announcement-style modal dialogs that would swallow the sign-CTA
-    click. Returns how many dialogs were dismissed (0 = nothing to do)."""
+    """Close announcement-style modal dialogs and full-screen overlays that would
+    swallow interactions. Returns how many dialogs were dismissed (0 = nothing to do)."""
+    if page is None or not hasattr(page, "evaluate") or not callable(getattr(page, "evaluate", None)):
+        return 0
     try:
         raw = await page.evaluate(_DIALOG_DISMISS_JS)
         count = int(raw) if isinstance(raw, (int, float)) or (isinstance(raw, str) and raw.isdigit()) else 0
@@ -10622,6 +10649,7 @@ async def legacy_checkin_on_page(
             pass
         await bypass_chrome_interstitial_if_needed(page)
         await wait_text_ready(page, 40, adapter.ready_rounds)
+        await dismiss_obstructing_dialogs(page)
 
         cf = await wait_out_cloudflare(page, CF_WAIT_S)
         if cf:
@@ -10671,6 +10699,7 @@ async def legacy_checkin_on_page(
             try:
                 await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
                 await wait_text_ready(page, 40, 12)
+                await dismiss_obstructing_dialogs(page)
             except Exception:
                 pass
 
@@ -10690,6 +10719,7 @@ async def legacy_checkin_on_page(
                 await asyncio.sleep(2.5)
                 await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
                 await wait_text_ready(page, 40, 12)
+                await dismiss_obstructing_dialogs(page)
             elif sso_status in ("CLOUDFLARE", "TIMEOUT", "UPSTREAM_UNAVAILABLE") or (
                 sso_status and str(sso_status).startswith("FAIL")
             ):
@@ -10755,6 +10785,7 @@ async def legacy_checkin_on_page(
             # FAIL (network): transient — fall through so the normal CTA scan
             # can retry/finish; rare, and never double-fires (we already tried).
 
+        await dismiss_obstructing_dialogs(page)
         already_sig = await already_done(
             page, already_selectors, trusted_already=adapter.trusted_already_selectors
         )
@@ -10785,6 +10816,7 @@ async def legacy_checkin_on_page(
             except Exception:
                 pass
 
+        await dismiss_obstructing_dialogs(page)
         btn, used = await wait_for_any_visible(
             page, sign_selectors, SIGN_WAIT_S, allow_generic_sign_cta=True, trusted_sign=adapter.trusted_sign_selectors
         )
@@ -11392,6 +11424,7 @@ async def checkin_on_page(
         url=adapter.url,
         adapter_kind=adapter.kind,
     )
+    await dismiss_obstructing_dialogs(page)
     await provider.inspect(ctx)
     result = await provider.perform(ctx)
     result.provider = provider.name

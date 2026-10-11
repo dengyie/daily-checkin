@@ -526,14 +526,21 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(b_pts.currency, "POINTS")
 
     def test_dialog_dismiss_js_rules(self):
-        """Ensure _DIALOG_DISMISS_JS includes SnowAPI / Base UI modal rules and close slots."""
+        """Ensure _DIALOG_DISMISS_JS covers semantic dialogs, Tailwind fixed overlays and guards."""
         from stealth_checkin_runner import _DIALOG_DISMISS_JS
         self.assertIn('data-slot="dialog-close"', _DIALOG_DISMISS_JS)
         self.assertIn('.snowapi-dialog-content', _DIALOG_DISMISS_JS)
         self.assertIn('role="dialog"', _DIALOG_DISMISS_JS)
+        self.assertIn('div.fixed.inset-0', _DIALOG_DISMISS_JS)
+        self.assertIn('aria-label*="关闭"', _DIALOG_DISMISS_JS)
+        self.assertIn('全部已读', _DIALOG_DISMISS_JS)
+        self.assertIn('玩法说明', _DIALOG_DISMISS_JS)
         self.assertIn('公告', _DIALOG_DISMISS_JS)
         self.assertIn('通知', _DIALOG_DISMISS_JS)
         self.assertIn('data-dismissed', _DIALOG_DISMISS_JS)
+        self.assertIn('立即签到', _DIALOG_DISMISS_JS)
+        self.assertIn('今日已签', _DIALOG_DISMISS_JS)
+        self.assertIn('摸猫', _DIALOG_DISMISS_JS)
 
     def test_ilovecat_adapter_overview_resolution(self):
         """Ensure ilovecat resolves /dashboard/overview without forced override to /playground."""
@@ -556,6 +563,10 @@ class StoreTests(unittest.TestCase):
         closed = asyncio.run(dismiss_obstructing_dialogs(page))
         self.assertEqual(closed, 1)
         self.assertEqual(page.evaluate.call_count, 1)
+
+        # Non-callable or empty object returns 0 without raising
+        self.assertEqual(asyncio.run(dismiss_obstructing_dialogs(None)), 0)
+        self.assertEqual(asyncio.run(dismiss_obstructing_dialogs(object())), 0)
 
 
 class KeychainTests(unittest.TestCase):
