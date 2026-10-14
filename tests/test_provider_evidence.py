@@ -417,6 +417,34 @@ class ProviderEvidenceTests(unittest.TestCase):
         self.assertEqual(res.currency, "CNY")
         self.assertEqual(res.source, "dom")
 
+    def test_extract_emrank_balance_parses_quota_and_reward(self):
+        """EMRank extractor parses Token quota into M Token and extracts reward."""
+        module = load_runner("provider_runner_emrank_balance_test")
+        class FakePage:
+            async def evaluate(self, script):
+                return {
+                    "amount": 246.735735,
+                    "raw_text": "246.735735 M",
+                    "rewardText": "到账 10 M Token",
+                }
+        page = FakePage()
+        adapter = type("Adapter", (), {"name": "emrank", "kind": "browser", "url": "https://emrank.tech/account"})()
+        res = asyncio.run(module.extract_balance_safely(page, adapter))
+        self.assertIsNotNone(res)
+        self.assertEqual(res.amount, 246.735735)
+        self.assertEqual(res.raw_text, "246.735735 M")
+        self.assertEqual(res.currency, "USD")
+        self.assertEqual(res.source, "api")
+        self.assertIn("10", res.reward_text)
+
+    def test_extract_reward_emrank_units(self):
+        """Reward extraction regex supports M Token and Token units."""
+        module = load_runner("provider_runner_reward_test")
+        r1 = module._extract_reward_from_text("签到成功，到账 10 M Token")
+        self.assertEqual(r1, "+10 M Token")
+        r2 = module._extract_reward_from_text("今日签到获得 5000000 Tokens")
+        self.assertEqual(r2, "+5000000 Tokens")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

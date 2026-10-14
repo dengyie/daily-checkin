@@ -1105,6 +1105,26 @@ sites:
       - 'text=签到成功'
       - 'text=今日已签到'
       - 'text=已连续签到'
+  # emrank(emrank.tech, EMRank 嵌入与重排网关)—— 2026-10-14 接入。
+  # 统一管理控制台, 共享 9222 Chrome 会话(已绑定 LinuxDo 会话)。
+  # 个人中心 /account「每日签到」卡片:
+  # 未签 button:has-text("签到领取") -> POST /api/account/check-ins
+  # 已签 button 变为「今日已签到」(disabled) 且展示「今日已签到 / 签到成功，到账 X Token」。
+  # 资产单位为 M Token (1 M = 1,000,000 Token)。
+  - name: 'emrank'
+    url: https://emrank.tech/account
+    kind: browser
+    prefer_catalog_url: true
+    signs:
+      - 'button:has-text("签到领取")'
+      - '#check-ins button:has-text("签到领取")'
+      - 'button:has-text("立即签到")'
+    already:
+      - 'button:has-text("今日已签到")'
+      - '#check-ins button:has-text("今日已签到")'
+      - 'text=今日已签到'
+      - 'text=签到成功'
+      - 'text=已连续签到'
 
 
 

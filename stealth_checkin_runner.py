@@ -1310,6 +1310,24 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         login_url="https://developer.huaweicloud.com/grow",
         kind="browser",
     ),
+    _B(
+        "emrank",
+        "https://emrank.tech/account",
+        signs=[
+            'button:has-text("签到领取")',
+            '#check-ins button:has-text("签到领取")',
+            'button:has-text("立即签到")',
+        ],
+        already=[
+            'button:has-text("今日已签到")',
+            '#check-ins button:has-text("今日已签到")',
+            'text=今日已签到',
+            'text=签到成功',
+            'text=已连续签到',
+        ],
+        prefer_catalog_url=True,
+        kind="browser",
+    ),
 ]
 
 
@@ -11139,17 +11157,17 @@ def _extract_reward_from_text(text: str) -> str:
         except Exception:
             return f"罐头+{cans[0]}"
 
-    units = r"(?:元|刀|tokens?|BTC|积分|点|罐头|个鸡腿|鸡腿|铜币|银币|金币)"
+    units = r"(?:元|刀|tokens?|M Token|M|BTC|积分|点|罐头|个鸡腿|鸡腿|铜币|银币|金币)"
     patterns = [
         # 1. "今天 +BTC 0.8435" 或 "今日 +$0.50" 或 "今天 +0.50 刀"
         rf"(?:今天|今日)\s*\+\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
-        # 2. "签到成功获得 0.50 元" 或 "今日签到获得 2 个鸡腿"
-        rf"(?:签到成功|今日签到|打卡成功|签到|已成功签到)\s*[:：,，!！]?\s*(?:获得|奖励|赠送|获得收益)\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
+        # 2. "签到成功获得 0.50 元" 或 "今日签到获得 2 个鸡腿" 或 "签到成功，到账 1 M Token"
+        rf"(?:签到成功|今日签到|打卡成功|签到|已成功签到)\s*[:：,，!！]?\s*(?:获得|奖励|赠送|获得收益|到账)\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
         # 3. GLaDOS "Got 1 Points"
         r"(?:Checkin!\s*Got|Got)\s*(\d+\s*Points?)",
-        # 4. "获得 2 个鸡腿" 或 "获得鸡腿 5 个"
-        rf"(?:获得|奖励|赠送)\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units})",
-        rf"(?:获得|奖励|赠送)\s*({units}\s*[\d.]+\s*(?:个|点|枚)?)",
+        # 4. "获得 2 个鸡腿" 或 "获得鸡腿 5 个" 或 "到账 1 M Token"
+        rf"(?:获得|奖励|赠送|到账)\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units})",
+        rf"(?:获得|奖励|赠送|到账)\s*({units}\s*[\d.]+\s*(?:个|点|枚)?)",
         # 5. 通用 "+$0.50" 或 "+BTC 0.8435" 或 "+1 积分"
         rf"\+\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
     ]
@@ -11291,11 +11309,11 @@ async def _extract_dom_balance(page) -> BalanceEvidence | None:
                 try {
                     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
                     let node;
-                    const reMoney = /(?:当前余额|可用额度|账户余额|我的余额|钱包余额|可用代币|总代币|可用金额)\s*[:：]?\s*([¥$€￥]?\s*[\d,]+(?:\.\d+)?)/i;
+                    const reMoney = /(?:当前余额|可用额度|账户余额|我的余额|钱包余额|可用代币|总代币|可用金额)\s*[:：]?\s*([¥$€￥]?\s*[\d,]+(?:\.\d+)?(?:\s*[MkBKb]|\s*Tokens?|\s*点|\s*分)?)/i;
                     const rePoints = /(?:剩余积分|我的积分|当前积分|可用积分)\s*[:：]?\s*([\d,]+(?:\.\d+)?)/i;
                     const reLabelMoney = /(?:当前余额|可用额度|账户余额|我的余额|钱包余额|可用代币|总代币|可用金额)/i;
                     const reLabelPoints = /(?:剩余积分|我的积分|当前积分|可用积分)/i;
-                    const reValMoney = /([¥$€￥]\s*[\d,]+(?:\.\d+)?|[\d,]+(?:\.\d+)?\s*(?:元|刀|tokens?))/i;
+                    const reValMoney = /([¥$€￥]\s*[\d,]+(?:\.\d+)?(?:\s*[MkBKb]|\s*Tokens?|\s*点|\s*分)?|[\d,]+(?:\.\d+)?\s*(?:元|刀|tokens?|[MkBKb]))/i;
                     const reValPoints = /([\d,]+(?:\.\d+)?)\s*(?:积分|points?)/i;
                     const reReward = /(?:今天|今日)\s*\+\s*[¥$￥€A-Za-z0-9.]+|获得[\d.]+\s*(?:元|刀|积分|点|个鸡腿|罐头)/i;
 
@@ -11417,10 +11435,81 @@ NEWAPI_COMPATIBLE_KINDS = {
 }
 
 
+async def _extract_emrank_balance(page) -> BalanceEvidence | None:
+    """Extract account balance and check-in reward from EMRank.
+
+    1. Reads /api/account in page context for authoritative quota.
+       EMRank uses 1 M = 1,000,000 Token.
+    2. Inspects page DOM and /api/account/check-ins for incremental reward text.
+    """
+    try:
+        data = await page.evaluate(
+            r"""async () => {
+                let amount = null;
+                let raw_text = "";
+                let rewardText = "";
+                try {
+                    const res = await fetch("/api/account");
+                    if (res.ok) {
+                        const accData = await res.json();
+                        const quota = accData?.quota;
+                        if (quota != null) {
+                            const val = Number(quota) / 1000000;
+                            amount = val;
+                            raw_text = `${val.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")} M`;
+                        }
+                    }
+                } catch (e) {}
+
+                try {
+                    const alertEl = document.querySelector(".MuiAlert-message");
+                    if (alertEl && alertEl.innerText) {
+                        rewardText = alertEl.innerText.trim();
+                    }
+                    if (!rewardText) {
+                        const ckRes = await fetch("/api/account/check-ins");
+                        if (ckRes.ok) {
+                            const ckData = await ckRes.json();
+                            const recs = ckData?.records || [];
+                            const today = ckData?.today;
+                            const todayRec = recs.find(r => r.day === today);
+                            if (todayRec && todayRec.reward) {
+                                const rNum = Number(todayRec.reward) / 1000000;
+                                rewardText = `到账 ${rNum.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")} M Token`;
+                            }
+                        }
+                    }
+                } catch (e) {}
+
+                return { amount, raw_text, rewardText };
+            }"""
+        )
+        if isinstance(data, dict) and data.get("amount") is not None:
+            amt = float(data["amount"])
+            raw = str(data.get("raw_text") or f"{amt} M")
+            reward = _extract_reward_from_text(str(data.get("rewardText") or ""))
+            return BalanceEvidence(
+                amount=amt,
+                raw_text=raw,
+                currency="USD",
+                captured_at=datetime.now().isoformat(timespec="seconds"),
+                source="api",
+                reward_text=reward,
+            )
+    except Exception as e:
+        print(f"  emrank balance extraction note: {e}", flush=True)
+    return None
+
+
 async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | None:
     kind = getattr(adapter, "kind", "browser")
     if kind == "glados":
         b = await _extract_glados_balance(page)
+        if b:
+            return b
+
+    if getattr(adapter, "name", "") == "emrank" or "emrank.tech" in getattr(adapter, "url", ""):
+        b = await _extract_emrank_balance(page)
         if b:
             return b
 
