@@ -1145,6 +1145,31 @@ sites:
       - 'text=今天已经签过'
       - 'text=签到成功'
       - 'text=今天已经签过了'
+  # leileihog(fapi.leileihog.top, 一梦五千年 / Hog API Gateway)—— 2026-10-14 接入。
+  # 现代 React + TanStack Query 架构 (Mr-Groundhog/hog-api-gateway, New API 系)。
+  # 抽奖签到位于 /lottery:
+  # 九宫格中心按键 button.lottery-board-center:
+  # 未抽: button:not([disabled]) 展示「抽奖/点击抽奖」+「剩余抽奖次数: 1」 -> POST /api/lottery/draw
+  # 已抽: button[disabled] 展示「今日已抽」+「今日抽奖次数已用完」。
+  # 资产单位为 USD ($)，通过 /api/user/auth/refresh 换取 Bearer Token 读取 /api/user/self (quota / 500000.0)
+  # 与 /api/lottery/status (my_draw.quotaAmount 或 prizeLabel 提取当日中奖收益)。
+  - name: 'leileihog'
+    url: https://fapi.leileihog.top/lottery
+    kind: browser
+    prefer_catalog_url: true
+    signs:
+      - 'button.lottery-board-center:not([disabled])'
+      - 'button.lottery-board-center'
+      - 'button:has-text("点击抽奖")'
+      - 'button:has-text("抽奖")'
+    already:
+      - 'button.lottery-board-center[disabled]'
+      - 'button:has-text("今日已抽")'
+      - 'text=今日已抽'
+      - 'text=今日抽奖次数已用完'
+      - 'text=剩余抽奖次数: 0'
+      - 'text=抽奖成功'
+
 
 
 

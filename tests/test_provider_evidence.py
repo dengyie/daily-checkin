@@ -475,6 +475,25 @@ class ProviderEvidenceTests(unittest.TestCase):
         r3 = module._extract_reward_from_text("到账 180 分")
         self.assertEqual(r3, "+180 分")
 
+    def test_extract_leileihog_balance_parses_usd_and_reward(self):
+        """leileihog extractor converts New-API quota to USD and captures lottery prize."""
+        module = load_runner("provider_runner_leileihog_balance_test")
+        class FakePage:
+            async def evaluate(self, script):
+                return {
+                    "quota": 4135813,
+                    "rewardText": "+$1",
+                }
+        page = FakePage()
+        adapter = type("Adapter", (), {"name": "leileihog", "kind": "browser", "url": "https://fapi.leileihog.top/lottery"})()
+        res = asyncio.run(module.extract_balance_safely(page, adapter))
+        self.assertIsNotNone(res)
+        self.assertAlmostEqual(res.amount, 8.2716, places=4)
+        self.assertEqual(res.raw_text, "$8.27")
+        self.assertEqual(res.currency, "USD")
+        self.assertEqual(res.source, "api")
+        self.assertEqual(res.reward_text, "+$1")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

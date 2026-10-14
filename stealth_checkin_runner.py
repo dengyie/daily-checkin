@@ -1346,6 +1346,26 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
         kind="browser",
     ),
+    _B(
+        "leileihog",
+        "https://fapi.leileihog.top/lottery",
+        signs=[
+            'button.lottery-board-center:not([disabled])',
+            'button.lottery-board-center',
+            'button:has-text("点击抽奖")',
+            'button:has-text("抽奖")',
+        ],
+        already=[
+            'button.lottery-board-center[disabled]',
+            'button:has-text("今日已抽")',
+            'text=今日已抽',
+            'text=今日抽奖次数已用完',
+            'text=剩余抽奖次数: 0',
+            'text=抽奖成功',
+        ],
+        prefer_catalog_url=True,
+        kind="browser",
+    ),
 ]
 
 
@@ -11586,6 +11606,79 @@ async def _extract_404api_balance(page) -> BalanceEvidence | None:
     return None
 
 
+async def _extract_leileihog_balance(page) -> BalanceEvidence | None:
+    """Extract account balance and lottery draw reward from 一梦五千年 (fapi.leileihog.top).
+
+    1. Exchanges cookie session via POST /api/user/auth/refresh for access token and initial quota.
+    2. Fallbacks to /api/user/self if user.quota is missing in refresh response.
+       Quota is converted from New-API standard 500,000 / $1.00 ratio.
+    3. Queries /api/lottery/status with Authorization header to extract today's prize (my_draw.quotaAmount -> +$X).
+    """
+    try:
+        data = await page.evaluate(
+            r"""async () => {
+                let quota = null;
+                let rewardText = "";
+                try {
+                    const refreshRes = await fetch("/api/user/auth/refresh", { method: "POST" });
+                    if (refreshRes.ok) {
+                        const refreshData = await refreshRes.json();
+                        const token = refreshData?.data?.access_token || refreshData?.data?.token;
+                        if (refreshData?.data?.user?.quota != null) {
+                            quota = refreshData.data.user.quota;
+                        }
+                        if (token) {
+                            if (quota == null) {
+                                const selfRes = await fetch("/api/user/self", {
+                                    headers: { "Authorization": "Bearer " + token }
+                                });
+                                if (selfRes.ok) {
+                                    const selfData = await selfRes.json();
+                                    if (selfData?.data?.quota != null) {
+                                        quota = selfData.data.quota;
+                                    }
+                                }
+                            }
+                            const lotRes = await fetch("/api/lottery/status", {
+                                headers: { "Authorization": "Bearer " + token }
+                            });
+                            if (lotRes.ok) {
+                                const lotData = await lotRes.json();
+                                const myDraw = lotData?.data?.my_draw;
+                                if (myDraw && myDraw.quotaAmount != null && myDraw.quotaAmount > 0) {
+                                    const dollars = myDraw.quotaAmount / 500000.0;
+                                    rewardText = "+$" + (dollars % 1 === 0 ? dollars.toFixed(0) : dollars.toFixed(2));
+                                } else if (myDraw && myDraw.prizeLabel) {
+                                    rewardText = myDraw.prizeLabel.startsWith("+") ? myDraw.prizeLabel : "+" + myDraw.prizeLabel;
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {}
+                return { quota, rewardText };
+            }"""
+        )
+        if isinstance(data, dict) and data.get("quota") is not None:
+            quota = int(data["quota"])
+            dollars = round(quota / 500000.0, 4)
+            raw = f"${dollars:.2f}"
+            reward = _extract_reward_from_text(str(data.get("rewardText") or ""))
+            if not reward and data.get("rewardText"):
+                reward = str(data["rewardText"])
+            return BalanceEvidence(
+                amount=dollars,
+                raw_text=raw,
+                currency="USD",
+                quota_raw=quota,
+                captured_at=datetime.now().isoformat(timespec="seconds"),
+                source="api",
+                reward_text=reward,
+            )
+    except Exception as e:
+        print(f"  leileihog balance extraction note: {e}", flush=True)
+    return None
+
+
 async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | None:
     kind = getattr(adapter, "kind", "browser")
     if kind == "glados":
@@ -11600,6 +11693,11 @@ async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | N
 
     if getattr(adapter, "name", "") == "404api" or "404-found.uk" in getattr(adapter, "url", ""):
         b = await _extract_404api_balance(page)
+        if b:
+            return b
+
+    if getattr(adapter, "name", "") == "leileihog" or "leileihog.top" in getattr(adapter, "url", ""):
+        b = await _extract_leileihog_balance(page)
         if b:
             return b
 
@@ -12439,6 +12537,30 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
             return _N(name, "https://si.99442200.xyz/profile", prefer_catalog_url=True)
         if "yuheng.site" in (url_from_note or "").lower() or name.lower() in ("yuheng", "玉衡", "玉衡中转"):
             return _N(name, "https://yuheng.site/profile", prefer_catalog_url=True)
+        if "leileihog.top" in (url_from_note or "").lower() or name.lower() in ("leileihog", "一梦五千年"):
+            match = next((a for a in _BUILTIN_SITE_ADAPTERS if a.name == "leileihog"), None)
+            if match:
+                return match
+            return _B(
+                name,
+                "https://fapi.leileihog.top/lottery",
+                signs=[
+                    'button.lottery-board-center:not([disabled])',
+                    'button.lottery-board-center',
+                    'button:has-text("点击抽奖")',
+                    'button:has-text("抽奖")',
+                ],
+                already=[
+                    'button.lottery-board-center[disabled]',
+                    'button:has-text("今日已抽")',
+                    'text=今日已抽',
+                    'text=今日抽奖次数已用完',
+                    'text=剩余抽奖次数: 0',
+                    'text=抽奖成功',
+                ],
+                prefer_catalog_url=True,
+                kind="browser",
+            )
         u = (url_from_note or "").lower()
         if any(x in u for x in ("/profile", "/console/personal", "/check-in", "/checkin")):
             return _N(name, url_from_note)
