@@ -1328,6 +1328,24 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
         kind="browser",
     ),
+    _B(
+        "404api",
+        "https://wb.404-found.uk/hb/me",
+        signs=[
+            '.card:has-text("每日签到") button:has-text("签到")',
+            'button:has-text("签到")',
+        ],
+        already=[
+            '.card:has-text("每日签到") button:has-text("今天已签到")',
+            'button:has-text("今天已签到")',
+            'text=今天已签到',
+            'text=今天已经签过',
+            'text=签到成功',
+            'text=今天已经签过了',
+        ],
+        prefer_catalog_url=True,
+        kind="browser",
+    ),
 ]
 
 
@@ -11157,7 +11175,7 @@ def _extract_reward_from_text(text: str) -> str:
         except Exception:
             return f"罐头+{cans[0]}"
 
-    units = r"(?:元|刀|tokens?|M Token|M|BTC|积分|点|罐头|个鸡腿|鸡腿|铜币|银币|金币)"
+    units = r"(?:元|刀|tokens?|M Token|M|BTC|积分|点|分|罐头|个鸡腿|鸡腿|铜币|银币|金币)"
     patterns = [
         # 1. "今天 +BTC 0.8435" 或 "今日 +$0.50" 或 "今天 +0.50 刀"
         rf"(?:今天|今日)\s*\+\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
@@ -11415,7 +11433,13 @@ async def _extract_dom_balance(page) -> BalanceEvidence | None:
                     amt = float(m_num.group(1))
                 except ValueError:
                     amt = None
-            if extracted.get("type") == "points" or "积分" in raw_combined or "point" in raw_combined:
+            if (
+                extracted.get("type") == "points"
+                or "积分" in raw_combined
+                or "point" in raw_combined
+                or "分" in val_str
+                or re.search(r"[\d,]+(?:\.\d+)?\s*分", raw_combined)
+            ):
                 cur = "POINTS"
             return BalanceEvidence(
                 amount=amt,
@@ -11501,6 +11525,67 @@ async def _extract_emrank_balance(page) -> BalanceEvidence | None:
     return None
 
 
+async def _extract_404api_balance(page) -> BalanceEvidence | None:
+    """Extract account balance and check-in reward from 404API (wb.404-found.uk).
+
+    1. Reads /hb/api/v1/me in page context for authoritative balance and checkin info.
+       Points are in integer '分' (currency: POINTS).
+    2. If checkin is done, extracts today's points reward text.
+    """
+    try:
+        data = await page.evaluate(
+            r"""async () => {
+                let amount = null;
+                let raw_text = "";
+                let rewardText = "";
+                try {
+                    const res = await fetch("/hb/api/v1/me");
+                    if (res.ok) {
+                        const meData = await res.json();
+                        const bal = meData?.account?.balance;
+                        if (bal != null) {
+                            amount = Number(bal);
+                            raw_text = `${bal} 分`;
+                        }
+                        const ck = meData?.checkin;
+                        if (ck && ck.done && ck.today_points) {
+                            rewardText = `到账 ${ck.today_points} 分`;
+                        }
+                    }
+                } catch (e) {}
+
+                if (!rewardText) {
+                    try {
+                        const card = Array.from(document.querySelectorAll(".card")).find(c => c.textContent && c.textContent.includes("每日签到"));
+                        if (card) {
+                            const m = card.innerText.match(/本次\s*\+(\d+)\s*分/);
+                            if (m) {
+                                rewardText = `到账 ${m[1]} 分`;
+                            }
+                        }
+                    } catch (e) {}
+                }
+
+                return { amount, raw_text, rewardText };
+            }"""
+        )
+        if isinstance(data, dict) and data.get("amount") is not None:
+            amt = float(data["amount"])
+            raw = str(data.get("raw_text") or f"{int(amt)} 分")
+            reward = _extract_reward_from_text(str(data.get("rewardText") or ""))
+            return BalanceEvidence(
+                amount=amt,
+                raw_text=raw,
+                currency="POINTS",
+                captured_at=datetime.now().isoformat(timespec="seconds"),
+                source="api",
+                reward_text=reward,
+            )
+    except Exception as e:
+        print(f"  404api balance extraction note: {e}", flush=True)
+    return None
+
+
 async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | None:
     kind = getattr(adapter, "kind", "browser")
     if kind == "glados":
@@ -11510,6 +11595,11 @@ async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | N
 
     if getattr(adapter, "name", "") == "emrank" or "emrank.tech" in getattr(adapter, "url", ""):
         b = await _extract_emrank_balance(page)
+        if b:
+            return b
+
+    if getattr(adapter, "name", "") == "404api" or "404-found.uk" in getattr(adapter, "url", ""):
+        b = await _extract_404api_balance(page)
         if b:
             return b
 

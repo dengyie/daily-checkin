@@ -445,6 +445,36 @@ class ProviderEvidenceTests(unittest.TestCase):
         r2 = module._extract_reward_from_text("今日签到获得 5000000 Tokens")
         self.assertEqual(r2, "+5000000 Tokens")
 
+    def test_extract_404api_balance_parses_points_and_reward(self):
+        """404API extractor parses integer points into POINTS currency and extracts reward."""
+        module = load_runner("provider_runner_404api_balance_test")
+        class FakePage:
+            async def evaluate(self, script):
+                return {
+                    "amount": 350.0,
+                    "raw_text": "350 分",
+                    "rewardText": "到账 150 分",
+                }
+        page = FakePage()
+        adapter = type("Adapter", (), {"name": "404api", "kind": "browser", "url": "https://wb.404-found.uk/hb/me"})()
+        res = asyncio.run(module.extract_balance_safely(page, adapter))
+        self.assertIsNotNone(res)
+        self.assertEqual(res.amount, 350.0)
+        self.assertEqual(res.raw_text, "350 分")
+        self.assertEqual(res.currency, "POINTS")
+        self.assertEqual(res.source, "api")
+        self.assertEqual(res.reward_text, "+150 分")
+
+    def test_extract_reward_404api_points_unit(self):
+        """Reward extraction regex supports '分' as points unit."""
+        module = load_runner("provider_runner_reward_404api_test")
+        r1 = module._extract_reward_from_text("签到成功，+150 分")
+        self.assertEqual(r1, "+150 分")
+        r2 = module._extract_reward_from_text("本次 +120 分，已计入余额")
+        self.assertEqual(r2, "+120 分")
+        r3 = module._extract_reward_from_text("到账 180 分")
+        self.assertEqual(r3, "+180 分")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
