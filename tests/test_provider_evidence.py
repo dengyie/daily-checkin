@@ -494,6 +494,20 @@ class ProviderEvidenceTests(unittest.TestCase):
         self.assertEqual(res.source, "api")
         self.assertEqual(res.reward_text, "+$1")
 
+    def test_units_regex_word_boundary_and_alias_resolution(self):
+        """Verify units regex has word boundaries and alias resolution reuses adapter template."""
+        module = load_runner("provider_runner_review_regression_test")
+        # 1. Units regex boundary
+        self.assertEqual(module._extract_reward_from_text("到账 10 M Token"), "+10 M Token")
+        self.assertEqual(module._extract_reward_from_text("到账 10 M"), "+10 M")
+        self.assertEqual(module._extract_reward_from_text("到账 10 MB"), "")
+
+        # 2. Alias resolution
+        ad = module.resolve_site("一梦五千年", "https://fapi.leileihog.top/lottery")
+        self.assertIsNotNone(ad)
+        self.assertEqual(ad.name, "一梦五千年")
+        self.assertTrue(any("lottery-board-center" in s for s in ad.already_selectors))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

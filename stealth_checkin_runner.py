@@ -11195,7 +11195,7 @@ def _extract_reward_from_text(text: str) -> str:
         except Exception:
             return f"罐头+{cans[0]}"
 
-    units = r"(?:元|刀|tokens?|M Token|M|BTC|积分|点|分|罐头|个鸡腿|鸡腿|铜币|银币|金币)"
+    units = r"(?:元|刀|tokens?|M Token|\bM\b|BTC|积分|点|分|罐头|个鸡腿|鸡腿|铜币|银币|金币)"
     patterns = [
         # 1. "今天 +BTC 0.8435" 或 "今日 +$0.50" 或 "今天 +0.50 刀"
         rf"(?:今天|今日)\s*\+\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
@@ -11626,6 +11626,8 @@ async def _extract_leileihog_balance(page) -> BalanceEvidence | None:
                         const token = refreshData?.data?.access_token || refreshData?.data?.token;
                         if (refreshData?.data?.user?.quota != null) {
                             quota = refreshData.data.user.quota;
+                        } else if (refreshData?.data?.quota != null) {
+                            quota = refreshData.data.quota;
                         }
                         if (token) {
                             if (quota == null) {
@@ -12538,29 +12540,31 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
         if "yuheng.site" in (url_from_note or "").lower() or name.lower() in ("yuheng", "玉衡", "玉衡中转"):
             return _N(name, "https://yuheng.site/profile", prefer_catalog_url=True)
         if "leileihog.top" in (url_from_note or "").lower() or name.lower() in ("leileihog", "一梦五千年"):
-            match = next((a for a in _BUILTIN_SITE_ADAPTERS if a.name == "leileihog"), None)
+            match = next((a for a in SITE_ADAPTERS if a.name == "leileihog"), None)
+            if not match:
+                match = next((a for a in _BUILTIN_SITE_ADAPTERS if a.name == "leileihog"), None)
             if match:
-                return match
-            return _B(
-                name,
-                "https://fapi.leileihog.top/lottery",
-                signs=[
-                    'button.lottery-board-center:not([disabled])',
-                    'button.lottery-board-center',
-                    'button:has-text("点击抽奖")',
-                    'button:has-text("抽奖")',
-                ],
-                already=[
-                    'button.lottery-board-center[disabled]',
-                    'button:has-text("今日已抽")',
-                    'text=今日已抽',
-                    'text=今日抽奖次数已用完',
-                    'text=剩余抽奖次数: 0',
-                    'text=抽奖成功',
-                ],
-                prefer_catalog_url=True,
-                kind="browser",
-            )
+                if match.name == name:
+                    return match
+                return SiteAdapter(
+                    name=name,
+                    url=match.url,
+                    kind=match.kind,
+                    sign_selectors=list(match.sign_selectors),
+                    already_selectors=list(match.already_selectors),
+                    ready_rounds=match.ready_rounds,
+                    prefer_cta_before_auth=match.prefer_cta_before_auth,
+                    use_native_click=match.use_native_click,
+                    use_overlay_zapper=match.use_overlay_zapper,
+                    trusted_sign_selectors=match.trusted_sign_selectors,
+                    trusted_already_selectors=match.trusted_already_selectors,
+                    prefer_catalog_url=match.prefer_catalog_url,
+                    feature_unavailable_reason=match.feature_unavailable_reason,
+                    signin_api=match.signin_api,
+                    signin_api_uid_header=match.signin_api_uid_header,
+                    trust_cta_has_text=match.trust_cta_has_text,
+                    login_url=match.login_url,
+                )
         u = (url_from_note or "").lower()
         if any(x in u for x in ("/profile", "/console/personal", "/check-in", "/checkin")):
             return _N(name, url_from_note)
