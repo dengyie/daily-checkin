@@ -5216,6 +5216,68 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertNotIn("已签到", indicators)
         self.assertNotIn("签到成功", indicators)
 
+    def test_unified_benefit_selectors_registered(self):
+        """RELAYFOR_CAMPAIGN_SELECTORS 覆盖统一福利、套餐福利与助力按钮."""
+        selectors = self.m.RELAYFOR_CAMPAIGN_SELECTORS
+        self.assertIn("button[data-claim-unified-benefit]", selectors)
+        self.assertIn("button[data-claim-benefit]", selectors)
+        self.assertIn("button[data-token-loan-loss-pool-cut]", selectors)
+
+    def test_token_loan_hidden_card_does_not_falsely_settle(self):
+        """hidden 的词元贷卡片绝不能直接被判定为已结清 (杜绝假阳性 ALREADY)."""
+        class FakePage:
+            async def goto(self, *a, **k):
+                pass
+            async def evaluate(self, expr):
+                if "[data-token-loan-card]" in expr and "classList.contains" in expr:
+                    return False
+                return None
+            def locator(self, sel):
+                class FakeLoc:
+                    async def count(self):
+                        return 0
+                    @property
+                    def first(self):
+                        return self
+                    async def is_visible(self, **k):
+                        return False
+                    async def is_disabled(self):
+                        return False
+                return FakeLoc()
+
+        async def fake_wait(*a, **k):
+            return True
+        async def fake_cf(*a, **k):
+            return None
+        async def fake_dis(*a, **k):
+            return None
+        async def fake_text(*a, **k):
+            return ""
+
+        page = FakePage()
+        with mock.patch.object(self.m, "wait_text_ready", fake_wait), \
+             mock.patch.object(self.m, "wait_out_cloudflare", fake_cf), \
+             mock.patch.object(self.m, "dismiss_obstructing_dialogs", fake_dis), \
+             mock.patch.object(self.m, "page_text", fake_text):
+            res = self.asyncio.run(self.m.relayfor_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_button")
+
+    def test_relayfor_balance_extraction_dom(self):
+        """_extract_relayfor_balance 成功提取 USD 余额与奖励文案."""
+        class FakeBalancePage:
+            async def evaluate(self, expr):
+                return {
+                    "raw": "$279.90",
+                    "reward": "+$280.00",
+                }
+        bal = self.asyncio.run(self.m._extract_relayfor_balance(FakeBalancePage()))
+        self.assertIsNotNone(bal)
+        self.assertEqual(bal.amount, 279.90)
+        self.assertEqual(bal.currency, "USD")
+        self.assertEqual(bal.reward_text, "+$280.00")
+        self.assertEqual(bal.source, "dom")
+
 
 class TestRelayForGoCheckin(unittest.TestCase):
     """relayfor-go (RelayFor Go 会员每日签到) 独立任务测试套件."""

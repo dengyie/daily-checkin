@@ -6658,8 +6658,13 @@ RELAYFOR_REPAY_SELECTORS = [
 ]
 RELAYFOR_CAMPAIGN_SELECTORS = [
     'button[data-checkin-claim]',
+    'button[data-claim-unified-benefit]',
+    'button[data-claim-benefit]',
+    'button[data-token-loan-loss-pool-cut]',
     '[data-user-checkin-section] button:has-text("立即签到")',
+    '[data-user-checkin-section] button:has-text("补签")',
     'button:has-text("立即签到")',
+    'button:has-text("补签")',
 ]
 # 已处理 / 完结态专属文案(严格排除全页宽泛的「已签到/签到成功」,避免活动等卡片污染词元贷状态)
 RELAYFOR_DONE_INDICATORS = ("已还清", "今日已处理", "已提完")
@@ -6736,7 +6741,7 @@ async def _relayfor_available_button(page, selectors: list[str]) -> str | None:
 
 
 async def _relayfor_today_done(page) -> bool:
-    """站点「今日已签到 / 已还清」disabled 按钮在位 → 今日已处理,不再借/还.
+    """站点「今日已签到 / 已还清 / 活动已签」在位且无待领按钮 → 今日已处理,不再借/还.
 
     实测(2026-09-19):当日还款完成后页面仍放出「确认借款」按钮(下一周期
     预告),仅按「动作按钮优先」会误点借款。完结态按钮存在时必须先于借/还
@@ -6763,6 +6768,40 @@ async def _relayfor_today_done(page) -> bool:
                     return True
             except Exception:
                 continue
+
+    # 检查限时签到活动卡片 (.checkin-user-card) 是否已签到 (且当前无待签到按钮)
+    try:
+        campaign_status = await page.evaluate(r"""() => {
+            function isVisible(el) {
+                if (!el) return false;
+                if (el.closest('.hidden')) return false;
+                if (el.offsetParent === null && el.offsetWidth === 0 && el.offsetHeight === 0) return false;
+                return true;
+            }
+            const claimBtns = Array.from(document.querySelectorAll(
+                'button[data-checkin-claim]:not([disabled]), ' +
+                'button[data-claim-unified-benefit]:not([disabled]), ' +
+                'button[data-claim-benefit]:not([disabled]), ' +
+                'button[data-token-loan-loss-pool-cut]:not([disabled])'
+            )).filter(isVisible);
+            if (claimBtns.length > 0) return false;
+            const cards = Array.from(document.querySelectorAll('.checkin-user-card')).filter(isVisible);
+            for (const c of cards) {
+                const tags = c.querySelectorAll('.tag.success');
+                for (const t of tags) {
+                    const txt = t.textContent.trim();
+                    if (txt.includes('已签到') || txt.includes('已补签')) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }""")
+        if campaign_status:
+            return True
+    except Exception:
+        pass
+
     return False
 
 
@@ -6771,7 +6810,8 @@ async def _relayfor_done_state(page) -> str:
 
     针对词元贷卡片与专属文案做精准判据:
     1. 优先读取 DOM 级 [data-token-loan-card] 的 status/button/remaining;
-    2. 兜底扫描 RELAYFOR_DONE_INDICATORS ("已还清", "今日已处理", "已提完");
+    2. 检查 .checkin-user-card 中的 .tag.success 完结态;
+    3. 兜底扫描 RELAYFOR_DONE_INDICATORS ("已还清", "今日已处理", "已提完");
     绝不扫描全页宽泛的「已签到/签到成功」,防限时签到活动卡片引发假阳性。
     """
     try:
@@ -6796,6 +6836,38 @@ async def _relayfor_done_state(page) -> str:
                 return "status:今日已签到"
             if "已还清" in card_info.get("remaining_text", ""):
                 return "remaining:已还清"
+    except Exception:
+        pass
+
+    try:
+        campaign_done = await page.evaluate(r"""() => {
+            function isVisible(el) {
+                if (!el) return false;
+                if (el.closest('.hidden')) return false;
+                if (el.offsetParent === null && el.offsetWidth === 0 && el.offsetHeight === 0) return false;
+                return true;
+            }
+            const claimBtns = Array.from(document.querySelectorAll(
+                'button[data-checkin-claim]:not([disabled]), ' +
+                'button[data-claim-unified-benefit]:not([disabled]), ' +
+                'button[data-claim-benefit]:not([disabled]), ' +
+                'button[data-token-loan-loss-pool-cut]:not([disabled])'
+            )).filter(isVisible);
+            if (claimBtns.length > 0) return "";
+            const cards = Array.from(document.querySelectorAll('.checkin-user-card')).filter(isVisible);
+            for (const c of cards) {
+                const tags = c.querySelectorAll('.tag.success');
+                for (const t of tags) {
+                    const txt = t.textContent.trim();
+                    if (txt.includes('已签到') || txt.includes('已补签')) {
+                        return 'campaign:' + txt;
+                    }
+                }
+            }
+            return "";
+        }""")
+        if campaign_done:
+            return campaign_done
     except Exception:
         pass
 
@@ -6970,22 +7042,29 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
             claim_attr = c_sel
             if hasattr(loc, "get_attribute"):
                 try:
-                    claim_attr = (await loc.get_attribute("data-checkin-claim")) or c_sel
+                    claim_attr = (
+                        (await loc.get_attribute("data-checkin-claim"))
+                        or (await loc.get_attribute("data-claim-unified-benefit"))
+                        or (await loc.get_attribute("data-claim-benefit"))
+                        or (await loc.get_attribute("data-token-loan-loss-pool-cut"))
+                        or c_sel
+                    )
                 except Exception:
                     pass
             if claim_attr in seen_claims:
                 break
             seen_claims.add(claim_attr)
 
-            print(f"  relayfor: clicking campaign claim ({claim_attr})...", flush=True)
+            print(f"  relayfor: clicking campaign/benefit claim ({claim_attr})...", flush=True)
             await loc.click(timeout=5000, force=True)
             action_evidence = ActionEvidence(
                 kind="native_click" if adapter.use_native_click else "dom_click",
-                target=f"button[data-checkin-claim='{claim_attr}']",
+                target=f"{c_sel}[{claim_attr}]",
                 attempted_at=datetime.now().isoformat(timespec="seconds"),
             )
             await asyncio.sleep(1.5)
-            actions_executed.append("活动签到成功")
+            action_desc = "活动签到成功" if ("checkin" in claim_attr or "立即签到" in c_sel or "补签" in c_sel) else f"领取福利成功({claim_attr})"
+            actions_executed.append(action_desc)
         except Exception as e:
             print(f"  ! relayfor campaign claim click: {e}", flush=True)
             break
@@ -7079,13 +7158,12 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
             attribution="precheck",
         )
 
-    # 9. 检查词元贷卡片是否已结清或隐藏(通过 DOM 属性与 status)
+    # 9. 检查词元贷卡片是否已结清 (需卡片可见且有明确结清证据，hidden 说明功能下线而非当日已结清)
     card_settled = False
     try:
         card_settled = await page.evaluate("""() => {
             const card = document.querySelector("[data-token-loan-card]");
-            if (!card) return true;
-            if (card.classList.contains("hidden")) return true;
+            if (!card || card.classList.contains("hidden")) return false;
             const remaining = document.querySelector("[data-token-loan-remaining]")?.textContent || "";
             return remaining.includes("已还清");
         }""")
@@ -7107,7 +7185,7 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
     # 10. 既无可操作按钮，又无任何已处理/结清证据 → 判定为 no_button，不再静默假阳性 ALREADY
     return fail_result(
         "no_button",
-        detail="relayfor 未找到借/还按钮且未见已处理证据",
+        detail="relayfor 未找到借/还/活动按钮且未见已处理证据",
         adapter=kind,
     )
 
@@ -11680,6 +11758,49 @@ async def _extract_leileihog_balance(page) -> BalanceEvidence | None:
     return None
 
 
+async def _extract_relayfor_balance(page) -> BalanceEvidence | None:
+    """提取 RelayFor 站点余额 (USD) 及当日签到奖励."""
+    try:
+        data = await page.evaluate(r"""() => {
+            let raw = document.querySelector('[data-balance-total], [data-user-quota], [data-balance-timed]')?.textContent?.trim() || '';
+            if (!raw) {
+                const btn = document.querySelector('button.balance-trigger');
+                if (btn) {
+                    const aria = btn.getAttribute('aria-label') || '';
+                    const m = aria.match(/\$([0-9,.]+)/);
+                    if (m) raw = '$' + m[1];
+                }
+            }
+            let reward = '';
+            const successDay = document.querySelector('.checkin-day:has(.tag.success), .checkin-day .tag.success');
+            const dayContainer = successDay ? (successDay.closest('.checkin-day') || successDay.parentElement) : null;
+            if (dayContainer) {
+                const text = dayContainer.textContent || '';
+                const m = text.match(/\$([0-9,.]+)/);
+                if (m) {
+                    reward = '+$' + m[1];
+                }
+            }
+            return { raw, reward };
+        }""")
+        if not data or not data.get("raw"):
+            return None
+        raw_text = data["raw"]
+        clean_num = raw_text.replace("$", "").replace(",", "").strip()
+        amt = float(clean_num)
+        return BalanceEvidence(
+            amount=amt,
+            raw_text=raw_text,
+            currency="USD",
+            captured_at=datetime.now().isoformat(timespec="seconds"),
+            source="dom",
+            reward_text=data.get("reward") or None,
+        )
+    except Exception as e:
+        print(f"  relayfor balance extraction note: {e}", flush=True)
+        return None
+
+
 async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | None:
     kind = getattr(adapter, "kind", "browser")
     if kind == "glados":
@@ -11699,6 +11820,11 @@ async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | N
 
     if getattr(adapter, "name", "") == "leileihog" or "leileihog.top" in getattr(adapter, "url", ""):
         b = await _extract_leileihog_balance(page)
+        if b:
+            return b
+
+    if is_relayfor_name(getattr(adapter, "name", "")) or is_relayfor_site(getattr(adapter, "url", "")):
+        b = await _extract_relayfor_balance(page)
         if b:
             return b
 
