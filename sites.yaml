@@ -387,6 +387,14 @@ sites:
     url: https://yuheng.site/profile
     kind: newapi_profile
     prefer_catalog_url: true
+  # ssite(aapi.ssite.site, Supra AI)—— 2026-10-15 接入。
+  # 标准 LinuxDO OAuth + newapi_profile, checkin_enabled=true、linuxdo_oauth=true、
+  # turnstile_check=true(2026-10-15 /api/status 实测, v1.0.0-rc.41)。
+  # 无自定义适配器：LinuxDO SSO 与「立即签到/今日已签到」判定全走通用 newapi_profile 通道，
+  # Turnstile 由 runner 内置 wait_turnstile_token 等待就绪。
+  - name: 'ssite'
+    url: https://aapi.ssite.site/profile
+    kind: newapi_profile
   # mailhub(mailhub.pigeonw.com, Mailhub 邮箱额度站)—— 2026-10-01 接入。
   # 非 New API:钱包页 POST /wallet/checkin(表单 csrf)。同页另有「兑换」按钮,
   # 选择器必须钉死 button.primary「立即签到」,不能用裸「签到」。

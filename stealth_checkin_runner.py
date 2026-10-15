@@ -931,6 +931,7 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("wududu", "https://wududu.edu.kg/profile"),
     _N("si", "https://si.99442200.xyz/profile", prefer_catalog_url=True),
     _N("yuheng", "https://yuheng.site/profile", prefer_catalog_url=True),
+    _N("ssite", "https://aapi.ssite.site/profile"),
     # mailhub(mailhub.pigeonw.com/wallet):邮箱额度站,POST /wallet/checkin。
     # 同页「兑换」不是签到,选择器钉死 button.primary「立即签到」。
     # 默认 LinuxDO 登录(login_url=/login);已登录页有「退出登录」,不走 SSO。
