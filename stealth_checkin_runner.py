@@ -1323,7 +1323,6 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
             '#check-ins button:has-text("今日已签到")',
             'text=今日已签到',
             'text=签到成功',
-            'text=已连续签到',
         ],
         prefer_catalog_url=True,
         kind="browser",
@@ -6657,11 +6656,14 @@ RELAYFOR_REPAY_SELECTORS = [
     'button:has-text("今日还款")',
     'button:has-text("签到还款")',
 ]
-RELAYFOR_CAMPAIGN_SELECTORS = [
+RELAYFOR_CLAIM_ATTR_SELECTORS = [
     'button[data-checkin-claim]',
     'button[data-claim-unified-benefit]',
     'button[data-claim-benefit]',
     'button[data-token-loan-loss-pool-cut]',
+]
+RELAYFOR_CAMPAIGN_SELECTORS = [
+    *RELAYFOR_CLAIM_ATTR_SELECTORS,
     '[data-user-checkin-section] button:has-text("立即签到")',
     '[data-user-checkin-section] button:has-text("补签")',
     'button:has-text("立即签到")',
@@ -6669,6 +6671,55 @@ RELAYFOR_CAMPAIGN_SELECTORS = [
 ]
 # 已处理 / 完结态专属文案(严格排除全页宽泛的「已签到/签到成功」,避免活动等卡片污染词元贷状态)
 RELAYFOR_DONE_INDICATORS = ("已还清", "今日已处理", "已提完")
+
+# 限时签到活动卡片状态探测(单一来源,避免 _relayfor_today_done 与 _relayfor_done_state 各自复制)。
+# 返回 '' 表示仍存在可见可点的活动签到/领奖按钮(未签);否则返回 'campaign:<文案>'。
+_RELAYFOR_CLAIM_ATTR_JS = ", ".join(f"{s}:not([disabled])" for s in RELAYFOR_CLAIM_ATTR_SELECTORS)
+_RELAYFOR_CAMPAIGN_STATUS_JS = r"""() => {
+    function isVisible(el) {
+        if (!el) return false;
+        if (el.closest('.hidden')) return false;
+        if (el.offsetParent === null && el.offsetWidth === 0 && el.offsetHeight === 0) return false;
+        return true;
+    }
+    const claimBtns = Array.from(document.querySelectorAll('%s')).filter(isVisible);
+    if (claimBtns.length > 0) return "";
+    const cards = Array.from(document.querySelectorAll('.checkin-user-card')).filter(isVisible);
+    for (const c of cards) {
+        const tags = c.querySelectorAll('.tag.success');
+        for (const t of tags) {
+            const txt = t.textContent.trim();
+            if (txt.includes('已签到') || txt.includes('已补签')) {
+                return 'campaign:' + txt;
+            }
+        }
+    }
+    return "";
+}""" % (_RELAYFOR_CLAIM_ATTR_JS,)
+
+
+async def _relayfor_campaign_status(page) -> str:
+    """读取限时签到活动卡片状态信号串;异常/无命中返回 ''."""
+    try:
+        return await page.evaluate(_RELAYFOR_CAMPAIGN_STATUS_JS) or ""
+    except Exception:
+        return ""
+
+
+def _relayfor_card_settled(card_payload) -> bool:
+    """词元贷卡片是否已结清: 需卡片存在、可见、且有明确「已还清」证据。
+
+    hidden 说明功能/卡片已下线,而非「当日已结清」——此时绝不能当已处理跳过
+    (会把页面当成稳态 FAIL 掉真实可借/还的站点)。payload 为
+    page.evaluate 返回的 {present, hidden, remaining} 结构。
+    """
+    if not card_payload or not isinstance(card_payload, dict):
+        return False
+    if not card_payload.get("present"):
+        return False
+    if card_payload.get("hidden"):
+        return False
+    return "已还清" in (card_payload.get("remaining") or "")
 
 
 def is_relayfor_site(site_url: str) -> bool:
@@ -6771,37 +6822,8 @@ async def _relayfor_today_done(page) -> bool:
                 continue
 
     # 检查限时签到活动卡片 (.checkin-user-card) 是否已签到 (且当前无待签到按钮)
-    try:
-        campaign_status = await page.evaluate(r"""() => {
-            function isVisible(el) {
-                if (!el) return false;
-                if (el.closest('.hidden')) return false;
-                if (el.offsetParent === null && el.offsetWidth === 0 && el.offsetHeight === 0) return false;
-                return true;
-            }
-            const claimBtns = Array.from(document.querySelectorAll(
-                'button[data-checkin-claim]:not([disabled]), ' +
-                'button[data-claim-unified-benefit]:not([disabled]), ' +
-                'button[data-claim-benefit]:not([disabled]), ' +
-                'button[data-token-loan-loss-pool-cut]:not([disabled])'
-            )).filter(isVisible);
-            if (claimBtns.length > 0) return false;
-            const cards = Array.from(document.querySelectorAll('.checkin-user-card')).filter(isVisible);
-            for (const c of cards) {
-                const tags = c.querySelectorAll('.tag.success');
-                for (const t of tags) {
-                    const txt = t.textContent.trim();
-                    if (txt.includes('已签到') || txt.includes('已补签')) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }""")
-        if campaign_status:
-            return True
-    except Exception:
-        pass
+    if await _relayfor_campaign_status(page):
+        return True
 
     return False
 
@@ -6840,37 +6862,9 @@ async def _relayfor_done_state(page) -> str:
     except Exception:
         pass
 
-    try:
-        campaign_done = await page.evaluate(r"""() => {
-            function isVisible(el) {
-                if (!el) return false;
-                if (el.closest('.hidden')) return false;
-                if (el.offsetParent === null && el.offsetWidth === 0 && el.offsetHeight === 0) return false;
-                return true;
-            }
-            const claimBtns = Array.from(document.querySelectorAll(
-                'button[data-checkin-claim]:not([disabled]), ' +
-                'button[data-claim-unified-benefit]:not([disabled]), ' +
-                'button[data-claim-benefit]:not([disabled]), ' +
-                'button[data-token-loan-loss-pool-cut]:not([disabled])'
-            )).filter(isVisible);
-            if (claimBtns.length > 0) return "";
-            const cards = Array.from(document.querySelectorAll('.checkin-user-card')).filter(isVisible);
-            for (const c of cards) {
-                const tags = c.querySelectorAll('.tag.success');
-                for (const t of tags) {
-                    const txt = t.textContent.trim();
-                    if (txt.includes('已签到') || txt.includes('已补签')) {
-                        return 'campaign:' + txt;
-                    }
-                }
-            }
-            return "";
-        }""")
-        if campaign_done:
-            return campaign_done
-    except Exception:
-        pass
+    campaign_done = await _relayfor_campaign_status(page)
+    if campaign_done:
+        return campaign_done
 
     try:
         text = await page_text(page, 1500)
@@ -7064,7 +7058,8 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
                 attempted_at=datetime.now().isoformat(timespec="seconds"),
             )
             await asyncio.sleep(1.5)
-            action_desc = "活动签到成功" if ("checkin" in claim_attr or "立即签到" in c_sel or "补签" in c_sel) else f"领取福利成功({claim_attr})"
+            # 文案按 selector 归类(claim_attr 可能是属性值如 "go",不能作为签到/领奖判据)
+            action_desc = "活动签到成功" if ("checkin" in c_sel or "立即签到" in c_sel or "补签" in c_sel) else f"领取福利成功({claim_attr})"
             actions_executed.append(action_desc)
         except Exception as e:
             print(f"  ! relayfor campaign claim click: {e}", flush=True)
@@ -7162,12 +7157,16 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
     # 9. 检查词元贷卡片是否已结清 (需卡片可见且有明确结清证据，hidden 说明功能下线而非当日已结清)
     card_settled = False
     try:
-        card_settled = await page.evaluate("""() => {
+        card_payload = await page.evaluate("""() => {
             const card = document.querySelector("[data-token-loan-card]");
-            if (!card || card.classList.contains("hidden")) return false;
-            const remaining = document.querySelector("[data-token-loan-remaining]")?.textContent || "";
-            return remaining.includes("已还清");
+            const remaining = document.querySelector("[data-token-loan-remaining]");
+            return {
+                present: Boolean(card),
+                hidden: card ? card.classList.contains("hidden") : false,
+                remaining: (remaining && remaining.textContent) || "",
+            };
         }""")
+        card_settled = _relayfor_card_settled(card_payload)
     except Exception:
         card_settled = False
 
@@ -11777,9 +11776,15 @@ async def _extract_relayfor_balance(page) -> BalanceEvidence | None:
             const dayContainer = successDay ? (successDay.closest('.checkin-day') || successDay.parentElement) : null;
             if (dayContainer) {
                 const text = dayContainer.textContent || '';
-                const m = text.match(/\$([0-9,.]+)/);
-                if (m) {
-                    reward = '+$' + m[1];
+                // 优先取显式增量「+$N」;否则退化为该容器首个 $N
+                const inc = text.match(/[+＋]\s*\$([0-9,.]+)/);
+                if (inc) {
+                    reward = '+$' + inc[1];
+                } else {
+                    const m = text.match(/\$([0-9,.]+)/);
+                    if (m) {
+                        reward = '+$' + m[1];
+                    }
                 }
             }
             return { raw, reward };
@@ -11789,13 +11794,22 @@ async def _extract_relayfor_balance(page) -> BalanceEvidence | None:
         raw_text = data["raw"]
         clean_num = raw_text.replace("$", "").replace(",", "").strip()
         amt = float(clean_num)
+        reward_text = data.get("reward") or None
+        # 收益大于余额必然解析误取(如把容器内其它大额 $ 当成当日奖励),丢弃;否则会污染 account_balances
+        if reward_text:
+            try:
+                reward_num = float(reward_text.replace("$", "").replace("+", "").replace(",", "").strip())
+                if reward_num > amt:
+                    reward_text = None
+            except Exception:
+                reward_text = None
         return BalanceEvidence(
             amount=amt,
             raw_text=raw_text,
             currency="USD",
             captured_at=datetime.now().isoformat(timespec="seconds"),
             source="dom",
-            reward_text=data.get("reward") or None,
+            reward_text=reward_text,
         )
     except Exception as e:
         print(f"  relayfor balance extraction note: {e}", flush=True)

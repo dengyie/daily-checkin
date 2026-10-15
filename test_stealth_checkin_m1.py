@@ -5243,20 +5243,56 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertNotIn("签到成功", indicators)
 
     def test_unified_benefit_selectors_registered(self):
-        """RELAYFOR_CAMPAIGN_SELECTORS 覆盖统一福利、套餐福利与助力按钮."""
+        """RELAYFOR_CAMPAIGN_SELECTORS 覆盖统一福利、套餐福利与助力按钮.
+
+        且活动状态探测 JS 需完整嵌入(带引号的)各 claim 选择器: 缺失任一或丢掉
+        引号都会让活动签到按钮探测失效, 导致限时活动漏签。
+        """
         selectors = self.m.RELAYFOR_CAMPAIGN_SELECTORS
         self.assertIn("button[data-claim-unified-benefit]", selectors)
         self.assertIn("button[data-claim-benefit]", selectors)
         self.assertIn("button[data-token-loan-loss-pool-cut]", selectors)
+        js = self.m._RELAYFOR_CAMPAIGN_STATUS_JS
+        # 选择器须作为带引号的 CSS 字符串嵌入(丢引号会让 querySelectorAll 收到非法实参)
+        self.assertIn("querySelectorAll('", js, "活动探测 JS 的选择器列表未加引号")
+        for s in self.m.RELAYFOR_CLAIM_ATTR_SELECTORS:
+            self.assertIn(f"{s}:not([disabled])", js, f"活动探测 JS 未嵌入 {s}")
 
-    def test_token_loan_hidden_card_does_not_falsely_settle(self):
-        """hidden 的词元贷卡片绝不能直接被判定为已结清 (杜绝假阳性 ALREADY)."""
+    def test_token_loan_card_settled_rule_matrix(self):
+        """_relayfor_card_settled 真值表: 仅「卡片存在 + 可见 + 明确已还清」才算结清.
+
+        回归目标(2026-10-15 评审 P1): 早期实现把「卡片缺失/隐藏」也当结清,导致真实
+        可借/可还站点被假阳性判成 ALREADY。本测试对该判定逐例断言,隐藏/缺失必 False。
+        """
+        f = self.m._relayfor_card_settled
+        # 缺失/异常输入 → 未结清
+        self.assertFalse(f(None))
+        self.assertFalse(f({}))
+        self.assertFalse(f(False))
+        self.assertFalse(f({"present": False, "hidden": False, "remaining": "已还清"}))
+        # 卡片存在但 hidden(功能下线/隐藏视图),即便残留「已还清」文案也绝不结清
+        self.assertFalse(f({"present": True, "hidden": True, "remaining": "已还清"}))
+        self.assertFalse(f({"present": True, "hidden": True, "remaining": ""}))
+        # 卡片可见但未到「已还清」→ 未结清
+        self.assertFalse(f({"present": True, "hidden": False, "remaining": "待还 $1.00"}))
+        self.assertFalse(f({"present": True, "hidden": False, "remaining": ""}))
+        # 唯一结清态: 可见 + 明确「已还清」
+        self.assertTrue(f({"present": True, "hidden": False, "remaining": "已还清"}))
+
+    def test_token_loan_hidden_card_end_to_end_not_already(self):
+        """端到端: 词元贷卡片隐藏(功能下线)且无借/还/活动按钮 → FAIL(no_button),绝不假 ALREADY.
+
+        判别力: 若把「hidden 卡片」误判为已结清,本用例会落在 ALREADY 分支 → 断言失败。
+        """
         class FakePage:
             async def goto(self, *a, **k):
-                pass
+                return ""
             async def evaluate(self, expr):
-                if "[data-token-loan-card]" in expr and "classList.contains" in expr:
-                    return False
+                if "status_text" in expr:  # _relayfor_done_state 的卡片信息探测
+                    return {"hidden": True, "btn_disabled": False, "btn_text": "",
+                            "status_text": "", "remaining_text": ""}
+                if "present" in expr and "hidden" in expr:  # 第 9 步结清探测
+                    return {"present": True, "hidden": True, "remaining": ""}
                 return None
             def locator(self, sel):
                 class FakeLoc:
@@ -5279,18 +5315,46 @@ class TestRelayForLoanCycle(unittest.TestCase):
             return None
         async def fake_text(*a, **k):
             return ""
+        async def fake_sleep(*a, **k):
+            return None
+
+        class FakeTime:
+            """单调时钟快进: 首轮即越过 deadline, 免去 25s 真实轮询等待."""
+            def __init__(self):
+                self.t = 0.0
+            def monotonic(self):
+                self.t += 100.0
+                return self.t
 
         page = FakePage()
         with mock.patch.object(self.m, "wait_text_ready", fake_wait), \
              mock.patch.object(self.m, "wait_out_cloudflare", fake_cf), \
              mock.patch.object(self.m, "dismiss_obstructing_dialogs", fake_dis), \
-             mock.patch.object(self.m, "page_text", fake_text):
+             mock.patch.object(self.m, "page_text", fake_text), \
+             mock.patch.object(self.m, "time", FakeTime()), \
+             mock.patch("asyncio.sleep", fake_sleep):
             res = self.asyncio.run(self.m.relayfor_checkin(page, self._adapter()))
+        self.assertNotEqual(res.status, "ALREADY", "隐藏卡片绝不能误判为已处理")
         self.assertEqual(res.status, "FAIL")
         self.assertEqual(res.reason, "no_button")
 
     def test_relayfor_balance_extraction_dom(self):
-        """_extract_relayfor_balance 成功提取 USD 余额与奖励文案."""
+        """_extract_relayfor_balance 成功提取 USD 余额与合理奖励文案."""
+        class FakeBalancePage:
+            async def evaluate(self, expr):
+                return {
+                    "raw": "$279.90",
+                    "reward": "+$0.10",
+                }
+        bal = self.asyncio.run(self.m._extract_relayfor_balance(FakeBalancePage()))
+        self.assertIsNotNone(bal)
+        self.assertEqual(bal.amount, 279.90)
+        self.assertEqual(bal.currency, "USD")
+        self.assertEqual(bal.reward_text, "+$0.10")
+        self.assertEqual(bal.source, "dom")
+
+    def test_relayfor_balance_drops_impossible_reward(self):
+        """奖励大于余额必然解析误取 → 丢弃 reward_text(避免污染 account_balances)."""
         class FakeBalancePage:
             async def evaluate(self, expr):
                 return {
@@ -5300,9 +5364,7 @@ class TestRelayForLoanCycle(unittest.TestCase):
         bal = self.asyncio.run(self.m._extract_relayfor_balance(FakeBalancePage()))
         self.assertIsNotNone(bal)
         self.assertEqual(bal.amount, 279.90)
-        self.assertEqual(bal.currency, "USD")
-        self.assertEqual(bal.reward_text, "+$280.00")
-        self.assertEqual(bal.source, "dom")
+        self.assertIsNone(bal.reward_text, "奖励>余额应被丢弃")
 
 
 class TestRelayForGoCheckin(unittest.TestCase):
@@ -7288,6 +7350,25 @@ class TestHuaweicloud(unittest.TestCase):
             "常驻统计标签『已连续签到（天）』不得作为已签判据",
         )
 
+        # resolve_site 兜底失败路径与 sites.yaml 条目同样不得用该常驻标签(防御纵深化)
+        resolved_hw = self.m.resolve_site("huaweicloud", "https://developer.huaweicloud.com/grow")
+        self.assertNotIn(
+            "text=已连续签到",
+            resolved_hw.already_selectors,
+            "resolve_site 兜底亦不得含『已连续签到（天）』",
+        )
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        with open(yaml_path, encoding="utf-8") as fh:
+            ydata = yaml.safe_load(fh)
+        yentry = next((e for e in ydata.get("sites", []) if e.get("name") == "huaweicloud"), None)
+        self.assertIsNotNone(yentry, "sites.yaml 应有 huaweicloud 条目")
+        self.assertNotIn(
+            "text=已连续签到",
+            yentry.get("already", []),
+            "sites.yaml huaweicloud already 不得含『已连续签到（天）』",
+        )
+
         class Item:
             def __init__(self, txt, visible=True, disabled=False):
                 self.txt, self.visible, self.disabled = txt, visible, disabled
@@ -7354,6 +7435,37 @@ class TestHuaweicloud(unittest.TestCase):
             )
         )
         self.assertTrue(sig_signed, "已签页 (badge 已签到) 仍应被识别为已完成")
+
+
+class TestEmrankAntiPattern(unittest.TestCase):
+    """emrank 与 huaweicloud 同款常驻「已连续签到（天）」标签, 同样严禁作为已签判据.
+
+    2026-10-15 评审 P2-latent 修复: 从内置 adapter 与 sites.yaml 移除 'text=已连续签到'
+    (trusted_already 下会假 ALREADY), 防止同类事故在 emrank 复现。
+    """
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+
+    def test_emrank_already_excludes_continuous_stat_label(self):
+        from stealth_checkin_runner import _BUILTIN_SITE_ADAPTERS
+        adapter = next(x for x in _BUILTIN_SITE_ADAPTERS if x.name == "emrank")
+        self.assertNotIn(
+            "text=已连续签到",
+            adapter.already_selectors,
+            "emrank 内置 adapter 不得以『已连续签到（天）』为已签判据",
+        )
+        resolved = self.m.resolve_site("emrank", "https://emrank.tech/account")
+        self.assertNotIn("text=已连续签到", resolved.already_selectors,
+                         "emrank resolve_site 兜底亦不得含『已连续签到（天）』")
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "emrank"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 emrank 条目")
+        self.assertNotIn("text=已连续签到", entry.get("already", []),
+                         "sites.yaml emrank already 不得含『已连续签到（天）』")
 
 
 if __name__ == "__main__":
