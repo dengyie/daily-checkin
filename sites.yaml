@@ -1055,6 +1055,8 @@ sites:
   # 签到入口: /grow 页面「立即签到」按钮(button:has-text("立即签到"))。
   # 签到成功后变为「已签到」(.user-message-view-userValue-item-button:has-text("已签到"))。
   # 严禁清空 Cookie/localStorage; SSO ticket 一次性消费后靠共享 SessionID/vk/HWWAFSESTIME 保持登录态。
+  # 严禁把「已连续签到（天）」当已签判据: 该统计标签常驻渲染, trusted_already 下会假 ALREADY
+  # (2026-10-15 修复: 从 already 列表移除 'text=已连续签到'; 未签页只认 已签到 badge/今日已签到/签到成功)。
   - name: 'huaweicloud'
     url: https://developer.huaweicloud.com/grow
     kind: browser
@@ -1069,7 +1071,6 @@ sites:
       - '.user-message-view-userValue-item-button'
       - 'text=今日已签到'
       - 'text=签到成功'
-      - 'text=已连续签到'
   # pap(pap.pmcat.top, PM-API)—— 2026-10-11 接入。dygyz 同家族(pmcat.top)升级版站,
   # LinuxDo-only OAuth 登录(linuxdo_only_auth=true, 复用 9222 共享 profile 的
   # linux.do 会话;不开放注册,注册码内测)。自研 SPA(hash 路由,非标准 New API 前台),

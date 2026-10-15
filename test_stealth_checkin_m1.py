@@ -7184,6 +7184,89 @@ class TestHuaweicloud(unittest.TestCase):
         self.assertEqual(resolved.kind, "browser")
         self.assertTrue(resolved.prefer_catalog_url)
 
+    def test_huaweicloud_unsigned_page_not_already(self):
+        """未签页只渲染常驻的「已连续签到（天）」统计标签, 绝不能被判为 ALREADY.
+
+        2026-10-15 线上事故回归: 旧 already 列表含 'text=已连续签到', 命中常驻标签
+        → trusted_already 短路返回 sel:text=已连续签到 → 永不点击「立即签到」。
+        """
+        import asyncio
+        from stealth_checkin_runner import _BUILTIN_SITE_ADAPTERS
+
+        adapter = next(x for x in _BUILTIN_SITE_ADAPTERS if x.name == "huaweicloud")
+        self.assertNotIn(
+            "text=已连续签到",
+            adapter.already_selectors,
+            "常驻统计标签『已连续签到（天）』不得作为已签判据",
+        )
+
+        class Item:
+            def __init__(self, txt, visible=True, disabled=False):
+                self.txt, self.visible, self.disabled = txt, visible, disabled
+
+            async def is_visible(self, timeout=0):
+                return self.visible
+
+            async def is_disabled(self):
+                return self.disabled
+
+            async def inner_text(self, timeout=0):
+                return self.txt
+
+        class Loc:
+            def __init__(self, items=None):
+                self.items = items or []
+
+            async def count(self):
+                return len(self.items)
+
+            def nth(self, i):
+                return self.items[i] if i < len(self.items) else Item("", visible=False)
+
+            @property
+            def first(self):
+                return self.items[0] if self.items else Item("", visible=False)
+
+        class UnsignedPage:
+            """未签: 有「立即签到」按钮 + 常驻「已连续签到（天）」, 无「已签到」badge."""
+
+            async def evaluate(self, _js):
+                return "yd_289657918\n立即签到\n我的积分\n1\n已连续签到（天）"
+
+            def locator(self, sel):
+                if sel == "text=已连续签到":
+                    return Loc([Item("已连续签到（天）")])
+                if sel == "button":
+                    return Loc([Item("立即签到")])
+                return Loc([])
+
+        sig = asyncio.run(
+            self.m.already_done(
+                UnsignedPage(), adapter.already_selectors, trusted_already=True
+            )
+        )
+        self.assertEqual(sig, "", f"未签页不得被判为已签, 实际 sig={sig!r}")
+
+        class SignedPage:
+            """已签: 「立即签到」按钮消失, 出现 .user-message-view-userValue-item-button「已签到」."""
+
+            async def evaluate(self, _js):
+                return "yd_289657918\n已签到\n我的积分\n1\n已连续签到（天）"
+
+            def locator(self, sel):
+                if sel == '.user-message-view-userValue-item-button:has-text("已签到")':
+                    return Loc([Item("已签到")])
+                if sel == "text=已连续签到":
+                    return Loc([Item("已连续签到（天）")])
+                return Loc([])
+
+        sig_signed = asyncio.run(
+            self.m.already_done(
+                SignedPage(), adapter.already_selectors, trusted_already=True
+            )
+        )
+        self.assertTrue(sig_signed, "已签页 (badge 已签到) 仍应被识别为已完成")
+
 
 if __name__ == "__main__":
 
