@@ -403,6 +403,14 @@ function updateServerStatus(st, label, ping) {
 }
 
 let toastTimer = null;
+function hideToast() {
+  const toast = $("#message-toast");
+  if (toast) toast.classList.remove("is-visible");
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+}
 function showToast(msg, type = "info") {
   const toast = $("#message-toast");
   if (!toast) return;
@@ -423,13 +431,34 @@ function showToast(msg, type = "info") {
   }
 
   toast.className = `message-toast is-visible toast-${type}`;
-  toast.innerHTML = `<ui-icon name="${iconName}" size="16"></ui-icon><span>${esc(msg)}</span>`;
+  toast.innerHTML = `<ui-icon name="${iconName}" size="16"></ui-icon><span>${esc(msg)}</span><button class="toast-close" type="button" aria-label="确认并关闭">${uiIcon("x", { size: 14 })}</button>`;
 
   toastTimer = setTimeout(() => {
     toast.classList.remove("is-visible");
     toastTimer = null;
   }, 3500);
 }
+
+// toast 可见时可交互:点「确认并关闭」手动关闭;悬停暂停自动消失;
+// 点击一律拦截,绝不穿透到底层 topbar 按钮(执行全部待办/刷新)。
+$("#message-toast")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (e.target.closest(".toast-close")) hideToast();
+});
+$("#message-toast")?.addEventListener("mouseenter", () => {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+});
+$("#message-toast")?.addEventListener("mouseleave", () => {
+  const toast = $("#message-toast");
+  if (!toast || !toast.classList.contains("is-visible") || toastTimer) return;
+  toastTimer = setTimeout(() => {
+    toast.classList.remove("is-visible");
+    toastTimer = null;
+  }, 3500);
+});
 
 async function api(path, payload, method = "POST", isRetry = false) {
   const headers = { "Content-Type": "application/json" };

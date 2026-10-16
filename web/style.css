@@ -1669,6 +1669,26 @@ html[data-resolved-theme="light"] .tile-balance-badge {
 .message-toast.is-visible {
   transform: translateY(0);
   opacity: 1;
+  /* 可见时可交互(确认按钮可点);隐藏态保持 pointer-events:none 防点击穿透 */
+  pointer-events: auto;
+}
+.message-toast .toast-close {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: currentColor;
+  opacity: 0.65;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  margin-left: 4px;
+  border-radius: var(--radius-sm);
+  transition: opacity 0.15s, background 0.15s;
+}
+.message-toast .toast-close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.14);
 }
 .message-toast.toast-success {
   border-color: rgba(16, 185, 129, 0.4);
