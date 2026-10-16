@@ -433,17 +433,20 @@ function showToast(msg, type = "info") {
   toast.className = `message-toast is-visible toast-${type}`;
   toast.innerHTML = `<ui-icon name="${iconName}" size="16"></ui-icon><span>${esc(msg)}</span><button class="toast-close" type="button" aria-label="确认并关闭">${uiIcon("x", { size: 14 })}</button>`;
 
-  toastTimer = setTimeout(() => {
-    toast.classList.remove("is-visible");
-    toastTimer = null;
-  }, 3500);
+  // 结果类(success/error)不自动消失,必须用户点击确认;仅 info 进度类 3.5s 自动消失
+  if (type === "info") {
+    toastTimer = setTimeout(() => {
+      toast.classList.remove("is-visible");
+      toastTimer = null;
+    }, 3500);
+  }
 }
 
-// toast 可见时可交互:点「确认并关闭」手动关闭;悬停暂停自动消失;
-// 点击一律拦截,绝不穿透到底层 topbar 按钮(执行全部待办/刷新)。
+// toast 可见时可交互:点击 toast 任意位置(含「确认并关闭」按钮)即手动确认关闭;
+// 悬停暂停 info 进度类的自动消失;点击一律拦截,绝不穿透到底层 topbar 按钮。
 $("#message-toast")?.addEventListener("click", (e) => {
   e.stopPropagation();
-  if (e.target.closest(".toast-close")) hideToast();
+  hideToast();
 });
 $("#message-toast")?.addEventListener("mouseenter", () => {
   if (toastTimer) {
@@ -454,6 +457,8 @@ $("#message-toast")?.addEventListener("mouseenter", () => {
 $("#message-toast")?.addEventListener("mouseleave", () => {
   const toast = $("#message-toast");
   if (!toast || !toast.classList.contains("is-visible") || toastTimer) return;
+  // 仅 info 进度类恢复自动消失;结果类等待用户确认
+  if (!toast.classList.contains("toast-info")) return;
   toastTimer = setTimeout(() => {
     toast.classList.remove("is-visible");
     toastTimer = null;

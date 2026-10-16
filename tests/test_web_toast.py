@@ -2,7 +2,9 @@
 
 线上 #message-toast 曾是 pointer-events:none 纯展示且 3.5s 自动消失：用户点击
 toast 时事件穿透到底层 topbar 按钮（执行全部待办/刷新），且没有任何确认控件。
-根修后可见 toast 必须可交互：确认并关闭按钮、悬停暂停自动消失、点击拦截防穿透。
+根修后可见 toast 必须可交互：点任意处（含确认并关闭按钮）即手动确认关闭、
+结果类(success/error)不自动消失必须用户确认、info 进度类保留 3.5s 自动消失、
+悬停暂停自动消失、点击拦截防穿透。
 本测试锚定 web/ 静态资源中的关键回归点（仓库无前端 JS 测试框架，沿用源码锚定式）。
 """
 import re
@@ -36,8 +38,8 @@ class WebToastTests(unittest.TestCase):
         # CSP 零内联：关闭图标必须走 uiIcon，而不是内联 onclick/事件属性
         self.assertIn('uiIcon("x"', self.app_js)
 
-    def test_close_click_stops_propagation_and_hides(self):
-        """toast 点击委托必须 stopPropagation 防穿透，且点关闭钮调 hideToast。"""
+    def test_toast_click_anywhere_confirms_and_hides(self):
+        """点击 toast 任意位置即确认关闭，且 stopPropagation 防穿透到底层按钮。"""
         m = re.search(
             r'\$\("#message-toast"\)\?\.addEventListener\("click".*?\}\);',
             self.app_js,
@@ -46,13 +48,24 @@ class WebToastTests(unittest.TestCase):
         self.assertIsNotNone(m, "toast click 委托缺失")
         body = m.group(0)
         self.assertIn("stopPropagation", body)
-        self.assertIn('closest(".toast-close")', body)
         self.assertIn("hideToast()", body)
 
+    def test_result_toasts_do_not_autodismiss(self):
+        """success/error 结果类 toast 不自动消失，必须用户点击确认才关闭。"""
+        # showToast 内的自动消失定时器必须被 info 类型门控
+        m = re.search(
+            r"toast\.innerHTML = [^\n]*toast-close[^\n]*;\s*\n(.*?)(\n\})",
+            self.app_js,
+            re.S,
+        )
+        self.assertIsNotNone(m, "showToast 渲染段缺失")
+        self.assertRegex(m.group(1), r'if\s*\(type === "info"\)')
+
     def test_hover_pauses_autodismiss(self):
-        """悬停暂停 3.5s 自动消失（用户来得及点确认），移出后恢复计时。"""
+        """悬停暂停 3.5s 自动消失（用户来得及点确认），移出后仅 info 类恢复计时。"""
         self.assertIn('addEventListener("mouseenter"', self.app_js)
         self.assertIn('addEventListener("mouseleave"', self.app_js)
+        self.assertIn('toast-info', self.app_js)
 
     def test_no_inline_html_event_handlers_in_web(self):
         """CSP 零内联红线：web 静态资源禁止 HTML onclick= 事件属性。"""
