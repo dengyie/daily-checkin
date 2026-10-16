@@ -471,6 +471,91 @@ $("#message-toast")?.addEventListener("mouseleave", () => {
   }, 3500);
 });
 
+/* ==========================================================================
+   Global In-App Confirm Dialog Modal
+   ========================================================================== */
+
+let confirmResolver = null;
+
+function initConfirmDialog() {
+  const overlay = $("#confirm-dialog-overlay");
+  if (!overlay) return;
+
+  const cancelBtn = $("#confirm-dialog-cancel-btn");
+  const confirmBtn = $("#confirm-dialog-confirm-btn");
+
+  const closeDialog = (result) => {
+    overlay.classList.remove("is-visible");
+    overlay.setAttribute("aria-hidden", "true");
+    if (confirmResolver) {
+      const resolve = confirmResolver;
+      confirmResolver = null;
+      resolve(result);
+    }
+  };
+
+  cancelBtn?.addEventListener("click", () => closeDialog(false));
+  confirmBtn?.addEventListener("click", () => closeDialog(true));
+
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeDialog(false);
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (overlay.classList.contains("is-visible") && e.key === "Escape") {
+      e.preventDefault();
+      closeDialog(false);
+    }
+  });
+}
+
+function showConfirm({
+  title = "操作确认",
+  message = "确定继续此操作吗？",
+  confirmText = "确认",
+  cancelText = "取消",
+  danger = true,
+  icon = "alert-triangle",
+} = {}) {
+  const overlay = $("#confirm-dialog-overlay");
+  if (!overlay) {
+    return Promise.resolve(window.confirm ? window.confirm(message) : true);
+  }
+
+  if (confirmResolver) {
+    confirmResolver(false);
+    confirmResolver = null;
+  }
+
+  const titleEl = $("#confirm-dialog-title");
+  const bodyEl = $("#confirm-dialog-body");
+  const iconWrap = $("#confirm-dialog-icon");
+  const confirmBtn = $("#confirm-dialog-confirm-btn");
+  const cancelBtn = $("#confirm-dialog-cancel-btn");
+
+  if (titleEl) titleEl.textContent = title;
+  if (bodyEl) bodyEl.textContent = message;
+  if (confirmBtn) {
+    confirmBtn.textContent = confirmText;
+    confirmBtn.className = danger ? "btn danger sm" : "btn primary sm";
+  }
+  if (cancelBtn) cancelBtn.textContent = cancelText;
+  if (iconWrap) {
+    iconWrap.className = danger ? "confirm-dialog-icon" : "confirm-dialog-icon is-info";
+    iconWrap.innerHTML = uiIcon(icon, { size: 20 });
+  }
+
+  overlay.classList.add("is-visible");
+  overlay.setAttribute("aria-hidden", "false");
+
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+    cancelBtn?.focus();
+  });
+}
+
+initConfirmDialog();
+
 async function api(path, payload, method = "POST", isRetry = false) {
   const headers = { "Content-Type": "application/json" };
   const storedPassword = localStorage.getItem(SESSION_KEY);
@@ -730,7 +815,15 @@ function openSiteDetailDrawer(siteName) {
 
     $("#site-drawer-delete-site-btn")?.addEventListener("click", async () => {
       const confirmText = `确定彻底删除站点「${task.name}」吗？\n\n此操作将同时清理：\n1. 今日签到待办任务\n2. 绑定的 Keychain 凭据密钥（如有）\n3. 健康状态与熔断抑制记录\n\n操作不可逆，是否继续？`;
-      if (!confirm(confirmText)) return;
+      const confirmed = await showConfirm({
+        title: "删除站点确认",
+        message: confirmText,
+        confirmText: "确认删除",
+        cancelText: "取消",
+        danger: true,
+        icon: "alert-triangle",
+      });
+      if (!confirmed) return;
 
       const delBtn = $("#site-drawer-delete-site-btn");
       const origHtml = delBtn ? delBtn.innerHTML : "";
@@ -856,13 +949,21 @@ function openSiteDetailDrawer(siteName) {
     }
 
     $("#site-drawer-delete-cred-btn")?.addEventListener("click", async () => {
-      if (!confirm(`确定删除站点 ${task.name} 的 Keychain 凭据？`)) return;
+      const confirmed = await showConfirm({
+        title: "删除凭据确认",
+        message: `确定删除站点「${task.name}」的 Keychain 凭据吗？\n\n删除后该站点将失去凭据信息。`,
+        confirmText: "确认删除",
+        cancelText: "取消",
+        danger: true,
+        icon: "alert-triangle",
+      });
+      if (!confirmed) return;
       try {
         await api("/api/credentials/delete", { ref: cred.ref });
         await load();
         openSiteDetailDrawer(siteName);
-        showToast("凭据已安全删除");
-      } catch (err) { showToast(err.message); }
+        showToast("凭据已安全删除", "success");
+      } catch (err) { showToast(err.message, "error"); }
     });
 
     $("#site-drawer-cred-form")?.addEventListener("submit", async (e) => {
@@ -2351,11 +2452,21 @@ function initTileActionDelegation() {
     const delCredBtn = e.target.closest("[data-del-cred]");
     if (delCredBtn) {
       e.stopPropagation();
-      if (!confirm("确认删除该凭据？")) return;
-      api("/api/credentials/delete", { ref: delCredBtn.dataset.delCred })
-        .then(() => load())
-        .then(() => showToast("凭据已安全移除"))
-        .catch((err) => showToast(err.message));
+      const ref = delCredBtn.dataset.delCred;
+      showConfirm({
+        title: "删除凭据确认",
+        message: "确认删除该凭据？\n\n删除后将无法恢复，自动签到将无法获取该凭据。",
+        confirmText: "确认删除",
+        cancelText: "取消",
+        danger: true,
+        icon: "alert-triangle",
+      }).then((confirmed) => {
+        if (!confirmed) return;
+        return api("/api/credentials/delete", { ref })
+          .then(() => load())
+          .then(() => showToast("凭据已安全移除", "success"))
+          .catch((err) => showToast(err.message, "error"));
+      });
       return;
     }
     const tile = e.target.closest("[data-site-tile]");
@@ -2434,8 +2545,16 @@ $("#global-refresh-btn")?.addEventListener("click", () => {
   load();
 });
 
-$("#global-run-all-btn")?.addEventListener("click", () => {
-  if (confirm("确定立即触发全量待办站点的自动签到批次？")) triggerRun([]);
+$("#global-run-all-btn")?.addEventListener("click", async () => {
+  const confirmed = await showConfirm({
+    title: "批量自动签到确认",
+    message: "确定立即触发全量待办站点的自动签到批次？",
+    confirmText: "立即开始",
+    cancelText: "取消",
+    danger: false,
+    icon: "zap",
+  });
+  if (confirmed) triggerRun([]);
 });
 
 /* ==========================================================================
@@ -2724,14 +2843,22 @@ $("#manual-filter-select")?.addEventListener("change", (e) => {
   render("manual");
 });
 
-$("#manual-open-all-pending-btn")?.addEventListener("click", () => {
+$("#manual-open-all-pending-btn")?.addEventListener("click", async () => {
   const { all } = getManualTasks();
   const pendingManuals = all.filter((t) => t.status === "pending" && t.url && (t.url.startsWith("http://") || t.url.startsWith("https://")));
   if (!pendingManuals.length) {
     showToast("当前暂无待办的人工签到站点（或站点未配置有效 URL）");
     return;
   }
-  if (!confirm(`确定在浏览器新标签页中一键打开全部 ${pendingManuals.length} 个待办人工签到站点？`)) return;
+  const confirmed = await showConfirm({
+    title: "一键打开人工签到",
+    message: `确定在浏览器新标签页中一键打开全部 ${pendingManuals.length} 个待办人工签到站点？`,
+    confirmText: "全部打开",
+    cancelText: "取消",
+    danger: false,
+    icon: "external-link",
+  });
+  if (!confirmed) return;
   pendingManuals.forEach((t) => {
     window.open(t.url, "_blank", "noopener,noreferrer");
   });

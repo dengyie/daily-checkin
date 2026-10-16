@@ -77,6 +77,53 @@ class WebToastTests(unittest.TestCase):
         index_html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
         self.assertNotIn('onclick="', index_html)
 
+    def test_confirm_dialog_overlay_in_html(self):
+        """确认弹窗必须预埋在 index.html，遵循 a11y role="dialog" 与 aria-modal。"""
+        index_html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="confirm-dialog-overlay"', index_html)
+        self.assertIn('role="dialog"', index_html)
+        self.assertIn('aria-modal="true"', index_html)
+        self.assertIn('id="confirm-dialog-cancel-btn"', index_html)
+        self.assertIn('id="confirm-dialog-confirm-btn"', index_html)
+
+    def test_confirm_dialog_styles(self):
+        """确认弹窗样式：不可见时 pointer-events: none，可见时 pointer-events: auto 且 z-index 高于 toast。"""
+        self.assertIn(".confirm-dialog-overlay", self.style_css)
+        self.assertIn(".confirm-dialog-overlay.is-visible", self.style_css)
+        overlay_block = re.search(r"\.confirm-dialog-overlay\s*\{[^}]*\}", self.style_css)
+        self.assertIsNotNone(overlay_block)
+        self.assertIn("pointer-events: none", overlay_block.group(0))
+        visible_block = re.search(r"\.confirm-dialog-overlay\.is-visible\s*\{[^}]*\}", self.style_css)
+        self.assertIsNotNone(visible_block)
+        self.assertIn("pointer-events: auto", visible_block.group(0))
+
+    def test_confirm_dialog_logic_in_app_js(self):
+        """showConfirm 与 initConfirmDialog：支持 Escape 键、遮罩点击、取消与确认 Promise 解析。"""
+        self.assertIn("function initConfirmDialog()", self.app_js)
+        self.assertIn("function showConfirm(", self.app_js)
+        self.assertIn('e.key === "Escape"', self.app_js)
+        self.assertIn("confirmResolver", self.app_js)
+
+    def test_destructive_actions_use_show_confirm(self):
+        """删除站点与删除凭据必须通过 showConfirm 异步等待用户显式确认，禁止未经确认直接调用 api。"""
+        self.assertIn("await showConfirm", self.app_js)
+        # 站点抽屉删除必须调用 showConfirm
+        m_del_site = re.search(
+            r'\$\("#site-drawer-delete-site-btn"\)\?\.addEventListener\("click", async \(\) => \{(.*?)\}\);',
+            self.app_js,
+            re.S,
+        )
+        self.assertIsNotNone(m_del_site)
+        self.assertIn("showConfirm", m_del_site.group(1))
+        # 站点抽屉凭据删除必须调用 showConfirm
+        m_del_cred = re.search(
+            r'\$\("#site-drawer-delete-cred-btn"\)\?\.addEventListener\("click", async \(\) => \{(.*?)\}\);',
+            self.app_js,
+            re.S,
+        )
+        self.assertIsNotNone(m_del_cred)
+        self.assertIn("showConfirm", m_del_cred.group(1))
+
 
 if __name__ == "__main__":
     unittest.main()

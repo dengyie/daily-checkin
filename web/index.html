@@ -1041,6 +1041,23 @@
     </div>
   </div>
 
+  <!-- ====================================================================
+       Global In-App Confirm Dialog Modal
+       ==================================================================== -->
+  <div class="confirm-dialog-overlay" id="confirm-dialog-overlay" aria-hidden="true">
+    <div class="confirm-dialog-card" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
+      <div class="confirm-dialog-header">
+        <div class="confirm-dialog-icon" id="confirm-dialog-icon"><ui-icon name="alert-triangle" size="20"></ui-icon></div>
+        <div class="confirm-dialog-title" id="confirm-dialog-title">操作确认</div>
+      </div>
+      <div class="confirm-dialog-body" id="confirm-dialog-body"></div>
+      <div class="confirm-dialog-actions">
+        <button type="button" class="btn secondary sm" id="confirm-dialog-cancel-btn">取消</button>
+        <button type="button" class="btn danger sm" id="confirm-dialog-confirm-btn">确认删除</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Global Message Toast -->
   <div id="message-toast" class="message-toast"></div>
 
