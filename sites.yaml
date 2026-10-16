@@ -395,6 +395,14 @@ sites:
   - name: 'ssite'
     url: https://aapi.ssite.site/profile
     kind: newapi_profile
+  # peiee(api.pei.ee, New API)—— 2026-10-16 接入。
+  # 标准 LinuxDO OAuth + newapi_profile, checkin_enabled=true、linuxdo_oauth=true、
+  # turnstile_check=false(2026-10-16 /api/status 实测, v1.0.0-rc.44-invite.1,
+  # quota_per_unit=500000 / quota_display_type=USD)。
+  # 无自定义适配器:LinuxDO SSO 与「立即签到/今日已签到」判定全走通用 newapi_profile 通道。
+  - name: 'peiee'
+    url: https://api.pei.ee/profile
+    kind: newapi_profile
   # mailhub(mailhub.pigeonw.com, Mailhub 邮箱额度站)—— 2026-10-01 接入。
   # 非 New API:钱包页 POST /wallet/checkin(表单 csrf)。同页另有「兑换」按钮,
   # 选择器必须钉死 button.primary「立即签到」,不能用裸「签到」。
@@ -1137,6 +1145,10 @@ sites:
       - 'text=签到成功'
   # 404api(wb.404-found.uk, 404API 积分网关)—— 2026-10-14 接入。
   # 统一控制台 /hb/me, 共享 9222 Chrome 会话(已绑定 LinuxDo/Google/GitHub)。
+  # 站点通告/公告防护:
+  # 1. 阻断型全屏公告 modal (div.fixed.inset-0.z-[70]): 站点发布 need_ack 通告时会覆盖全屏拦截 pointer events，
+  #    内部带「读到底部才能确认」门禁，需自动滚动至底部解除 disabled 并点击「我已确认」以避免签到按钮被遮挡。
+  # 2. 右上角站点公告浮窗 (div.fixed.inset-x-3.top-[6.8rem].z-[60]): 点击关闭并写入 localStorage 防反复弹出。
   # 下半部分「每日签到」卡片:
   # 未签 .card:has-text("每日签到") button:has-text("签到") -> POST /hb/api/v1/checkin
   # 已签 button 变为「今天已签到」(disabled) 且展示「本次 +X 分，已计入余额 / 签到成功，+X 分」。

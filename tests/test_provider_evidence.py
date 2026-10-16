@@ -475,6 +475,41 @@ class ProviderEvidenceTests(unittest.TestCase):
         r3 = module._extract_reward_from_text("到账 180 分")
         self.assertEqual(r3, "+180 分")
 
+    def test_dismiss_404api_announcements_flow(self):
+        """_dismiss_404api_announcements evaluates script and parses dismissed count."""
+        module = load_runner("provider_runner_404api_dismiss_test")
+        from unittest.mock import AsyncMock
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://wb.404-found.uk/hb/me"
+                self.evaluate = AsyncMock(return_value=2)
+
+        page = FakePage()
+        res = asyncio.run(module._dismiss_404api_announcements(page))
+        self.assertEqual(res, 2)
+        page.evaluate.assert_called_once()
+        self.assertEqual(asyncio.run(module._dismiss_404api_announcements(None)), 0)
+        self.assertEqual(asyncio.run(module._dismiss_404api_announcements(object())), 0)
+
+    def test_dismiss_obstructing_dialogs_invokes_404api_handler(self):
+        """dismiss_obstructing_dialogs calls _dismiss_404api_announcements when url has 404-found.uk."""
+        module = load_runner("provider_runner_obstruct_404api_test")
+        from unittest.mock import AsyncMock, patch
+
+        class Fake404Page:
+            def __init__(self):
+                self.url = "https://wb.404-found.uk/hb/me"
+                self.evaluate = AsyncMock(return_value=1)
+
+        page = Fake404Page()
+        with patch.object(module, "_dismiss_404api_announcements", new_callable=AsyncMock) as mock_404:
+            mock_404.return_value = 2
+            total = asyncio.run(module.dismiss_obstructing_dialogs(page, stage="pre_cta"))
+            self.assertEqual(total, 3)
+            mock_404.assert_called_once_with(page)
+            page.evaluate.assert_called_once()
+
     def test_extract_leileihog_balance_parses_usd_and_reward(self):
         """leileihog extractor converts New-API quota to USD and captures lottery prize."""
         module = load_runner("provider_runner_leileihog_balance_test")

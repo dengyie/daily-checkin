@@ -932,6 +932,7 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("si", "https://si.99442200.xyz/profile", prefer_catalog_url=True),
     _N("yuheng", "https://yuheng.site/profile", prefer_catalog_url=True),
     _N("ssite", "https://aapi.ssite.site/profile"),
+    _N("peiee", "https://api.pei.ee/profile"),
     # mailhub(mailhub.pigeonw.com/wallet):邮箱额度站,POST /wallet/checkin。
     # 同页「兑换」不是签到,选择器钉死 button.primary「立即签到」。
     # 默认 LinuxDO 登录(login_url=/login);已登录页有「退出登录」,不走 SSO。
@@ -10356,8 +10357,10 @@ _DIALOG_DISMISS_JS = """() => {
   const candidates = [
     // 1. 语义化弹窗与模态对话框容器 (Base UI, Radix, ARIA, NewAPI, Element UI, AntD, Semi, Naive)
     ...document.querySelectorAll('[data-slot="dialog-content"], [role="dialog"], dialog, .snowapi-dialog-content, div[class*="dialog-content"], div[class*="modal-content"], div[class*="modal-dialog"], div.ant-modal, div.ant-modal-content, div.el-dialog, div.semi-modal, div.n-modal'),
-    // 2. 现代全屏固定遮罩层与居中公告容器 (Tailwind / Vue / React / Nuxt fixed overlays，如 fluxion welfare)
-    ...document.querySelectorAll('div.fixed.inset-0, div.fixed.top-0.left-0, div[class*="fixed"][class*="inset-0"]')
+    // 2. 现代全屏固定遮罩层与居中公告容器 (Tailwind / Vue / React / Nuxt fixed overlays，如 fluxion welfare, 404api)
+    ...document.querySelectorAll('div.fixed.inset-0, div.fixed.top-0.left-0, div[class*="fixed"][class*="inset-0"]'),
+    // 3. 浮动置顶公告卡片与通告框 (如 404api 站点公告/通告浮窗)
+    ...document.querySelectorAll('div.fixed[class*="z-"], div[class*="fixed"][class*="top-"], div[class*="fixed"][class*="inset-x-"]')
   ];
   const dialogs = [...new Set(candidates)];
   let closed = 0;
@@ -10384,7 +10387,7 @@ _DIALOG_DISMISS_JS = """() => {
     const hasActiveAction = actionBtns.some(b => {
       const t = (b.innerText || b.textContent || '').trim();
       return /^(立即签到|开始转动|今日签到|去签到|立即打卡|打卡|点击翻牌|开始抽签)$/.test(t) ||
-             (!/全部已读|我知道了|我已阅读|我已知悉|关闭|Close|Got it|确定|OK/i.test(t) && /立即签到|开始转动|去签到/.test(t));
+             (!/全部已读|我知道了|我已阅读|我已知悉|关闭|Close|Got it|确定|OK|我已确认|已确认/i.test(t) && /立即签到|开始转动|去签到/.test(t));
     });
     if (hasActiveAction) continue;
 
@@ -10393,20 +10396,32 @@ _DIALOG_DISMISS_JS = """() => {
       const t = (b.innerText || b.textContent || '').trim();
       return /^(今日已签|今日已签到|已签到)$/.test(t);
     });
-    const looksAnnouncement = /公告|通知|notice|activity|规则|升级|维护|充值、兑换与消费记录|更新|重要|玩法说明|欢迎|提示|声明|免责/i.test(text);
+    const looksAnnouncement = /公告|通告|通知|notice|activity|规则|升级|维护|充值、兑换与消费记录|更新|重要|玩法说明|欢迎|提示|声明|免责|需要确认|我已确认/i.test(text);
     if (hasStatusAction && !looksAnnouncement) continue;
 
     // 3. 严禁关闭小游戏交互面板 (如摸猫/猫咪占卜/抽卡)
     if (/摸猫|猫咪占卜|抽一支签|再摸一下猫/.test(text) && /连续摸猫|喵乐园/.test(text)) continue;
     if (/翻牌|开宝箱|翻卡|点击翻牌|幸运大转盘/.test(text) && !looksAnnouncement) continue;
 
+    // 若弹窗内部存在滚动阻碍（如 404api "读到底部才能确认"，确认按钮被 disabled 锁定），
+    // 自动滚动到底部触发可点击状态
+    const scrollables = d.querySelectorAll('div, [class*="scroll"], [class*="overflow"]');
+    for (const sc of scrollables) {
+      try {
+        if (sc.scrollHeight > sc.clientHeight + 5) {
+          sc.scrollTop = sc.scrollHeight;
+          sc.dispatchEvent(new Event('scroll', { bubbles: true }));
+        }
+      } catch (_) {}
+    }
+
     // 定位关闭/知悉按钮
-    let btn = d.querySelector('[data-slot="dialog-close"], button[aria-label*="关闭" i], button[aria-label*="close" i], button[aria-label*="dismiss" i], button[title*="关闭" i], button[title*="close" i]');
+    let btn = d.querySelector('[data-slot="dialog-close"], button[aria-label*="关闭" i], button[aria-label*="close" i], button[aria-label*="dismiss" i], button[title*="关闭" i], button[title*="close" i], button[title*="知道了" i], button[aria-label*="知道了" i]');
     if (!btn) {
       btn = [...d.querySelectorAll('button, [role="button"]')].find(b => {
         const t = (b.innerText || b.textContent || '').trim();
         const aria = (b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '');
-        return ['全部已读','我知道了','知道了','我已知悉','知悉','关闭','Close','Got it','确定','OK'].some(
+        return ['我已确认','已确认','全部已读','我知道了','知道了','我已知悉','知悉','已读','标记已读','关闭','Close','Got it','确定','OK'].some(
           k => t.includes(k) || aria.toLowerCase().includes(k.toLowerCase())
         );
       });
@@ -10415,11 +10430,14 @@ _DIALOG_DISMISS_JS = """() => {
       btn = d.querySelector('button.absolute.top-2.right-2, button.absolute.top-3.right-3, button.absolute.top-4.right-4, button[class*="close"], button.close');
     }
 
-    const hasExplicitDismiss = /全部已读|我知道了|我已阅读|我已知悉|关闭|Close/i.test(text) || (btn && /关闭|close|dismiss/i.test((btn.getAttribute('aria-label')||'') + ' ' + (btn.getAttribute('title')||'') + ' ' + (btn.innerText||'')));
+    const hasExplicitDismiss = /全部已读|我知道了|我已阅读|我已知悉|关闭|Close|我已确认|已确认/i.test(text) || (btn && /关闭|close|dismiss|确认|知道了/i.test((btn.getAttribute('aria-label')||'') + ' ' + (btn.getAttribute('title')||'') + ' ' + (btn.innerText||'')));
 
     // 仅在具备真实关闭控件且符合公告特征或显式弹窗槽位时执行关闭
     if (btn && (looksAnnouncement || hasExplicitDismiss || (d.getAttribute('data-slot') === 'dialog-content') || (btn.getAttribute('data-slot') === 'dialog-close'))) {
       if (!d.getAttribute('data-dismissed')) {
+        if (btn.disabled) {
+          btn.removeAttribute('disabled');
+        }
         btn.click();
         d.setAttribute('data-dismissed', '1');
         closed++;
@@ -10430,22 +10448,159 @@ _DIALOG_DISMISS_JS = """() => {
 }"""
 
 
+async def _dismiss_404api_announcements(page) -> int:
+    """专为 404API (wb.404-found.uk/hb/me) 定制的通告与站点公告弹窗关闭逻辑。
+
+    404API 存在两类弹窗/通告组件：
+    1. 阻断型「站点公告 · 需要确认」(div.fixed.inset-0.z-[70])：
+       - 站长发布 need_ack 通告时弹出全屏固定遮罩，彻底拦截 pointer events，导致签到点击超时。
+       - 组件有阅读到底部门禁：.thin-scroll 必须滚动到底部，button[disabled] 才会解除锁定为「我已确认」。
+       - 需自动滚到底部、解除 disabled 并点击「我已确认」，同时调用 /hb/api/v1/announcement/ack 确保多条通告全部确认。
+    2. 常规型「站点公告」角标弹窗 (div.fixed.inset-x-3.top-[6.8rem].z-[60])：
+       - 点击右上角 button[title="知道了"][aria-label="关闭"] 关闭，并设置 localStorage['wb-announcement-seen'] 避免反复弹出。
+    """
+    if page is None or not hasattr(page, "evaluate") or not callable(getattr(page, "evaluate", None)):
+        return 0
+    try:
+        raw = await page.evaluate(
+            r"""async () => {
+                let closed = 0;
+                
+                // 1. 关闭/确认全屏阻断型通告弹窗 (K)
+                for (let i = 0; i < 5; i++) {
+                    let modal = null;
+                    const overlays = document.querySelectorAll('div.fixed.inset-0');
+                    for (const m of overlays) {
+                        const cls = m.className || '';
+                        const txt = m.innerText || m.textContent || '';
+                        if (cls.includes('z-[70]') || ((txt.includes('站点公告') || txt.includes('通告')) && (txt.includes('需要确认') || txt.includes('我已确认') || txt.includes('读到底部')))) {
+                            modal = m;
+                            break;
+                        }
+                    }
+                    if (!modal) break;
+                    
+                    const scrollBox = modal.querySelector('.thin-scroll, [class*="overflow-y"]');
+                    if (scrollBox) {
+                        scrollBox.scrollTop = scrollBox.scrollHeight;
+                        scrollBox.dispatchEvent(new Event('scroll', { bubbles: true }));
+                    }
+                    
+                    let ackBtn = Array.from(modal.querySelectorAll('button')).find(b => {
+                        const t = (b.innerText || b.textContent || '').trim();
+                        return t.includes('我已确认') || t.includes('已确认') || t.includes('确认');
+                    });
+                    
+                    if (ackBtn) {
+                        if (ackBtn.disabled) {
+                            ackBtn.removeAttribute('disabled');
+                        }
+                        ackBtn.click();
+                        closed++;
+                        await new Promise(r => setTimeout(r, 400));
+                    } else {
+                        modal.remove();
+                        closed++;
+                        break;
+                    }
+                }
+                
+                // 2. 检查是否有未确认通告 API (/hb/api/v1/announcements)，静默补调 ack 接口
+                try {
+                    const annRes = await fetch('/hb/api/v1/announcements');
+                    if (annRes.ok) {
+                        const annData = await annRes.json();
+                        const unacked = (annData?.items || []).filter(item => item.need_ack && !item.i_acked);
+                        if (unacked.length > 0) {
+                            let csrf = '';
+                            try {
+                                const meRes = await fetch('/hb/api/v1/me');
+                                if (meRes.ok) {
+                                    const meData = await meRes.json();
+                                    csrf = meData?.csrf || '';
+                                }
+                            } catch (_) {}
+                            
+                            for (const item of unacked) {
+                                await fetch('/hb/api/v1/announcement/ack', {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                        ...(csrf ? { 'X-CSRF': csrf } : {})
+                                    },
+                                    body: JSON.stringify({ announce_id: item.id })
+                                });
+                                closed++;
+                            }
+                        }
+                    }
+                } catch (_) {}
+
+                // 3. 关闭常规右上角站点公告浮窗 (k)
+                let cornerNotice = null;
+                for (const el of document.querySelectorAll('div.fixed')) {
+                    const cls = el.className || '';
+                    const txt = el.innerText || el.textContent || '';
+                    if ((cls.includes('z-[60]') || (cls.includes('top-') && cls.includes('sm:w-[400px]'))) && (txt.includes('站点公告') || txt.includes('通告') || el.querySelector('button[title="知道了"]'))) {
+                        cornerNotice = el;
+                        break;
+                    }
+                }
+                if (cornerNotice) {
+                    const closeBtn = cornerNotice.querySelector('button[aria-label="关闭"], button[title="知道了"], button');
+                    if (closeBtn) {
+                        closeBtn.click();
+                        closed++;
+                    } else {
+                        cornerNotice.remove();
+                        closed++;
+                    }
+                }
+                
+                // 4. 同步更新 localStorage 标记，防止 8s 轮询重新唤起公告浮窗
+                try {
+                    localStorage.setItem('wb-announcement-seen', String(Math.floor(Date.now() / 1000)));
+                } catch (_) {}
+                
+                return closed;
+            }"""
+        )
+        count = int(raw) if isinstance(raw, (int, float)) or (isinstance(raw, str) and raw.isdigit()) else 0
+        if count:
+            print(f"  404api: dismissed/acked {count} notice dialog(s)", flush=True)
+            await asyncio.sleep(0.5)
+        return count
+    except Exception as e:
+        print(f"  404api notice dismiss error: {e}", flush=True)
+        return 0
+
+
 async def dismiss_obstructing_dialogs(page, stage: str = "interaction") -> int:
     """Close announcement-style modal dialogs and full-screen overlays that would
     swallow interactions. Returns how many dialogs were dismissed (0 = nothing to do)."""
     if page is None or not hasattr(page, "evaluate") or not callable(getattr(page, "evaluate", None)):
         return 0
+    total_closed = 0
+    try:
+        raw_url = getattr(page, "url", "")
+        url_str = raw_url if isinstance(raw_url, str) else ""
+        if "404-found.uk" in url_str:
+            total_closed += await _dismiss_404api_announcements(page)
+    except Exception:
+        pass
+
     try:
         raw = await page.evaluate(_DIALOG_DISMISS_JS)
         count = int(raw) if isinstance(raw, (int, float)) or (isinstance(raw, str) and raw.isdigit()) else 0
+        total_closed += count
     except Exception as dismiss_err:
         print(f"  ! dialog dismiss skipped: {dismiss_err}", flush=True)
-        return 0
-    if count:
+        return total_closed
+    if total_closed:
         stage_desc = f" [{stage}]" if stage else ""
-        print(f"  dismissed {count} obstruction dialog(s){stage_desc}", flush=True)
+        print(f"  dismissed {total_closed} obstruction dialog(s){stage_desc}", flush=True)
         await asyncio.sleep(0.5)
-    return count
+    return total_closed
 
 
 async def try_signin_api(page, adapter: SiteAdapter) -> str:

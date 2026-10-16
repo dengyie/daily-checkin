@@ -4461,6 +4461,32 @@ class TestSitesYaml(unittest.TestCase):
         for k in vars(builtin_entry):
             self.assertEqual(getattr(a, k), getattr(builtin_entry, k), f"字段 {k} 不等价")
 
+    def test_yaml_registers_peiee_entry(self):
+        """sites.yaml 的 peiee 条目解析为 newapi_profile,/profile(标准 LinuxDO New API 站)."""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "peiee"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 peiee 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://api.pei.ee/profile")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        # 常驻说明文案绝不能进 already(假 ALREADY 红线)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "peiee"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 peiee")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        # sites.yaml 与 _BUILTIN_SITE_ADAPTERS 字段等价
+        for k in vars(builtin_entry):
+            self.assertEqual(getattr(a, k), getattr(builtin_entry, k), f"字段 {k} 不等价")
+
     def test_yaml_registers_mailhub_entry(self):
         """sites.yaml 的 mailhub 条目解析为 browser,/wallet,选择器钉死立即签到。"""
         import yaml
