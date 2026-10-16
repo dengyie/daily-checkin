@@ -38,8 +38,9 @@ class WebToastTests(unittest.TestCase):
         # CSP 零内联：关闭图标必须走 uiIcon，而不是内联 onclick/事件属性
         self.assertIn('uiIcon("x"', self.app_js)
 
-    def test_toast_click_anywhere_confirms_and_hides(self):
-        """点击 toast 任意位置即确认关闭，且 stopPropagation 防穿透到底层按钮。"""
+    def test_toast_click_delegation_guards_misfire(self):
+        """toast 点击委托必须 stopPropagation 防穿透;仅 × 按钮关闭;
+        显示后 800ms 内忽略点击(防止弹出处接住上一次操作的误触)。"""
         m = re.search(
             r'\$\("#message-toast"\)\?\.addEventListener\("click".*?\}\);',
             self.app_js,
@@ -48,7 +49,10 @@ class WebToastTests(unittest.TestCase):
         self.assertIsNotNone(m, "toast click 委托缺失")
         body = m.group(0)
         self.assertIn("stopPropagation", body)
+        self.assertIn('closest(".toast-close")', body)
         self.assertIn("hideToast()", body)
+        self.assertRegex(body, r"toastShownAt")
+        self.assertIn("toastShownAt = performance.now()", self.app_js)
 
     def test_result_toasts_do_not_autodismiss(self):
         """success/error 结果类 toast 不自动消失，必须用户点击确认才关闭。"""

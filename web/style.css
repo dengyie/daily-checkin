@@ -1669,9 +1669,8 @@ html[data-resolved-theme="light"] .tile-balance-badge {
 .message-toast.is-visible {
   transform: translateY(0);
   opacity: 1;
-  /* 可见时可交互(点击任意处确认关闭);隐藏态保持 pointer-events:none 防点击穿透 */
+  /* 可见时可交互(确认按钮可点);隐藏态保持 pointer-events:none 防点击穿透 */
   pointer-events: auto;
-  cursor: pointer;
 }
 .message-toast .toast-close {
   appearance: none;

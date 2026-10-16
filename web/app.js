@@ -403,6 +403,7 @@ function updateServerStatus(st, label, ping) {
 }
 
 let toastTimer = null;
+let toastShownAt = -1e9;
 function hideToast() {
   const toast = $("#message-toast");
   if (toast) toast.classList.remove("is-visible");
@@ -434,6 +435,8 @@ function showToast(msg, type = "info") {
   toast.innerHTML = `<ui-icon name="${iconName}" size="16"></ui-icon><span>${esc(msg)}</span><button class="toast-close" type="button" aria-label="确认并关闭">${uiIcon("x", { size: 14 })}</button>`;
 
   // 结果类(success/error)不自动消失,必须用户点击确认;仅 info 进度类 3.5s 自动消失
+  // 显示瞬间记录时间戳:800ms 内忽略点击,防止弹出处正好接住用户上一次操作的点击误关
+  toastShownAt = performance.now();
   if (type === "info") {
     toastTimer = setTimeout(() => {
       toast.classList.remove("is-visible");
@@ -442,10 +445,13 @@ function showToast(msg, type = "info") {
   }
 }
 
-// toast 可见时可交互:点击 toast 任意位置(含「确认并关闭」按钮)即手动确认关闭;
-// 悬停暂停 info 进度类的自动消失;点击一律拦截,绝不穿透到底层 topbar 按钮。
+// toast 可见时可交互:点「确认并关闭」按钮手动确认关闭(点 toast 文字区域不关闭,
+// 避免删除/确认后紧接的误触把结果提示点没了);悬停暂停 info 进度类自动消失;
+// 点击一律拦截,绝不穿透到底层 topbar 按钮。
 $("#message-toast")?.addEventListener("click", (e) => {
   e.stopPropagation();
+  if (performance.now() - toastShownAt < 800) return;
+  if (!e.target.closest(".toast-close")) return;
   hideToast();
 });
 $("#message-toast")?.addEventListener("mouseenter", () => {
