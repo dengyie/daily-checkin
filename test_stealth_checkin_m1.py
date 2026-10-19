@@ -218,6 +218,24 @@ class TestSuccessGate(unittest.TestCase):
             )
         )
 
+    def test_profile_with_notification_balance_threshold_is_not_business_ineligible(self):
+        # chengmo (api.chengmo.cc.cd/profile) has notification preferences:
+        # "余额不足提醒\n余额低于阈值时提醒我一次\n提醒阈值 (USD)"
+        # This is a user notification preference, NOT a check-in eligibility rule.
+        # It must NOT trigger business_ineligible.
+        profile_page = (
+            "CM-API-公益站\n控制台\n个人资料\nmango\n"
+            "当前余额\n$91.73\n剩余配额\n"
+            "接收哪些通知\n余额不足提醒\n余额低于阈值时提醒我一次\n提醒阈值 (USD)\n"
+            "每日签到\n每日签到可获得随机额度奖励\n立即签到\n"
+            "累计签到\n104\n"
+        )
+        self.assertIsNone(
+            self.m.classify_page_block(
+                profile_page, "https://api.chengmo.cc.cd/profile"
+            )
+        )
+
     def test_ai_52ccl_prefers_verified_canonical_profile_route(self):
         adapter = self.m.resolve_site(
             "ai.52ccl.cn", "https://ai.52ccl.cn/personal"
@@ -3885,10 +3903,13 @@ class TestSitesYaml(unittest.TestCase):
         self.addCleanup(lambda: os.unlink(path))
         p_file = mock.patch.object(self.m, "ACCOUNTS_FILE", Path(path))
         p_cache = mock.patch.object(self.m, "_ACCOUNTS_CACHE", None)
+        p_read = mock.patch.object(self.m, "read_accounts_file", return_value=fixture_md)
         p_file.start()
         p_cache.start()
+        p_read.start()
         self.addCleanup(p_file.stop)
         self.addCleanup(p_cache.stop)
+        self.addCleanup(p_read.stop)
 
     def test_loads_three_kinds(self):
         p = self._write_yaml("""sites:
@@ -4487,6 +4508,84 @@ class TestSitesYaml(unittest.TestCase):
         for k in vars(builtin_entry):
             self.assertEqual(getattr(a, k), getattr(builtin_entry, k), f"字段 {k} 不等价")
 
+    def test_yaml_registers_yiming_entry(self):
+        """sites.yaml 的 yiming 条目解析为 newapi_profile,/profile(一鸣公益站, 标准 LinuxDO New API 站)."""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "yiming"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 yiming 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://newapi.yimingtalk.online/profile")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        # 常驻说明文案绝不能进 already(假 ALREADY 红线)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "yiming"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 yiming")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        # sites.yaml 与 _BUILTIN_SITE_ADAPTERS 字段等价
+        for k in vars(builtin_entry):
+            self.assertEqual(getattr(a, k), getattr(builtin_entry, k), f"字段 {k} 不等价")
+
+    def test_yaml_registers_maimaidx_entry(self):
+        """sites.yaml 的 maimaidx 条目解析为 newapi_profile,/profile(maimai API, 标准 LinuxDO New API 站)."""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "maimaidx"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 maimaidx 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://newapi.maimaidx.icu/profile")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        # 常驻说明文案绝不能进 already(假 ALREADY 红线)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "maimaidx"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 maimaidx")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        # sites.yaml 与 _BUILTIN_SITE_ADAPTERS 字段等价
+        for k in vars(builtin_entry):
+            self.assertEqual(getattr(a, k), getattr(builtin_entry, k), f"字段 {k} 不等价")
+
+    def test_yaml_registers_chuanapi_entry(self):
+        """sites.yaml 的 chuanapi 条目解析为 newapi_profile,/profile(万川智能, 标准 LinuxDO New API 站)."""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "chuanapi"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 chuanapi 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://chuanapi.com/profile")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        # 常驻说明文案绝不能进 already(假 ALREADY 红线)
+        self.assertNotIn("每日仅可签到一次", joined_already)
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "chuanapi"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 chuanapi")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        # sites.yaml 与 _BUILTIN_SITE_ADAPTERS 字段等价
+        for k in vars(builtin_entry):
+            self.assertEqual(getattr(a, k), getattr(builtin_entry, k), f"字段 {k} 不等价")
+
     def test_yaml_registers_mailhub_entry(self):
         """sites.yaml 的 mailhub 条目解析为 browser,/wallet,选择器钉死立即签到。"""
         import yaml
@@ -4557,7 +4656,7 @@ class TestSitesYaml(unittest.TestCase):
         adapter = self.m.resolve_site("fengwind", "https://api-welfalre.fengwind.com/")
         self.assertIsNotNone(adapter)
         self.assertTrue(self.m.is_fengwind_site(adapter.url))
-        self.assertIn('button[data-slot="button"]:has-text("签到")', adapter.sign_selectors)
+        self.assertIn('button[data-slot="button"]:text-is("签到")', adapter.sign_selectors)
 
         # 2. mulink page text should not be blocked as business_ineligible
         blocked = self.m.classify_page_block("额度池\n余额不满足领取条件\n签到", "https://demo.dev2.mulink.top/wallet")
@@ -4770,6 +4869,75 @@ class TestFengwindWindowGuard(unittest.TestCase):
         line = 'set_task_result(today_str, name, "pending", only_if_not_done=True)'
         self.assertIn(line, src)
         self.assertIn("result.keep_pending", src)
+
+
+class TestFengwindLoginAndCheckin(unittest.TestCase):
+    """Fengwind API 福利站先登录后签到保障与增量奖励提取回归测试 (2026-10-18)。"""
+
+    def setUp(self):
+        self.m = load_mod()
+
+    def test_reward_extraction_fengwind_text(self):
+        """验证 _extract_reward_from_text 能正确提取「本次获得 $5.17」等增量。"""
+        m = self.m
+        self.assertEqual(m._extract_reward_from_text("本次获得\n\n$5.17"), "+$5.17")
+        self.assertEqual(m._extract_reward_from_text("本次获得 $3.40"), "+$3.40")
+        self.assertEqual(m._extract_reward_from_text("本次奖励 5.00 刀"), "+5.00 刀")
+        self.assertEqual(m._extract_reward_from_text("签到成功，获得 $3.40，2天有效，正在入账。"), "+$3.40")
+
+    def test_builtin_adapter_fengwind_selectors(self):
+        """验证内置 fengwind 适配器 signs 与 already 包含紧缩选择器，排除 tabs-trigger。"""
+        m = self.m
+        adapters = {a.name: a for a in m._BUILTIN_SITE_ADAPTERS}
+        self.assertIn("fengwind", adapters)
+        fw = adapters["fengwind"]
+        # signs 必须包含严格限定 data-slot="button" 的精确选择器
+        self.assertIn('button[data-slot="button"]:text-is("签到")', fw.sign_selectors)
+        self.assertIn('button[data-slot="button"]:has-text("签到"):not(:has-text("登录"))', fw.sign_selectors)
+        # already 必须包含今日已签到与已签到按钮
+        self.assertIn('text=今日已签到', fw.already_selectors)
+        self.assertIn('button[data-slot="button"]:text-is("已签到")', fw.already_selectors)
+
+    def test_ensure_fengwind_logged_in_fast_path(self):
+        """若 localStorage 已有有效 token 且无「登录后签到」按钮，快速放行 True。"""
+        m = self.m
+        import asyncio
+
+        class FakeLocator:
+            async def count(self):
+                return 0
+            @property
+            def first(self):
+                return self
+            async def is_visible(self):
+                return False
+
+        class FakePage:
+            url = "https://api-welfalre.fengwind.com/"
+            async def evaluate(self, expr):
+                if "welfare_token" in expr:
+                    return "mock_valid_jwt_token_1234567890"
+                return None
+            def locator(self, selector):
+                return FakeLocator()
+
+        result = asyncio.run(m._ensure_fengwind_logged_in(FakePage(), "https://api-welfalre.fengwind.com/"))
+        self.assertTrue(result)
+
+    def test_extract_fengwind_balance(self):
+        """验证 _extract_fengwind_balance 正确从 /api/checkin/status 提取当日奖励。"""
+        m = self.m
+        import asyncio
+
+        class FakePage:
+            async def evaluate(self, expr):
+                return {"rewardText": "+$5.17"}
+
+        res = asyncio.run(m._extract_fengwind_balance(FakePage()))
+        self.assertIsNotNone(res)
+        self.assertEqual(res.reward_text, "+$5.17")
+        self.assertEqual(res.currency, "USD")
+        self.assertEqual(res.source, "api")
 
 
 class TestMulinkClaimSelector(unittest.TestCase):
@@ -7130,7 +7298,7 @@ class IloveCatCheckinTest(unittest.TestCase):
         self.assertIn("ilovecat", self.m.AdapterKind.__args__)
 
     def test_yaml_registers_ilovecat_entry(self):
-        """sites.yaml 的 靴貓公益站 条目解析为 kind=ilovecat 且主路径为 /playground。"""
+        """sites.yaml 的 靴貓公益站 条目解析为 kind=ilovecat 且主路径为 /dashboard/overview。"""
         import yaml
         yaml_path = ROOT / "sites.yaml"
         self.assertTrue(yaml_path.exists())
@@ -7141,8 +7309,8 @@ class IloveCatCheckinTest(unittest.TestCase):
         from stealth_checkin_runner import _adapter_from_yaml_entry
         a = _adapter_from_yaml_entry(entry)
         self.assertEqual(a.kind, "ilovecat")
-        self.assertEqual(a.url, "https://api.ilovecat520.me/playground")
-        self.assertTrue(a.prefer_catalog_url)
+        self.assertEqual(a.url, "https://api.ilovecat520.me/dashboard/overview")
+        self.assertFalse(a.prefer_catalog_url)
         self.assertEqual(a.login_url, "https://api.ilovecat520.me/login")
         joined_signs = " ".join(a.sign_selectors)
         self.assertIn("button.cat-pet__cat", joined_signs)
@@ -7154,8 +7322,8 @@ class IloveCatCheckinTest(unittest.TestCase):
         builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "靴貓公益站"), None)
         self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 靴貓公益站")
         self.assertEqual(builtin_entry.kind, "ilovecat")
-        self.assertEqual(builtin_entry.url, "https://api.ilovecat520.me/playground")
-        self.assertTrue(builtin_entry.prefer_catalog_url)
+        self.assertEqual(builtin_entry.url, "https://api.ilovecat520.me/dashboard/overview")
+        self.assertFalse(builtin_entry.prefer_catalog_url)
         self.assertEqual(builtin_entry.login_url, "https://api.ilovecat520.me/login")
 
     def test_dispatch_contains_ilovecat_branch(self):
@@ -7492,6 +7660,65 @@ class TestEmrankAntiPattern(unittest.TestCase):
         self.assertIsNotNone(entry, "sites.yaml 应有 emrank 条目")
         self.assertNotIn("text=已连续签到", entry.get("already", []),
                          "sites.yaml emrank already 不得含『已连续签到（天）』")
+
+
+class TestJianzhileCheckin(unittest.TestCase):
+    """简直了 (jianzhile.vip) 专属图形验证码签到测试."""
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+
+    def test_is_jianzhile_site(self):
+        self.assertTrue(self.m.is_jianzhile_site("https://jianzhile.vip/console/personal"))
+        self.assertTrue(self.m.is_jianzhile_site("https://jianzhile.vip/"))
+        self.assertFalse(self.m.is_jianzhile_site("https://example.com/"))
+        self.assertFalse(self.m.is_jianzhile_site(""))
+
+    def test_is_jianzhile_name(self):
+        self.assertTrue(self.m.is_jianzhile_name("简直了"))
+        self.assertTrue(self.m.is_jianzhile_name("jianzhile"))
+        self.assertTrue(self.m.is_jianzhile_name("jianzhile_api"))
+        self.assertFalse(self.m.is_jianzhile_name("other_site"))
+
+    def test_resolve_jianzhile_adapter(self):
+        # 1. 内置 adapter
+        builtin = next((x for x in self.m._BUILTIN_SITE_ADAPTERS if x.name == "简直了"), None)
+        self.assertIsNotNone(builtin)
+        self.assertEqual(builtin.kind, "jianzhile")
+
+        # 2. resolve_site
+        resolved = self.m.resolve_site("简直了", "https://jianzhile.vip/console/personal")
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.kind, "jianzhile")
+        self.assertEqual(resolved.url, "https://jianzhile.vip/console/personal")
+
+        # 3. sites.yaml
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "简直了"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 简直了 条目")
+        self.assertEqual(entry.get("kind"), "jianzhile")
+
+    def test_solve_captcha_with_vision_logic(self):
+        import io
+        import json
+        from unittest.mock import patch, MagicMock
+
+        # 1. 空图片直接返回空
+        self.assertEqual(self.m.solve_captcha_with_vision(b""), "")
+
+        # 2. Mock 接口调用
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "choices": [{"message": {"content": " 2GML5 \n"}}]
+        }).encode("utf-8")
+        mock_response.__enter__.return_value = mock_response
+
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            code = self.m.solve_captcha_with_vision(b"fake_image_bytes")
+            self.assertEqual(code, "2GML5")
 
 
 if __name__ == "__main__":

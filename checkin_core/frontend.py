@@ -60,7 +60,10 @@ class FrontendHandler(BaseHTTPRequestHandler):
     server_version = "DailyCheckin-Frontend/1"
 
     def log_message(self, format: str, *args) -> None:
-        print(f"frontend {self.address_string()} {format % args}", flush=True)
+        try:
+            print(f"frontend {self.address_string()} {format % args}", flush=True)
+        except Exception:
+            pass
 
     @property
     def directory(self) -> Path:
@@ -124,6 +127,7 @@ def serve(host: str = "127.0.0.1", port: int = 8766, directory: str | Path | Non
     frontend_dir = (Path(directory).resolve() if directory else DEFAULT_DIR)
     if not frontend_dir.is_dir():
         raise FileNotFoundError(f"frontend directory not found: {frontend_dir}")
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((host, port), FrontendHandler)
     server.frontend_dir = frontend_dir
     print(f"Daily Check-in UI: http://{host}:{server.server_port} (dir {frontend_dir})", flush=True)

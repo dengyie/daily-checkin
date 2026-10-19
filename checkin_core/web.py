@@ -90,7 +90,10 @@ WEB_PASSWORD_ENV = "DAILY_CHECKIN_WEB_PASSWORD"
 
 
 def web_password() -> str | None:
-    return os.environ.get(WEB_PASSWORD_ENV) or None
+    val = os.environ.get(WEB_PASSWORD_ENV)
+    if val is not None:
+        val = val.strip()
+    return val or None
 
 
 ALLOWED_CRED_KINDS = {"token", "cookie", "password"}
@@ -284,7 +287,10 @@ class CheckinWebApp:
             server_version = "DailyCheckin/1"
 
             def log_message(self, format: str, *args) -> None:
-                print(f"web {self.address_string()} {format % args}", flush=True)
+                try:
+                    print(f"web {self.address_string()} {format % args}", flush=True)
+                except Exception:
+                    pass
 
             def allowed_host(self) -> bool:
                 host = self.headers.get("Host", "").split(":", 1)[0].strip("[]").lower()
@@ -325,7 +331,8 @@ class CheckinWebApp:
                     return True
                 # Password gate (X-DailyCheckin-Password) takes precedence.
                 pwd = web_password()
-                if pwd is not None and _constant_eq(self.headers.get("X-DailyCheckin-Password"), pwd):
+                req_pwd = (self.headers.get("X-DailyCheckin-Password") or "").strip()
+                if pwd is not None and _constant_eq(req_pwd, pwd):
                     return True
                 if pwd is not None:
                     return False
@@ -709,6 +716,7 @@ def serve(
     if host not in ("127.0.0.1", "localhost", "::1"):
         raise ValueError("daily-checkin UI may bind only to loopback")
     app = CheckinWebApp(store=store, require_auth=require_auth)
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((host, port), app.handler())
     print(f"Daily Check-in UI: http://{host}:{server.server_port}", flush=True)
     # Print the bearer token to stderr exactly once, only when this startup

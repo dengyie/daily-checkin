@@ -1896,6 +1896,94 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
         # Verify site is gone from tasks
         tasks = {t["name"]: t for t in self.store.tasks(self.day)}
         self.assertNotIn("api-del-site", tasks)
+        self.assertTrue(self.store.is_site_deleted("api-del-site"))
+
+    def test_delete_site_records_tombstone_and_projects_obsidian_removal(self):
+        """Deleting a site must record tombstone and strip task line from markdown note."""
+        note_path = Path(self.td.name) / f"{self.day} 每日任务.md"
+        note_path.write_text(
+            f"# {self.day} 每日任务\n"
+            "- [ ] #task #日常 [del-proj-site](https://delproj.example.com) #auto-fail:no_button\n"
+            "- [ ] #task #日常 [other-site](https://other.example.com)\n",
+            encoding="utf-8",
+        )
+        self.store.upsert_task(
+            self.day,
+            "del-proj-site",
+            "https://delproj.example.com",
+            obsidian_path=str(note_path),
+        )
+
+        self.assertFalse(self.store.is_site_deleted("del-proj-site"))
+        res = self.store.delete_site("del-proj-site")
+        self.assertEqual(res["name"], "del-proj-site")
+
+        # 1. Verify tombstone is recorded
+        self.assertTrue(self.store.is_site_deleted("del-proj-site"))
+        self.assertIn("del-proj-site", self.store.get_deleted_site_names())
+
+        # 2. Verify Obsidian note was updated and site line removed
+        note_content = note_path.read_text(encoding="utf-8")
+        self.assertNotIn("del-proj-site", note_content)
+        self.assertIn("other-site", note_content)
+
+    def test_import_obsidian_tasks_skips_tombstoned_deleted_sites(self):
+        """import_obsidian_tasks must never resurrect a tombstoned deleted site."""
+        self.store.upsert_task(self.day, "to-be-tombstoned", "https://tombstone.example.com")
+        self.store.delete_site("to-be-tombstoned")
+        self.assertTrue(self.store.is_site_deleted("to-be-tombstoned"))
+
+        # Attempt to import rows containing the deleted site (e.g. from older note or sync)
+        rows = [
+            ("to-be-tombstoned", "https://tombstone.example.com", False),
+            ("fresh-site", "https://fresh.example.com", False),
+        ]
+        imported_count = self.store.import_obsidian_tasks(self.day, rows, "/fake/path.md")
+        self.assertEqual(imported_count, 1)
+
+        tasks = {t["name"]: t for t in self.store.tasks(self.day)}
+        self.assertNotIn("to-be-tombstoned", tasks)
+        self.assertIn("fresh-site", tasks)
+
+    def test_upsert_site_clears_tombstone_when_explicitly_readded(self):
+        """Explicitly upserting a site clears its tombstone, allowing re-addition."""
+        self.store.upsert_task(self.day, "readd-site", "https://readd.example.com")
+        self.store.delete_site("readd-site")
+        self.assertTrue(self.store.is_site_deleted("readd-site"))
+
+        # Explicit upsert
+        self.store.upsert_site("readd-site", "https://readd.example.com/new")
+        self.assertFalse(self.store.is_site_deleted("readd-site"))
+
+        # Subsequent import now succeeds
+        rows = [("readd-site", "https://readd.example.com/new", False)]
+        self.store.import_obsidian_tasks(self.day, rows, "/fake/path.md")
+        tasks = {t["name"]: t for t in self.store.tasks(self.day)}
+        self.assertIn("readd-site", tasks)
+
+    def test_ensure_daily_task_file_filters_deleted_sites_from_seed(self):
+        """ensure_daily_task_file must filter out tombstoned sites when seeding new day note."""
+        from stealth_checkin_runner import ensure_daily_task_file
+
+        seed_file = Path(self.td.name) / "2026-08-27 每日任务.md"
+        seed_file.write_text(
+            "# 任务\n"
+            "- [x] #task #日常 [dead-site](https://dead.com)\n"
+            "- [x] #task #日常 [alive-site](https://alive.com)\n",
+            encoding="utf-8",
+        )
+        self.store.upsert_task("2026-08-27", "dead-site", "https://dead.com")
+        self.store.delete_site("dead-site")
+
+        new_day = "2026-08-28"
+        target_file = Path(self.td.name) / f"{new_day} 每日任务.md"
+        content, created = ensure_daily_task_file(
+            str(target_file), day=new_day, excluded_sites=self.store.get_deleted_site_names()
+        )
+        self.assertTrue(created)
+        self.assertNotIn("dead-site", content)
+        self.assertIn("alive-site", content)
+        self.assertIn("- [ ] #task #日常 [alive-site]", content)
 
     def test_api_delete_site_error_handling(self):
         self.conn.request("GET", "/api/state")

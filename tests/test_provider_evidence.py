@@ -493,7 +493,8 @@ class ProviderEvidenceTests(unittest.TestCase):
         self.assertEqual(asyncio.run(module._dismiss_404api_announcements(object())), 0)
 
     def test_dismiss_obstructing_dialogs_invokes_404api_handler(self):
-        """dismiss_obstructing_dialogs calls _dismiss_404api_announcements when url has 404-found.uk."""
+        """dismiss_obstructing_dialogs calls the 404api announcement handler AND
+        activates the 「签到与账本」tab (2026-10-18 改版:签到 CTA 在该 tab 面板内)."""
         module = load_runner("provider_runner_obstruct_404api_test")
         from unittest.mock import AsyncMock, patch
 
@@ -503,12 +504,52 @@ class ProviderEvidenceTests(unittest.TestCase):
                 self.evaluate = AsyncMock(return_value=1)
 
         page = Fake404Page()
-        with patch.object(module, "_dismiss_404api_announcements", new_callable=AsyncMock) as mock_404:
+        with patch.object(module, "_dismiss_404api_announcements", new_callable=AsyncMock) as mock_404, \
+                patch.object(module, "_activate_404api_checkin_tab", new_callable=AsyncMock) as mock_tab:
             mock_404.return_value = 2
+            mock_tab.return_value = True
             total = asyncio.run(module.dismiss_obstructing_dialogs(page, stage="pre_cta"))
             self.assertEqual(total, 3)
             mock_404.assert_called_once_with(page)
+            mock_tab.assert_called_once_with(page)
             page.evaluate.assert_called_once()
+
+    def test_activate_404api_checkin_tab_clicks_tab_when_cta_hidden(self):
+        """_activate_404api_checkin_tab clicks the 签到与账本 tab when no visible
+        签到 CTA exists, and is idempotent (no-op) when one is already visible."""
+        module = load_runner("provider_runner_404api_tab_test")
+        from unittest.mock import AsyncMock
+
+        class FakePage:
+            def __init__(self, switched):
+                self.url = "https://wb.404-found.uk/hb/me"
+                self.evaluate = AsyncMock(return_value=switched)
+
+        # Switched -> True, helper reports it activated the tab.
+        page = FakePage(True)
+        self.assertTrue(asyncio.run(module._activate_404api_checkin_tab(page)))
+        page.evaluate.assert_called_once()
+
+        # Switched -> False (already visible / no tab) -> no-op, returns False.
+        page2 = FakePage(False)
+        self.assertFalse(asyncio.run(module._activate_404api_checkin_tab(page2)))
+
+        # Defensive: page without evaluate is a safe no-op.
+        self.assertFalse(asyncio.run(module._activate_404api_checkin_tab(None)))
+        self.assertFalse(asyncio.run(module._activate_404api_checkin_tab(object())))
+
+    def test_404api_sign_selectors_are_exact_text(self):
+        """404api sign selectors use exact-text matching so the loose
+        button:has-text("签到") can never hit the nav tab「签到与账本」or the
+        done button「今天已签到」(2026-10-18 改版根因)。"""
+        module = load_runner("provider_runner_404api_sel_test")
+        adapter = next(a for a in module._BUILTIN_SITE_ADAPTERS if a.name == "404api")
+        for sel in adapter.sign_selectors:
+            self.assertIn("text-is(\"签到\")", sel)
+            self.assertNotIn('has-text("签到")', sel)
+        # The nav-tab label must never classify as a clickable sign CTA.
+        self.assertFalse(module.is_sign_cta_text("签到与账本"))
+        self.assertTrue(module.is_sign_cta_text("签到"))
 
     def test_extract_leileihog_balance_parses_usd_and_reward(self):
         """leileihog extractor converts New-API quota to USD and captures lottery prize."""

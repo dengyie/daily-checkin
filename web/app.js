@@ -767,7 +767,7 @@ function openSiteDetailDrawer(siteName) {
           <div class="form-group-item">
             <label for="site-drawer-checkin-mode">签到模式 (Execution Mode)</label>
             <select name="checkin_mode" id="site-drawer-checkin-mode">
-              <option value="auto" ${!isManualMode ? "selected" : ""}>自动签到 (每日 08:10 批次无头自动执行)</option>
+              <option value="auto" ${!isManualMode ? "selected" : ""}>自动签到 (每日 08:10 批次有头 CDP 附着执行)</option>
               <option value="manual" ${isManualMode ? "selected" : ""}>手动签到 (专属人工签到池 · 每日批次自动跳过)</option>
             </select>
             <small class="tile-prop-label mt-xs d-block">
@@ -2533,7 +2533,7 @@ async function triggerRun(sites) {
   try {
     updateServerStatus("busy");
     const data = await api("/api/run", { sites });
-    showToast(`作业 #${data.job_id} 已入队执行，后台无头浏览器正在签到...`, "success");
+    showToast(`作业 #${data.job_id} 已入队执行，正在附着 Chrome 9222 执行签到...`, "success");
     setTimeout(load, 800);
   } catch (error) {
     showToast(`触发失败：${error.message}`, "error");

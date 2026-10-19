@@ -6,14 +6,15 @@ sites:
     url: https://api-welfalre.fengwind.com/
     kind: browser
     signs:
-      - 'button[data-slot="button"]:has-text("签到")'
-      - 'button.bg-primary:has-text("签到")'
-      - 'button:not([role="tab"]):has-text("签到")'
-      - 'button:has-text("签到")'
+      - 'button[data-slot="button"]:text-is("签到")'
+      - 'button[data-slot="button"]:has-text("签到"):not(:has-text("登录"))'
+      - 'button:not([role="tab"]):not([data-slot="tabs-trigger"]):text-is("签到")'
+      - 'button:text-is("签到")'
     already:
       - 'text=今日已签到'
-      - 'text=签到成功'
+      - 'button[data-slot="button"]:text-is("已签到")'
       - 'text=已签到'
+      - 'text=签到成功'
   - name: '薄荷公益站'
     url: https://up.x666.me/
     kind: bohe
@@ -403,6 +404,30 @@ sites:
   - name: 'peiee'
     url: https://api.pei.ee/profile
     kind: newapi_profile
+  # yiming(newapi.yimingtalk.online, 一鸣公益站)—— 2026-10-17 接入。
+  # 标准 LinuxDO OAuth + newapi_profile, checkin_enabled=true、linuxdo_oauth=true、
+  # turnstile_check=false(2026-10-17 /api/status 实测, v0.0.0,
+  # quota_per_unit=500000 / quota_display_type=CNY)。
+  # 无自定义适配器:LinuxDO SSO 与「立即签到/今日已签到」判定全走通用 newapi_profile 通道。
+  - name: 'yiming'
+    url: https://newapi.yimingtalk.online/profile
+    kind: newapi_profile
+  # maimaidx(newapi.maimaidx.icu, maimai API)—— 2026-10-18 接入。
+  # 标准 LinuxDO OAuth + newapi_profile, checkin_enabled=true、linuxdo_oauth=true、
+  # turnstile_check=false(2026-10-18 /api/status 实测, v1.0.0-rc.45,
+  # quota_per_unit=500000 / quota_display_type=USD)。
+  # 无自定义适配器:LinuxDO SSO 与「立即签到/今日已签到」判定全走通用 newapi_profile 通道。
+  - name: 'maimaidx'
+    url: https://newapi.maimaidx.icu/profile
+    kind: newapi_profile
+  # chuanapi(chuanapi.com, 万川智能)—— 2026-10-18 接入。
+  # 标准 LinuxDO OAuth + newapi_profile, checkin_enabled=true、linuxdo_oauth=true、
+  # turnstile_check=false(2026-10-18 /api/status 实测, v1.0.0-rc.44.cline.20261018+gf25c5367641b,
+  # quota_per_unit=500000 / quota_display_type=USD)。
+  # 无自定义适配器:LinuxDO SSO 与「立即签到/今日已签到」判定全走通用 newapi_profile 通道。
+  - name: 'chuanapi'
+    url: https://chuanapi.com/profile
+    kind: newapi_profile
   # mailhub(mailhub.pigeonw.com, Mailhub 邮箱额度站)—— 2026-10-01 接入。
   # 非 New API:钱包页 POST /wallet/checkin(表单 csrf)。同页另有「兑换」按钮,
   # 选择器必须钉死 button.primary「立即签到」,不能用裸「签到」。
@@ -448,7 +473,7 @@ sites:
     kind: newapi_profile
   - name: '简直了'
     url: https://jianzhile.vip/console/personal
-    kind: newapi_profile
+    kind: jianzhile
   - name: '无名'
     url: https://welfare.0xpsyche.me/profile
     kind: newapi_profile
@@ -899,10 +924,20 @@ sites:
     kind: browser
     signs:
       - 'button:has-text("立即签到")'
+      - 'button:has-text("立即簽到")'
+      - 'button:text-is("立即签到")'
+      - 'button:text-is("立即簽到")'
     already:
-      - 'text=今日已签到'
-      - 'text=签到成功'
       - 'button:has-text("今日已签到")'
+      - 'button:has-text("今日已簽到")'
+      - 'text=今日已签到'
+      - 'text=今日已簽到'
+      - 'text=已签到'
+      - 'text=已簽到'
+      - 'button:has-text("已签到")'
+      - 'button:has-text("已簽到")'
+      - 'text=签到成功'
+      - 'text=簽到成功'
   # aihappy(images.aihappy.indevs.in, 流光绘境 AI 生图站)—— 2026-09-12 接入。
   # 自定义 Vue SPA(hash 路由,非 New API),LinuxDO OAuth 登录(复用 9222 共享
   # profile 的 linux.do 会话;站方也有 GitHub OAuth)。签到在顶栏 UserQuotaBar
@@ -1149,8 +1184,12 @@ sites:
   # 1. 阻断型全屏公告 modal (div.fixed.inset-0.z-[70]): 站点发布 need_ack 通告时会覆盖全屏拦截 pointer events，
   #    内部带「读到底部才能确认」门禁，需自动滚动至底部解除 disabled 并点击「我已确认」以避免签到按钮被遮挡。
   # 2. 右上角站点公告浮窗 (div.fixed.inset-x-3.top-[6.8rem].z-[60]): 点击关闭并写入 localStorage 防反复弹出。
-  # 下半部分「每日签到」卡片:
-  # 未签 .card:has-text("每日签到") button:has-text("签到") -> POST /hb/api/v1/checkin
+  # 改版(2026-10-18):「每日签到」卡片被移入「签到与账本」tab 面板,默认「概览」页
+  #   看不到该卡片(面板 display:none),且导航 tab「签到与账本」按钮文案含「签到」会
+  #   被宽松的 button:has-text("签到") 误命中。runner 侧 _activate_404api_checkin_tab
+  #   会在扫 CTA 前先切到该 tab;选择器改用精确文本 text-is 双保险。
+  # 下半部分「每日签到」卡片(需先切到「签到与账本」tab):
+  # 未签 .card:has-text("每日签到") button:text-is("签到") -> POST /hb/api/v1/checkin
   # 已签 button 变为「今天已签到」(disabled) 且展示「本次 +X 分，已计入余额 / 签到成功，+X 分」。
   # 资产单位为 分 (POINTS), 可直接读取 /hb/api/v1/me。
   - name: '404api'
@@ -1158,8 +1197,8 @@ sites:
     kind: browser
     prefer_catalog_url: true
     signs:
-      - '.card:has-text("每日签到") button:has-text("签到")'
-      - 'button:has-text("签到")'
+      - '.card:has-text("每日签到") button:text-is("签到")'
+      - 'button:text-is("签到")'
     already:
       - '.card:has-text("每日签到") button:has-text("今天已签到")'
       - 'button:has-text("今天已签到")'

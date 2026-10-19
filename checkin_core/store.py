@@ -13,6 +13,9 @@ from typing import Any, Iterable
 
 
 def obsidian_vault_root() -> Path:
+    env_vault = os.environ.get("OBSIDIAN_VAULT_ROOT")
+    if env_vault:
+        return Path(env_vault).resolve()
     return (
         Path.home()
         / "Library"
@@ -38,7 +41,7 @@ def default_db_path() -> Path:
 
 
 DEFAULT_DB = default_db_path()
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 logger = logging.getLogger("checkin.store")
 
 DEFAULT_SYSTEM_CONFIGS: dict[str, str] = {
@@ -218,6 +221,11 @@ class SystemStore:
                     created_at TEXT NOT NULL,
                     UNIQUE(site_id, day)
                 );
+                CREATE TABLE IF NOT EXISTS deleted_sites (
+                    name TEXT PRIMARY KEY,
+                    deleted_at TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT 'user_delete'
+                );
                 CREATE INDEX IF NOT EXISTS idx_tasks_day_status ON daily_tasks(day,status);
                 CREATE INDEX IF NOT EXISTS idx_items_run ON run_items(run_id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status,id);
@@ -263,6 +271,15 @@ class SystemStore:
                     SystemStore._migrate_column(db, "daily_tasks", "last_reward_text", "TEXT NOT NULL DEFAULT ''")
                     SystemStore._migrate_column(db, "account_balances", "reward_amount", "REAL")
                     SystemStore._migrate_column(db, "account_balances", "reward_text", "TEXT NOT NULL DEFAULT ''")
+                if stored_version < 10:
+                    # v9 -> v10: deleted_sites tombstone table to prevent resurrected deleted sites
+                    db.execute(
+                        """CREATE TABLE IF NOT EXISTS deleted_sites (
+                               name TEXT PRIMARY KEY,
+                               deleted_at TEXT NOT NULL,
+                               reason TEXT NOT NULL DEFAULT 'user_delete'
+                           )"""
+                    )
             db.execute(
                 "INSERT INTO meta(key,value) VALUES('schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -284,6 +301,7 @@ class SystemStore:
     def upsert_site(self, name: str, url: str = "", provider: str = "legacy_browser") -> int:
         now = self.now()
         with self.connect() as db:
+            db.execute("DELETE FROM deleted_sites WHERE name=?", (name,))
             db.execute(
                 """INSERT INTO sites(name,url,provider,created_at,updated_at)
                    VALUES(?,?,?,?,?)
@@ -308,6 +326,7 @@ class SystemStore:
         """
         now = self.now()
         with self.connect() as db:
+            db.execute("DELETE FROM deleted_sites WHERE name=?", (name,))
             db.execute(
                 """INSERT INTO sites(name,url,provider,checkin_mode,tags,created_at,updated_at)
                    VALUES(?,?,?,?,?,?,?)
@@ -345,7 +364,11 @@ class SystemStore:
         count = 0
         now = self.now()
         with self.connect() as db:
+            tombstones = {row[0] for row in db.execute("SELECT name FROM deleted_sites").fetchall()}
             for name, url, done in rows:
+                if name in tombstones:
+                    logger.info("skipping tombstoned deleted site in obsidian import: %s", name)
+                    continue
                 db.execute(
                     """INSERT INTO sites(name,url,provider,created_at,updated_at)
                        VALUES(?,?,?,?,?)
@@ -373,6 +396,18 @@ class SystemStore:
                 )
                 count += 1
         return count
+
+    def is_site_deleted(self, name: str) -> bool:
+        clean = str(name).strip() if name else ""
+        if not clean:
+            return False
+        with self.connect() as db:
+            row = db.execute("SELECT 1 FROM deleted_sites WHERE name=?", (clean,)).fetchone()
+            return row is not None
+
+    def get_deleted_site_names(self) -> set[str]:
+        with self.connect() as db:
+            return {row[0] for row in db.execute("SELECT name FROM deleted_sites").fetchall()}
 
     def tasks(self, day: str, *, pending_only: bool = False) -> list[dict[str, Any]]:
         where = "AND t.status='pending'" if pending_only else ""
@@ -831,12 +866,14 @@ class SystemStore:
     def delete_site(self, name: str) -> dict[str, Any]:
         """Permanently delete a site by name, cascading daily_tasks, site_health,
         and credentials rows. Preserves historical run_items by disassociating site_id.
+        Records a tombstone in deleted_sites and projects removal to Obsidian task files.
         Returns dictionary with deleted site metadata and counts.
         """
         clean_name = str(name).strip() if name is not None else ""
         if not clean_name:
             raise ValueError("site name required")
 
+        now = self.now()
         with self.connect() as db:
             site = db.execute(
                 "SELECT id, name, credential_ref FROM sites WHERE name=?",
@@ -848,6 +885,14 @@ class SystemStore:
             site_id = int(site["id"])
             cred_ref = site["credential_ref"]
 
+            # Collect any obsidian task file paths referencing this site before cascade delete
+            obsidian_paths = [
+                row[0] for row in db.execute(
+                    "SELECT DISTINCT obsidian_path FROM daily_tasks WHERE site_id=? AND obsidian_path IS NOT NULL AND obsidian_path!=''",
+                    (site_id,),
+                ).fetchall()
+            ]
+
             tasks_count = int(db.execute(
                 "SELECT COUNT(*) FROM daily_tasks WHERE site_id=?",
                 (site_id,),
@@ -856,15 +901,84 @@ class SystemStore:
             # Disassociate run_items.site_id to NULL to preserve historical records safely
             db.execute("UPDATE run_items SET site_id=NULL WHERE site_id=?", (site_id,))
 
+            # Record tombstone in deleted_sites to prevent resurrection on future sync/cron
+            db.execute(
+                """INSERT INTO deleted_sites(name, deleted_at, reason)
+                   VALUES(?, ?, 'user_delete')
+                   ON CONFLICT(name) DO UPDATE SET deleted_at=excluded.deleted_at""",
+                (clean_name, now),
+            )
+
             # Delete the site (foreign key cascades to daily_tasks, site_health, credentials)
             db.execute("DELETE FROM sites WHERE id=?", (site_id,))
 
-            return {
-                "name": clean_name,
-                "site_id": site_id,
-                "credential_ref": cred_ref,
-                "deleted_tasks": tasks_count,
-            }
+        # Synchronously project deletion to active Obsidian markdown daily task files
+        self._project_obsidian_site_deleted(clean_name, candidate_paths=obsidian_paths)
+
+        return {
+            "name": clean_name,
+            "site_id": site_id,
+            "credential_ref": cred_ref,
+            "deleted_tasks": tasks_count,
+        }
+
+    def _project_obsidian_site_deleted(
+        self, name: str, candidate_paths: list[str | Path] | None = None
+    ) -> bool:
+        """Best-effort removal of markdown task lines for a deleted site from disk.
+        Removes all matching check-in task lines for this site.
+        Returns True if at least one file was modified, False otherwise.
+        """
+        import re
+        from datetime import datetime
+        vault_root = obsidian_vault_root()
+        today = datetime.now().strftime("%Y-%m-%d")
+        vault_default = obsidian_daily_task_path(today)
+
+        paths_to_check: list[Path] = []
+        if candidate_paths:
+            for cp in candidate_paths:
+                p = Path(cp).resolve()
+                if p not in paths_to_check:
+                    paths_to_check.append(p)
+
+        if vault_default not in paths_to_check:
+            paths_to_check.append(vault_default)
+
+        escaped = re.escape(name)
+        pattern = re.compile(
+            rf"^\s*-\s*\[[ xX]\]\s*#task\s*#日常[^\n]*\[{escaped}\](?:\([^)]*\))?[^\n]*$"
+        )
+
+        modified = False
+        for p in paths_to_check:
+            try:
+                if not p.is_file():
+                    continue
+                is_candidate = candidate_paths and any(p == Path(cp).resolve() for cp in candidate_paths)
+                if not is_candidate and not p.is_relative_to(vault_root) and p != vault_default:
+                    continue
+
+                lines = p.read_text(encoding="utf-8").splitlines(keepends=True)
+                new_lines = []
+                file_changed = False
+                for line in lines:
+                    stripped = line.rstrip("\r\n")
+                    if pattern.match(stripped):
+                        file_changed = True
+                        continue
+                    new_lines.append(line)
+
+                if file_changed:
+                    tmp = p.with_name(p.name + ".tmp")
+                    tmp.write_text("".join(new_lines), encoding="utf-8")
+                    tmp.replace(p)
+                    logger.info("projected site deletion to obsidian: %s (removed %s)", p, name)
+                    modified = True
+            except Exception as e:
+                logger.warning("failed to project site deletion to %s: %s", p, e)
+
+        return modified
 
 
     def _project_obsidian_manual_done(self, day: str, name: str) -> bool:

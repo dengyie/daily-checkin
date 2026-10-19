@@ -17,16 +17,22 @@ Rules (user-facing):
 
 from __future__ import annotations
 
+import sys
 import asyncio
+import base64
 import calendar
-import fcntl
+import socket
+if sys.platform != "win32":
+    import fcntl
+else:
+    fcntl = None
 import hashlib
 import hmac
 import os
 import json
 import random
 import re
-import sys
+import ssl
 import time
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -436,7 +442,7 @@ TERMS_CLICK_SELECTORS = [
 ]
 
 Status = Literal["OK", "ALREADY", "FAIL"]
-AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool", "sub2api", "xmiaom", "glados", "yunzhi", "ilovecat"]
+AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool", "sub2api", "xmiaom", "glados", "yunzhi", "ilovecat", "jianzhile"]
 
 
 @dataclass
@@ -734,6 +740,29 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
         login_url="https://dygyz.pmcat.top/login",
     ),
+    # hiyo(free.hiyo.top, Hiyo Free / Codex订阅站)—— 2026-09-12 接入。
+    # 签到在 /dashboard 的「每日签到」卡片。支持简繁体中文(ZH-HK)。
+    _B(
+        "hiyo",
+        "https://free.hiyo.top/dashboard",
+        signs=[
+            'button:has-text("立即签到")',
+            'button:has-text("立即簽到")',
+            'button:text-is("立即签到")',
+            'button:text-is("立即簽到")',
+        ],
+        already=[
+            'button:has-text("今日已签到")',
+            'button:has-text("今日已簽到")',
+            'text=今日已签到',
+            'text=今日已簽到',
+            'text=已签到',
+            'text=已簽到',
+            'button:has-text("已签到")',
+            'button:has-text("已簽到")',
+        ],
+        prefer_catalog_url=True,
+    ),
     # fengwind(Fengwind API 福利站):首页即签到页(非 New API profile)。
     # 有「签到」按钮(在今日福利卡内,button[data-slot/button] 或带签到文案),
     # 已签判据:「今日已签到」/「签到成功」/「已签到」;带 is_fengwind_site 专属
@@ -742,12 +771,17 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         "fengwind",
         "https://api-welfalre.fengwind.com/",
         signs=[
-            'button[data-slot="button"]:has-text("签到")',
-            'button.bg-primary:has-text("签到")',
-            'button:not([role="tab"]):has-text("签到")',
-            'button:has-text("签到")',
+            'button[data-slot="button"]:text-is("签到")',
+            'button[data-slot="button"]:has-text("签到"):not(:has-text("登录"))',
+            'button:not([role="tab"]):not([data-slot="tabs-trigger"]):text-is("签到")',
+            'button:text-is("签到")',
         ],
-        already=['text=今日已签到', 'text=签到成功', 'text=已签到'],
+        already=[
+            'text=今日已签到',
+            'button[data-slot="button"]:text-is("已签到")',
+            'text=已签到',
+            'text=签到成功',
+        ],
     ),
     _B(
         "林夕",
@@ -933,6 +967,9 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("yuheng", "https://yuheng.site/profile", prefer_catalog_url=True),
     _N("ssite", "https://aapi.ssite.site/profile"),
     _N("peiee", "https://api.pei.ee/profile"),
+    _N("yiming", "https://newapi.yimingtalk.online/profile"),
+    _N("maimaidx", "https://newapi.maimaidx.icu/profile"),
+    _N("chuanapi", "https://chuanapi.com/profile"),
     # mailhub(mailhub.pigeonw.com/wallet):邮箱额度站,POST /wallet/checkin。
     # 同页「兑换」不是签到,选择器钉死 button.primary「立即签到」。
     # 默认 LinuxDO 登录(login_url=/login);已登录页有「退出登录」,不走 SSO。
@@ -963,7 +1000,22 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("v-api", "https://v-api.de5.net/profile"),
     _N("hlool", "https://api.hlool.top/profile"),
     _N("7r", "https://penis.7r.fit/console/personal"),
-    _N("简直了", "https://jianzhile.vip/console/personal"),
+    _B(
+        "简直了",
+        "https://jianzhile.vip/console/personal",
+        signs=['button:has-text("立即签到")'],
+        already=[
+            'button:has-text("已签到")',
+            'text=今日已签到',
+            'text="今日已签到"',
+            'text=已签到',
+            'text="已签到"',
+            'text=签到成功',
+        ],
+        prefer_catalog_url=True,
+        login_url="https://jianzhile.vip/login",
+        kind="jianzhile",
+    ),
     _N("无名", "https://welfare.0xpsyche.me/profile"),
     _N("7倍", "https://7x.hk/profile"),
     _N(
@@ -1332,8 +1384,8 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         "404api",
         "https://wb.404-found.uk/hb/me",
         signs=[
-            '.card:has-text("每日签到") button:has-text("签到")',
-            'button:has-text("签到")',
+            '.card:has-text("每日签到") button:text-is("签到")',
+            'button:text-is("签到")',
         ],
         already=[
             '.card:has-text("每日签到") button:has-text("今天已签到")',
@@ -1578,6 +1630,23 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             prefer_catalog_url=True,
             login_url=str(entry.get("login_url", "") or "https://ai.xmiaom.com/sign-in"),
             kind="xmiaom",
+        )
+    if kind == "jianzhile":
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else ['button:has-text("立即签到")'],
+            already=list(already) if already is not None else [
+                'button:has-text("已签到")',
+                'text=今日已签到',
+                'text="今日已签到"',
+                'text=已签到',
+                'text="已签到"',
+                'text=签到成功',
+            ],
+            ready_rounds=rr,
+            prefer_catalog_url=True,
+            login_url=str(entry.get("login_url", "") or "https://jianzhile.vip/login"),
+            kind="jianzhile",
         )
     if kind == "glados":
         # glados.rocks/console/checkin 专属 glados_checkin 流程:
@@ -2360,19 +2429,197 @@ class PlaywrightHolder:
         return getattr(self._p, name)
 
 
+def probe_tab_visibility_and_liveness(ws_url: str, timeout: float = 0.35) -> str:
+    """Probe a CDP page tab via raw RFC 6455 websocket.
+    Returns:
+      'visible' -> frontmost active tab in its window
+      'hidden'  -> responsive background tab
+      'frozen'  -> timed out / suspended renderer (Chrome Memory Saver)
+      'unsupported' -> socket or handshake failed
+    """
+    if not ws_url:
+        return "unsupported"
+    try:
+        parsed = urlparse(ws_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 9222
+        path = parsed.path
+
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.settimeout(timeout)
+        try:
+            key = base64.b64encode(os.urandom(16)).decode("ascii")
+            req = (
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                f"Upgrade: websocket\r\n"
+                f"Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                f"Sec-WebSocket-Version: 13\r\n\r\n"
+            )
+            s.sendall(req.encode("ascii"))
+            resp = b""
+            while b"\r\n\r\n" not in resp:
+                chunk = s.recv(512)
+                if not chunk:
+                    break
+                resp += chunk
+            if b"101 " not in resp:
+                return "unsupported"
+
+            cmd = json.dumps({
+                "id": 1,
+                "method": "Runtime.evaluate",
+                "params": {"expression": "document.visibilityState", "returnByValue": True},
+            }).encode("utf-8")
+            mask = os.urandom(4)
+            masked = bytes(b ^ mask[i % 4] for i, b in enumerate(cmd))
+            hdr = bytes([0x81, 0x80 | len(cmd)]) + mask
+            s.sendall(hdr + masked)
+
+            raw = b""
+            while len(raw) < 2:
+                chunk = s.recv(512)
+                if not chunk:
+                    break
+                raw += chunk
+            if len(raw) < 2:
+                return "unsupported"
+            plen = raw[1] & 0x7f
+            offset = 2
+            if plen == 126:
+                while len(raw) < 4:
+                    raw += s.recv(512)
+                plen = int.from_bytes(raw[2:4], "big")
+                offset = 4
+            elif plen == 127:
+                while len(raw) < 10:
+                    raw += s.recv(512)
+                plen = int.from_bytes(raw[2:10], "big")
+                offset = 10
+            while len(raw) < offset + plen:
+                chunk = s.recv(2048)
+                if not chunk:
+                    break
+                raw += chunk
+            data = json.loads(raw[offset:offset + plen].decode("utf-8", "replace"))
+            val = data.get("result", {}).get("result", {}).get("value")
+            if val == "visible":
+                return "visible"
+            elif val == "hidden":
+                return "hidden"
+            return "hidden"
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+    except (socket.timeout, TimeoutError):
+        return "frozen"
+    except Exception:
+        return "unsupported"
+
+
+def wake_suspended_cdp_tabs(cdp_http: str) -> int:
+    """Wake up tabs suspended/frozen by Chrome Memory Saver.
+
+    Precision defense:
+    1. Probes each page tab via lightweight CDP websocket Runtime.evaluate.
+    2. Identifies the user's currently active/visible tab ('visible') to preserve focus.
+    3. Identifies ONLY tabs that are genuinely frozen/timed out ('frozen').
+    4. Only activates frozen tabs via /json/activate/{id} to un-pause their renderers.
+    5. Restores focus immediately to the user's original active tab.
+    6. If socket probing is unavailable, falls back to minimal activation.
+    """
+    try:
+        url = cdp_http.rstrip("/") + "/json"
+        req = urllib.request.Request(url, headers={"User-Agent": "daily-checkin-runner"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            tabs = json.loads(resp.read().decode("utf-8", "replace"))
+        page_tabs = [t for t in tabs if t.get("type") == "page" and "id" in t]
+        if not page_tabs:
+            return 0
+
+        active_tab_id: str | None = None
+        frozen_tab_ids: list[str] = []
+        responsive_count = 0
+
+        for tab in page_tabs:
+            tid = tab["id"]
+            ws_url = tab.get("webSocketDebuggerUrl")
+            state = probe_tab_visibility_and_liveness(ws_url, timeout=0.35)
+            if state == "visible":
+                active_tab_id = tid
+                responsive_count += 1
+            elif state == "hidden":
+                responsive_count += 1
+                if active_tab_id is None:
+                    active_tab_id = tid
+            elif state == "frozen":
+                frozen_tab_ids.append(tid)
+
+        if active_tab_id is None:
+            active_tab_id = page_tabs[0]["id"]
+
+        # If probe failed across all tabs (e.g. strict firewall), fall back to background tabs
+        if responsive_count == 0 and not frozen_tab_ids:
+            frozen_tab_ids = [t["id"] for t in page_tabs if t["id"] != active_tab_id]
+
+        if not frozen_tab_ids:
+            return 0
+
+        woken = 0
+        for tid in frozen_tab_ids:
+            try:
+                act_req = urllib.request.Request(
+                    f"{cdp_http.rstrip('/')}/json/activate/{tid}",
+                    headers={"User-Agent": "daily-checkin-runner"},
+                )
+                with urllib.request.urlopen(act_req, timeout=2.0) as act_resp:
+                    _ = act_resp.read()
+                woken += 1
+            except Exception:
+                pass
+
+        if active_tab_id:
+            try:
+                restore_req = urllib.request.Request(
+                    f"{cdp_http.rstrip('/')}/json/activate/{active_tab_id}",
+                    headers={"User-Agent": "daily-checkin-runner"},
+                )
+                with urllib.request.urlopen(restore_req, timeout=2.0) as restore_resp:
+                    _ = restore_resp.read()
+            except Exception:
+                pass
+
+        return woken
+    except Exception:
+        return 0
+
+
 async def safe_connect(p) -> Any:
     """connect_over_cdp with bounded retries. A transient handshake hiccup
     (slow page table, race with another CDP client) must not abort the batch."""
     last_err: Exception | None = None
-    timeout_ms = max(5000, int(CONNECT_TIMEOUT_S * 1000))
     for attempt in range(max(1, CONNECT_RETRIES)):
+        # On first attempt, use a snappier timeout (8s) so a hung suspended tab is
+        # detected and woken quickly instead of waiting a full 25s.
+        timeout_s = 8.0 if attempt == 0 else CONNECT_TIMEOUT_S
+        timeout_ms = max(5000, int(timeout_s * 1000))
         try:
             return await asyncio.wait_for(
                 p.chromium.connect_over_cdp(CDP_HTTP, timeout=timeout_ms),
-                timeout=CONNECT_TIMEOUT_S + 5.0,
+                timeout=timeout_s + 5.0,
             )
         except Exception as e:
             last_err = e
+            # If connect timed out or failed, wake any sleeping tabs blocking CDP handshake
+            try:
+                woken = await asyncio.to_thread(wake_suspended_cdp_tabs, CDP_HTTP)
+                if woken > 0:
+                    print(f"  ! Woke up {woken} Chrome background tab(s) to clear Memory Saver CDP hang", flush=True)
+            except Exception:
+                pass
             if hasattr(p, "restart") and callable(p.restart):
                 try:
                     await p.restart()
@@ -2909,13 +3156,21 @@ def classify_page_block(text: str, url: str = "") -> tuple[str, str] | None:
     # Do not fail-fast reject mulink on this cue; let CTA search proceed.
     if "mulink" in blob or "dev2.mulink" in blob:
         return None
+    # User notification preferences in profile settings (e.g. chengmo, New-API / Next.js)
+    # include "余额不足提醒", "余额低于阈值时提醒我一次", "提醒阈值 (USD)". These are alert
+    # triggers, NOT check-in eligibility barriers. Strip them before evaluating eligibility.
+    eligibility_blob = re.sub(
+        r"余额低于阈值(?:时)?(?:提醒|通知)[^\n]*|提醒阈值[^\n]*|余额不足提醒[^\n]*",
+        "",
+        blob,
+    )
     if re.search(
         r"(?:永久余额.{0,40}(?:实际消耗|需消耗|消耗满)|"
         r"当天.{0,40}(?:实际消耗|需消耗|消耗满)|"
         r"余额不满足领取条件|"
-        r"签到.*阈值|余额.*阈值|资格不足|无法签到|"
+        r"签到.*阈值|余额.*(?:超过|高于|达到|大于|上限).*阈值|资格不足|无法签到|"
         r"\d{1,2}:\d{2}\s*(?:开放|开始)签到)",
-        blob,
+        eligibility_blob,
     ):
         return "business_ineligible", (text or "business eligibility unmet")[:160]
     return None
@@ -9021,6 +9276,289 @@ async def xmiaom_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     return fail_result("no_confirm", detail=text_final[:100], adapter=kind, action=action)
 
 
+def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 30.0) -> str:
+    """Use system-level vision LLM (glm-5.3-flash via new-api) to solve alphanumeric CAPTCHA.
+
+    Notes & Pitfalls:
+    - Host: https://api.mangoqwq.com/v1/chat/completions
+    - Test Token: sk-LZn4iMxdgX6SCKNN4B5JwKMwdjQXcu7FG8r2lLiAN3BeGEHJ
+    - Model: glm-5.3-flash
+    - Cloudflare 1010 block: requires browser-like User-Agent.
+    - GLM reasoning tokens: max_tokens >= 1024 to prevent empty answers.
+    - SSL: explicit cafile handling for macOS/Linux environments.
+    """
+    if not image_bytes:
+        return ""
+
+    img_b64 = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "model": "glm-5.3-flash",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "This is an alphanumeric CAPTCHA image. Output ONLY the exact characters shown in the image, without any explanations, spaces, or formatting.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{img_b64}",
+                        },
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 1024,
+        "temperature": 0.1,
+    }
+
+    ctx = ssl.create_default_context()
+    for ca in ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"):
+        if os.path.exists(ca):
+            try:
+                ctx.load_verify_locations(ca)
+                break
+            except Exception:
+                pass
+
+    req = urllib.request.Request(
+        "https://api.mangoqwq.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer sk-LZn4iMxdgX6SCKNN4B5JwKMwdjQXcu7FG8r2lLiAN3BeGEHJ",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            raw = data["choices"][0]["message"].get("content", "").strip()
+            # Clean up: extract only alphanumeric characters
+            cleaned = re.sub(r"[^a-zA-Z0-9]", "", raw)
+            return cleaned
+    except Exception as e:
+        print(f"  [vision captcha] error: {e}", flush=True)
+        return ""
+
+
+def is_jianzhile_site(site_url: str) -> bool:
+    """简直了 (jianzhile.vip) 专属站判定."""
+    u = (site_url or "").lower()
+    return "jianzhile.vip" in u
+
+
+def is_jianzhile_name(name: str) -> bool:
+    """简直了名称判定."""
+    n = (name or "").lower()
+    return "简直了" in n or "jianzhile" in n
+
+
+async def jianzhile_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """简直了 (jianzhile.vip/console/personal) 专属签到流程.
+
+    业务与架构特征:
+    1. 签到入口位于控制台个人中心: /console/personal
+    2. 主 CTA 按钮: button:has-text("立即签到")
+    3. 已签到态: button:has-text("已签到") (处于 disabled 状态) 或页面文本包含「已签到」/「今日已签到」
+    4. 安全验证弹窗 (base64Captcha 字母数字验证码):
+       点击立即签到后，前端弹出 Semi Design Modal (包含「安全验证」和验证码图片)。
+       调用 vision LLM (glm-5.3-flash) 识别验证码图片，自动填入输入框并提交。
+       支持在识别有误时点击「刷新验证码」自动重试 (最多 3 次)。
+    """
+    kind = adapter.kind or "jianzhile"
+    site_url = adapter.url or "https://jianzhile.vip/console/personal"
+
+    print(f"  jianzhile flow: {adapter.name} ({site_url})", flush=True)
+
+    # 1. 访问 /console/personal
+    try:
+        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception:
+        pass
+    await bypass_chrome_interstitial_if_needed(page)
+    await wait_text_ready(page, 30, adapter.ready_rounds)
+
+    cur_url = await page_url(page)
+    cur_text = await page_text(page, 600)
+
+    # 2. 检查未登录态 (落到 /login 或页面出现登录特征)
+    if is_auth_page_url(cur_url) or looks_logged_out(cur_text):
+        print("  jianzhile: unauthenticated, attempting LinuxDO SSO...", flush=True)
+        sso_res = await try_linuxdo_sso(page, origin_host="jianzhile.vip", browser=browser)
+        if sso_res not in ("OK", "ALREADY"):
+            return fail_result("auth_failed", detail=f"SSO: {sso_res}", adapter=kind)
+        try:
+            await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+            await wait_text_ready(page, 30, adapter.ready_rounds)
+        except Exception:
+            pass
+
+    # 3. 检查是否今日已签 (幂等性判断)
+    done_btn = page.locator('button:has-text("已签到"), button[data-disabled]:has-text("签到")').first
+    if await done_btn.count() > 0 and await done_btn.is_visible(timeout=1000):
+        btn_txt = (await done_btn.inner_text()).strip()
+        if "已签到" in btn_txt:
+            print(f"  jianzhile: already checked in ({btn_txt})", flush=True)
+            return confirmed_done_result("已签到", adapter=kind)
+
+    already_sig = await already_done(
+        page, adapter.already_selectors, trusted_already=adapter.trusted_already_selectors
+    )
+    if already_sig:
+        print(f"  jianzhile: already checked in ({already_sig})", flush=True)
+        return confirmed_done_result(already_sig, adapter=kind)
+
+    # 4. 查找立即签到 CTA
+    cta_btn = page.locator('button:has-text("立即签到")').first
+    if await cta_btn.count() == 0 or not await cta_btn.is_visible(timeout=3000):
+        text_now = await page_text(page, 500)
+        if "已签到" in text_now:
+            return confirmed_done_result("已签到", adapter=kind)
+        return fail_result("no_button", detail="button:has-text('立即签到') not found", adapter=kind)
+
+    action = ActionEvidence(
+        kind="dom_click",
+        target='button:has-text("立即签到")',
+        attempted_at=datetime.now().isoformat(timespec="seconds"),
+    )
+
+    # 5. 点击立即签到
+    print("  jianzhile: clicking 立即签到...", flush=True)
+    try:
+        await cta_btn.click(timeout=3000)
+    except Exception as click_err:
+        print(f"  jianzhile click fallback force: {click_err}", flush=True)
+        await cta_btn.click(timeout=3000, force=True)
+
+    await asyncio.sleep(1.2)
+
+    # 6. 处理验证码弹窗 (最多重试 3 次)
+    max_captcha_attempts = 3
+    for attempt in range(max_captcha_attempts):
+        modal = page.locator('.semi-modal, [role="dialog"], [role="alertdialog"]').first
+        if await modal.count() == 0 or not await modal.is_visible(timeout=1500):
+            # 没有弹窗，可能是免验证直接成功
+            break
+
+        modal_text = await modal.inner_text()
+        if "安全验证" not in modal_text and "验证码" not in modal_text:
+            break
+
+        print(f"  jianzhile: captcha modal detected (attempt {attempt + 1}/{max_captcha_attempts})", flush=True)
+
+        # 获取验证码图片
+        img_loc = modal.locator("img").first
+        if await img_loc.count() == 0 or not await img_loc.is_visible(timeout=2000):
+            print("  jianzhile: captcha img not visible", flush=True)
+            break
+
+        img_src = await img_loc.get_attribute("src") or ""
+        raw_bytes: bytes | None = None
+        if "base64," in img_src:
+            try:
+                b64_part = img_src.split("base64,", 1)[1]
+                raw_bytes = base64.b64decode(b64_part)
+            except Exception as e:
+                print(f"  jianzhile: b64 decode err: {e}", flush=True)
+
+        if not raw_bytes:
+            try:
+                raw_bytes = await img_loc.screenshot()
+            except Exception as e:
+                print(f"  jianzhile: img screenshot err: {e}", flush=True)
+
+        if not raw_bytes:
+            print("  jianzhile: failed to get captcha image bytes", flush=True)
+            break
+
+        # 调用视觉模型识别
+        code = await asyncio.to_thread(solve_captcha_with_vision, raw_bytes)
+        print(f"  jianzhile: vision recognized captcha = '{code}'", flush=True)
+
+        if not code:
+            # 刷新验证码重试
+            refresh_btn = modal.locator('button:has-text("刷新验证码")').first
+            if await refresh_btn.count() > 0 and await refresh_btn.is_visible(timeout=1000):
+                await refresh_btn.click()
+                await asyncio.sleep(1.0)
+            continue
+
+        # 填入验证码
+        input_loc = modal.locator('input[placeholder*="验证码"], input').first
+        if await input_loc.count() > 0:
+            await input_loc.fill(code)
+            await asyncio.sleep(0.3)
+
+        # 点击确认提交
+        submit_btn = modal.locator('button:has-text("确认")').first
+        if await submit_btn.count() > 0:
+            await submit_btn.click()
+
+        # 等待提交响应
+        await asyncio.sleep(1.5)
+
+        # 检查是否依然弹窗且提示错误
+        text_after = await page_text(page, 900)
+        if any(err_msg in text_after for err_msg in ("验证码错误", "验证码不正确", "验证码失效")):
+            print(f"  jianzhile: captcha incorrect on attempt {attempt + 1}, refreshing...", flush=True)
+            refresh_btn = modal.locator('button:has-text("刷新验证码")').first
+            if await refresh_btn.count() > 0 and await refresh_btn.is_visible(timeout=1000):
+                await refresh_btn.click()
+                await asyncio.sleep(1.0)
+            continue
+        else:
+            # 弹窗关闭或成功
+            break
+
+    # 7. 轮询签到确认
+    for _ in range(12):
+        await asyncio.sleep(0.8)
+        text_poll = await page_text(page, 900)
+
+        # 检查成功标志
+        if is_valid_checkin_confirm(text_poll):
+            sig = confirm_signal(text_poll) or "签到成功"
+            print(f"  jianzhile confirm: {sig}", flush=True)
+            return ok_result(
+                "OK", adapter=kind, detail=sig, action=action,
+                confirmation=dom_confirmation(sig),
+                pre_state="PENDING", post_state="DONE",
+                transition="PENDING_TO_DONE", attribution="runner",
+            )
+
+        done_btn2 = page.locator('button:has-text("已签到"), button[data-disabled]:has-text("签到")').first
+        if await done_btn2.count() > 0 and await done_btn2.is_visible(timeout=500):
+            print("  jianzhile confirm: button turned to 已签到", flush=True)
+            return ok_result(
+                "OK", adapter=kind, detail="已签到", action=action,
+                confirmation=dom_confirmation("已签到"),
+                pre_state="PENDING", post_state="DONE",
+                transition="PENDING_TO_DONE", attribution="runner",
+            )
+
+    # 兜底再次判断
+    already_final = await already_done(
+        page, adapter.already_selectors, trusted_already=adapter.trusted_already_selectors
+    )
+    if already_final:
+        return confirmed_done_result(already_final, adapter=kind, action=action)
+
+    text_final = await page_text(page, 900)
+    if "签到成功" in text_final or "已获得" in text_final:
+        return ok_result(
+            "OK", adapter=kind, detail="签到成功", action=action,
+            confirmation=dom_confirmation("签到成功"),
+            pre_state="PENDING", post_state="DONE",
+            transition="PENDING_TO_DONE", attribution="runner",
+        )
+
+    return fail_result("no_confirm", detail=text_final[:100], adapter=kind, action=action)
+
+
 def is_glados_site(site_url: str) -> bool:
     """glados.rocks 专属站判定."""
     u = (site_url or "").lower()
@@ -10139,6 +10677,64 @@ def fengwind_status_guard(status: dict | None, now: datetime | None = None) -> C
     return None
 
 
+async def _ensure_fengwind_logged_in(page, site_url: str = "https://api-welfalre.fengwind.com/") -> bool:
+    """Fengwind API 福利站 (api-welfalre.fengwind.com): 先登录后签到保障。
+
+    1. 若已持有有效 welfare_token 且页面无「登录后签到」提示，直接返回 True。
+    2. 若未登录（提示「请先登录后再签到」或存在「登录后签到」按钮），点击「登录后签到」。
+    3. 监听/轮询跳转到 api.fengwind.com/sso/continue，若有授权按钮（继续/授权/允许/同意）自动点击。
+    4. 等待回跳至 api-welfalre.fengwind.com/auth/callback 并自动 exchange 完成写入 localStorage['welfare_token']。
+    5. 返回登录成功状态。
+    """
+    if not is_fengwind_site(site_url):
+        return True
+    try:
+        tok = await page.evaluate("() => localStorage.getItem('welfare_token')")
+        if tok and isinstance(tok, str) and len(tok) > 10:
+            login_btn = page.locator('button:has-text("登录后签到")')
+            if await login_btn.count() == 0 or not await login_btn.first.is_visible():
+                return True
+    except Exception:
+        pass
+
+    try:
+        cur_url = getattr(page, "url", "") or ""
+        if not is_fengwind_site(cur_url):
+            try:
+                await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+                await wait_text_ready(page, 20, 6)
+            except Exception:
+                pass
+
+        login_btn = page.locator('button:has-text("登录后签到")').first
+        if await login_btn.count() > 0 and await login_btn.is_visible():
+            print("  fengwind: not logged in, clicking 「登录后签到」...", flush=True)
+            await login_btn.click()
+            for _ in range(30):
+                await asyncio.sleep(0.5)
+                cur_url = getattr(page, "url", "") or ""
+                # SSO 授权页面: 如有确认/继续按钮自动点击
+                if "api.fengwind.com" in cur_url and "sso" in cur_url:
+                    cands = page.locator('button:has-text("继续"), button:has-text("授权"), button:has-text("允许"), button:has-text("同意")')
+                    if await cands.count() > 0 and await cands.first.is_visible():
+                        print("  fengwind: confirming SSO authorization...", flush=True)
+                        await cands.first.click()
+                        await asyncio.sleep(1.0)
+                # 回跳成功判断: welfare_token 写入且离开 callback
+                if "api-welfalre.fengwind.com" in cur_url and "callback" not in cur_url:
+                    tok = await page.evaluate("() => localStorage.getItem('welfare_token')")
+                    if tok and isinstance(tok, str) and len(tok) > 10:
+                        print("  fengwind: SSO login completed, welfare_token acquired", flush=True)
+                        await asyncio.sleep(1.0)
+                        return True
+            print("  fengwind: SSO login timed out waiting for token", flush=True)
+            return False
+    except Exception as e:
+        print(f"  fengwind: login attempt error: {e}", flush=True)
+        return False
+    return True
+
+
 async def _fengwind_fetch_status(page, site_url: str) -> dict | None:
     """在 fengwind 页面上下文读取 /api/checkin/status(带 localStorage token)。
 
@@ -10155,6 +10751,8 @@ async def _fengwind_fetch_status(page, site_url: str) -> dict | None:
         await wait_text_ready(page, 20, 6)
     except Exception:
         pass
+    # 确保已先登录并获取 welfare_token
+    await _ensure_fengwind_logged_in(page, site_url)
     try:
         data = await page.evaluate(
             """async () => {
@@ -10575,6 +11173,54 @@ async def _dismiss_404api_announcements(page) -> int:
         return 0
 
 
+async def _activate_404api_checkin_tab(page) -> bool:
+    """404API (wb.404-found.uk/hb/me) 改版适配(2026-10-18 实证)。
+
+    站点把「每日签到」卡片从默认「概览」页移入了「签到与账本」tab 面板:未激活该
+    tab 时整个面板带 display:none(祖先 div.hidden),卡片内「签到」按钮不可见。
+    此时通用 CTA 扫描要么落到 0×0 的不可见节点、要么误命中导航 tab「签到与账本」
+    (label 含「签到」),点击既不触发 POST /hb/api/v1/checkin 也拿不到业务确认
+    → 稳定 FAIL:no_confirm(而站点自身完全正常,同 tab 手动点击即签到成功)。
+
+    此处在扫描 CTA 前先把「签到与账本」tab 切到前台,使签到按钮真正可见可点。
+    幂等:页面若已存在可见的「签到 / 立即签到」按钮则直接返回,不抢站点的默认 tab。
+    返回 True 表示本次执行了 tab 切换。dismiss_obstructing_dialogs 在 post_load /
+    pre_already / pre_cta 三处都会被调用,水合未完成时拿不到 tab 也会在后续阶段重试。
+    """
+    if page is None or not hasattr(page, "evaluate") or not callable(getattr(page, "evaluate", None)):
+        return False
+    try:
+        switched = await page.evaluate(
+            r"""() => {
+                const laid_out = (el) => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                };
+                // 已有可见的签到 CTA -> 站点已把按钮摆在当前页,无需切 tab。
+                for (const b of document.querySelectorAll('button')) {
+                    const t = (b.innerText || '').trim();
+                    if ((t === '签到' || t === '立即签到') && laid_out(b)) return false;
+                }
+                // 「签到与账本」tab:优先精确文案,其次「签到」+「账本」双词兜底。
+                const cands = [...document.querySelectorAll('button, a, [role="tab"], [role="link"]')];
+                const tab = cands.find(el => {
+                    const t = (el.innerText || '').trim();
+                    return t === '签到与账本' || (t.includes('签到') && t.includes('账本'));
+                });
+                if (!tab) return false;
+                tab.click();
+                return true;
+            }"""
+        )
+        if switched:
+            print("  404api: switched to 「签到与账本」tab for the check-in CTA", flush=True)
+            await asyncio.sleep(1.0)
+        return bool(switched)
+    except Exception as e:
+        print(f"  404api tab switch error: {e}", flush=True)
+        return False
+
+
 async def dismiss_obstructing_dialogs(page, stage: str = "interaction") -> int:
     """Close announcement-style modal dialogs and full-screen overlays that would
     swallow interactions. Returns how many dialogs were dismissed (0 = nothing to do)."""
@@ -10586,6 +11232,8 @@ async def dismiss_obstructing_dialogs(page, stage: str = "interaction") -> int:
         url_str = raw_url if isinstance(raw_url, str) else ""
         if "404-found.uk" in url_str:
             total_closed += await _dismiss_404api_announcements(page)
+            # 改版后签到 CTA 藏在「签到与账本」tab 面板内;不切 tab 就点不到。
+            await _activate_404api_checkin_tab(page)
     except Exception:
         pass
 
@@ -10972,6 +11620,8 @@ async def legacy_checkin_on_page(
             return await sub2api_checkin(page, adapter, browser=browser)
         if kind == "xmiaom" or is_xmiaom_site(site_url) or is_xmiaom_name(adapter.name):
             return await xmiaom_checkin(page, adapter, browser=browser)
+        if kind == "jianzhile" or is_jianzhile_site(site_url) or is_jianzhile_name(adapter.name):
+            return await jianzhile_checkin(page, adapter, browser=browser)
         if kind == "glados" or is_glados_site(site_url) or is_glados_name(adapter.name):
             return await glados_checkin(page, adapter, browser=browser)
         if kind == "yunzhi" or is_yunzhi_site(site_url) or is_yunzhi_name(adapter.name):
@@ -11000,6 +11650,8 @@ async def legacy_checkin_on_page(
         await bypass_chrome_interstitial_if_needed(page)
         await wait_text_ready(page, 40, adapter.ready_rounds)
         await dismiss_obstructing_dialogs(page, stage="post_load")
+        if is_fengwind_site(site_url):
+            await _ensure_fengwind_logged_in(page, site_url)
 
         cf = await wait_out_cloudflare(page, CF_WAIT_S)
         if cf:
@@ -11433,6 +12085,8 @@ def _extract_reward_from_text(text: str) -> str:
         rf"(?:今天|今日)\s*\+\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
         # 2. "签到成功获得 0.50 元" 或 "今日签到获得 2 个鸡腿" 或 "签到成功，到账 1 M Token"
         rf"(?:签到成功|今日签到|打卡成功|签到|已成功签到)\s*[:：,，!！]?\s*(?:获得|奖励|赠送|获得收益|到账)\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
+        # 2.1 "本次获得 $5.17" 或 "本次奖励 5.17 刀" (fengwind 等站点)
+        rf"(?:本次获得|本次奖励)\s*[:：]?\s*([¥$￥€A-Za-z]*\s*[\d.]+\s*{units}?)",
         # 3. GLaDOS "Got 1 Points"
         r"(?:Checkin!\s*Got|Got)\s*(\d+\s*Points?)",
         # 4. "获得 2 个鸡腿" 或 "获得鸡腿 5 个" 或 "到账 1 M Token"
@@ -11579,10 +12233,10 @@ async def _extract_dom_balance(page) -> BalanceEvidence | None:
                 try {
                     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
                     let node;
-                    const reMoney = /(?:当前余额|可用额度|账户余额|我的余额|钱包余额|可用代币|总代币|可用金额)\s*[:：]?\s*([¥$€￥]?\s*[\d,]+(?:\.\d+)?(?:\s*[MkBKb]|\s*Tokens?|\s*点|\s*分)?)/i;
-                    const rePoints = /(?:剩余积分|我的积分|当前积分|可用积分)\s*[:：]?\s*([\d,]+(?:\.\d+)?)/i;
-                    const reLabelMoney = /(?:当前余额|可用额度|账户余额|我的余额|钱包余额|可用代币|总代币|可用金额)/i;
-                    const reLabelPoints = /(?:剩余积分|我的积分|当前积分|可用积分)/i;
+                    const reMoney = /(?:当前余额|当前餘額|可用额度|可用額度|账户余额|帳戶餘額|我的余额|我的餘額|钱包余额|錢包餘額|可用代币|可用代幣|总代币|總代幣|可用金额|可用金額|餘額)\s*[:：]?\s*([¥$€￥]?\s*[\d,]+(?:\.\d+)?(?:\s*[MkBKb]|\s*Tokens?|\s*点|\s*分)?)/i;
+                    const rePoints = /(?:剩余积分|剩餘積分|我的积分|我的積分|当前积分|當前積分|可用积分|可用積分)\s*[:：]?\s*([\d,]+(?:\.\d+)?)/i;
+                    const reLabelMoney = /(?:当前余额|当前餘額|可用额度|可用額度|账户余额|帳戶餘額|我的余额|我的餘額|钱包余额|錢包餘額|可用代币|可用代幣|总代币|總代幣|可用金额|可用金額|餘額)/i;
+                    const reLabelPoints = /(?:剩余积分|剩餘積分|我的积分|我的積分|当前积分|當前積分|可用积分|可用積分)/i;
                     const reValMoney = /([¥$€￥]\s*[\d,]+(?:\.\d+)?(?:\s*[MkBKb]|\s*Tokens?|\s*点|\s*分)?|[\d,]+(?:\.\d+)?\s*(?:元|刀|tokens?|[MkBKb]))/i;
                     const reValPoints = /([\d,]+(?:\.\d+)?)\s*(?:积分|points?)/i;
                     const reReward = /(?:今天|今日)\s*\+\s*[¥$￥€A-Za-z0-9.]+|获得[\d.]+\s*(?:元|刀|积分|点|个鸡腿|罐头)/i;
@@ -11971,6 +12625,56 @@ async def _extract_relayfor_balance(page) -> BalanceEvidence | None:
         return None
 
 
+async def _extract_fengwind_balance(page) -> BalanceEvidence | None:
+    """Fengwind API 福利站 (api-welfalre.fengwind.com): 提取当日签到奖励。"""
+    try:
+        data = await page.evaluate(r"""async () => {
+            let rewardText = '';
+            // 1. 尝试从页内 /api/checkin/status 接口提取当日奖励
+            try {
+                const tok = localStorage.getItem('welfare_token');
+                if (tok) {
+                    const r = await fetch('/api/checkin/status', {
+                        headers: {'Accept':'application/json', 'Authorization':'Bearer ' + tok}
+                    });
+                    if (r.ok) {
+                        const j = await r.json();
+                        const today = j?.data?.today;
+                        if (today && today.amount !== undefined && today.amount !== null) {
+                            rewardText = '+$' + Number(today.amount).toFixed(2);
+                        }
+                    }
+                }
+            } catch (e) {}
+
+            // 2. DOM 兜底: 「本次获得 \n $5.17」或「获得 $3.40」
+            if (!rewardText) {
+                const text = document.body ? document.body.innerText : '';
+                const m = text.match(/本次(?:获得|奖励)\s*[:：]?\s*\$([0-9,.]+)/) || text.match(/获得\s*\$([0-9,.]+)/);
+                if (m) {
+                    rewardText = '+$' + m[1];
+                }
+            }
+            return { rewardText };
+        }""")
+        if not data:
+            return None
+        reward_text = data.get("rewardText") or None
+        if not reward_text:
+            return None
+        return BalanceEvidence(
+            amount=None,
+            raw_text="",
+            currency="USD",
+            captured_at=datetime.now().isoformat(timespec="seconds"),
+            source="api",
+            reward_text=reward_text,
+        )
+    except Exception as e:
+        print(f"  fengwind balance extraction note: {e}", flush=True)
+        return None
+
+
 async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | None:
     kind = getattr(adapter, "kind", "browser")
     if kind == "glados":
@@ -11995,6 +12699,11 @@ async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | N
 
     if is_relayfor_name(getattr(adapter, "name", "")) or is_relayfor_site(getattr(adapter, "url", "")):
         b = await _extract_relayfor_balance(page)
+        if b:
+            return b
+
+    if is_fengwind_site(getattr(adapter, "url", "")) or getattr(adapter, "name", "") == "fengwind":
+        b = await _extract_fengwind_balance(page)
         if b:
             return b
 
@@ -12119,18 +12828,26 @@ def default_task_file_path(day: str | None = None) -> str:
         return str(Path(DEFAULT_TASKS_DIR) / f"{day} 每日任务.md")
 
 
-def _reset_daily_task_content(content: str, day: str) -> str:
+def _reset_daily_task_content(
+    content: str, day: str, excluded_sites: set[str] | None = None
+) -> str:
     """
     Build a fresh daily note from a previous day's file:
-    - open all #task #日常 checkboxes
+    - drop lines belonging to tombstoned/excluded sites
+    - open all remaining #task #日常 checkboxes
     - strip #auto-fail / trailing ✅ dates
     - refresh 雅思学习 date line
     """
     out_lines: list[str] = []
+    excluded = set(excluded_sites or ())
     for line in content.splitlines(keepends=True):
         raw = line.rstrip("\n\r")
         nl = "\n" if line.endswith("\n") else ""
         if re.match(r"^\s*-\s*\[[ xX]\]\s*#task\s*#日常\b", raw):
+            if excluded:
+                m_link = re.search(r"\[([^\]]+)\]\((https?://[^)]+)\)", raw) or re.search(r"#日常[^\n]*\[([^\]]+)\]", raw)
+                if m_link and m_link.group(1).strip() in excluded:
+                    continue
             # force open checkbox
             raw = re.sub(r"^(\s*-\s*)\[[ xX]\]", r"\1[ ]", raw, count=1)
             # drop auto-fail tags
@@ -12174,16 +12891,25 @@ def find_seed_daily_task(tasks_dir: str | Path, before_day: str) -> Path | None:
     return best
 
 
-def ensure_daily_task_file(path: str, day: str | None = None) -> tuple[str, bool]:
+def ensure_daily_task_file(
+    path: str, day: str | None = None, excluded_sites: set[str] | None = None
+) -> tuple[str, bool]:
     """
     Return (content, created).
-    If path missing: seed from latest previous daily note (reset checkboxes).
+    If path missing: seed from latest previous daily note (reset checkboxes, filter deleted sites).
     Never invent an empty catalog — no seed → raise FileNotFoundError.
     """
     target = Path(path)
     day = day or datetime.now().strftime("%Y-%m-%d")
     if target.is_file():
         return target.read_text(encoding="utf-8"), False
+
+    if excluded_sites is None:
+        try:
+            from checkin_core.store import store_from_env
+            excluded_sites = store_from_env().get_deleted_site_names()
+        except Exception:
+            excluded_sites = set()
 
     seed = find_seed_daily_task(target.parent, day)
     if seed is None:
@@ -12196,7 +12922,7 @@ def ensure_daily_task_file(path: str, day: str | None = None) -> tuple[str, bool
         )
 
     raw = seed.read_text(encoding="utf-8")
-    content = _reset_daily_task_content(raw, day)
+    content = _reset_daily_task_content(raw, day, excluded_sites=excluded_sites)
     target.parent.mkdir(parents=True, exist_ok=True)
     persist_task_file(str(target), content)
     print(f"Created daily task from seed {seed.name} → {target.name}", flush=True)
@@ -12787,6 +13513,26 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
                 prefer_catalog_url=True,
                 login_url="https://ai.xmiaom.com/sign-in",
             )
+        if is_jianzhile_site(url_from_note) or is_jianzhile_name(name):
+            # 简直了 (jianzhile.vip): 带图形验证码的新型个人中心签到
+            return SiteAdapter(
+                name=name,
+                url="https://jianzhile.vip/console/personal",
+                kind="jianzhile",
+                sign_selectors=['button:has-text("立即签到")'],
+                already_selectors=[
+                    'button:has-text("已签到")',
+                    'text=今日已签到',
+                    'text="今日已签到"',
+                    'text=已签到',
+                    'text="已签到"',
+                    'text=签到成功',
+                ],
+                trusted_sign_selectors=True,
+                trusted_already_selectors=True,
+                prefer_catalog_url=True,
+                login_url="https://jianzhile.vip/login",
+            )
         if is_ilovecat_site(url_from_note) or is_ilovecat_name(name):
             # 靴貓公益站 (api.ilovecat520.me): 支持 /dashboard/overview 与 /playground 入口.
             cat_url = (url_from_note or "").strip() or "https://api.ilovecat520.me/dashboard/overview"
@@ -13205,28 +13951,31 @@ def run_doctor() -> int:
             add("WARN", "近7天失败", f"查询失败: {exc}")
 
     # 6) cron 入口同步 + launchd 批次任务
-    repo_sh = Path(__file__).resolve().parent / "scripts" / "daily-checkin-cdp.sh"
-    prod_sh = Path.home() / ".hermes" / "scripts" / "daily-checkin-cdp.sh"
-    try:
-        if not prod_sh.exists():
-            add("WARN", "cron 入口", f"{prod_sh} 不存在")
-        elif repo_sh.read_bytes() == prod_sh.read_bytes():
-            add("OK", "cron 入口", "仓库脚本与 ~/.hermes 入口一致")
-        else:
-            add("FAIL", "cron 入口", "仓库脚本与 ~/.hermes 入口不一致,需同步")
-    except Exception as exc:
-        add("WARN", "cron 入口", f"比对失败: {exc}")
-    try:
-        out = subprocess.run(
-            ["launchctl", "list", "com.mango.daily-checkin"],
-            capture_output=True, text=True, timeout=8,
-        )
-        if out.returncode == 0 and "daily-checkin" in out.stdout:
-            add("OK", "launchd 批次", "com.mango.daily-checkin 已注册")
-        else:
-            add("WARN", "launchd 批次", "com.mango.daily-checkin 未注册(仅 Hermes 调度时为正常)")
-    except Exception as exc:
-        add("WARN", "launchd 批次", f"查询失败: {exc}")
+    if sys.platform == "darwin":
+        repo_sh = Path(__file__).resolve().parent / "scripts" / "daily-checkin-cdp.sh"
+        prod_sh = Path.home() / ".hermes" / "scripts" / "daily-checkin-cdp.sh"
+        try:
+            if not prod_sh.exists():
+                add("WARN", "cron 入口", f"{prod_sh} 不存在")
+            elif repo_sh.read_bytes() == prod_sh.read_bytes():
+                add("OK", "cron 入口", "仓库脚本与 ~/.hermes 入口一致")
+            else:
+                add("FAIL", "cron 入口", "仓库脚本与 ~/.hermes 入口不一致,需同步")
+        except Exception as exc:
+            add("WARN", "cron 入口", f"比对失败: {exc}")
+        try:
+            out = subprocess.run(
+                ["launchctl", "list", "com.mango.daily-checkin"],
+                capture_output=True, text=True, timeout=8,
+            )
+            if out.returncode == 0 and "daily-checkin" in out.stdout:
+                add("OK", "launchd 批次", "com.mango.daily-checkin 已注册")
+            else:
+                add("WARN", "launchd 批次", "com.mango.daily-checkin 未注册(仅 Hermes 调度时为正常)")
+        except Exception as exc:
+            add("WARN", "launchd 批次", f"查询失败: {exc}")
+    else:
+        add("OK", "系统调度", "Windows 平台使用任务计划程序 / 批处理运行")
 
     # 7) 状态文件新鲜度
     log_dir = _doctor_resolve_log_dir()
@@ -13299,7 +14048,9 @@ async def run(argv: list[str] | None = None) -> int:
     tasks_content = ""
     projection_available = False
     try:
-        tasks_content, created = ensure_daily_task_file(task_file_path, today_str)
+        tasks_content, created = ensure_daily_task_file(
+            task_file_path, today_str, excluded_sites=store.get_deleted_site_names()
+        )
         projection_available = True
         if created:
             print(f"Task file ready: {task_file_path}", flush=True)
@@ -13879,16 +14630,45 @@ def acquire_run_lock():
     """Acquire a non-blocking whole-batch singleton lock."""
     RUN_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     handle = RUN_LOCK_PATH.open("a+")
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        handle.close()
-        return None
+    if sys.platform == "win32":
+        import msvcrt
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            handle.close()
+            return None
+    else:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            return None
     handle.seek(0)
     handle.truncate()
     handle.write(f"pid={os.getpid()} started={datetime.now().isoformat(timespec='seconds')}\n")
     handle.flush()
     return handle
+
+
+def release_run_lock(lock_handle) -> None:
+    if lock_handle is None:
+        return
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            try:
+                lock_handle.seek(0)
+                msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        elif fcntl is not None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        try:
+            lock_handle.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
@@ -13901,5 +14681,4 @@ if __name__ == "__main__":
     try:
         raise SystemExit(asyncio.run(run(sys.argv[1:])))
     finally:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-        lock_handle.close()
+        release_run_lock(lock_handle)

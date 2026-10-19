@@ -99,7 +99,8 @@ class FileCredentials:
         try:
             self.path.parent.chmod(0o700)
         except OSError as exc:
-            raise RuntimeError("credential directory not writable with mode 0700") from exc
+            if sys.platform != "win32":
+                raise RuntimeError("credential directory not writable with mode 0700") from exc
         if self.path.exists():
             try:
                 self.path.chmod(0o600)
@@ -108,11 +109,15 @@ class FileCredentials:
 
     @staticmethod
     def _parent_is_private(dir: Path) -> bool:
+        if sys.platform == "win32":
+            return dir.is_dir()
         try:
             st = dir.stat()
         except OSError:
             return False
-        return stat.S_ISDIR(st.st_mode) and (st.st_mode & 0o777) == 0o700 and st.st_uid == os.getuid()
+        getuid = getattr(os, "getuid", None)
+        uid_ok = True if getuid is None else (st.st_uid == getuid())
+        return stat.S_ISDIR(st.st_mode) and (st.st_mode & 0o777) == 0o700 and uid_ok
 
     def _load(self, *, strict: bool = False) -> dict[str, str]:
         """Read refs. With strict=True an unreadable/corrupt file raises (used
