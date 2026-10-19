@@ -9276,13 +9276,65 @@ async def xmiaom_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     return fail_result("no_confirm", detail=text_final[:100], adapter=kind, action=action)
 
 
+def extract_captcha_token(raw_text: str) -> str:
+    """Extract 4-6 character alphanumeric captcha token from vision LLM text.
+
+    Prefers standalone 4-6 character tokens (handling backticks/quotes and chatty explanations).
+    """
+    if not raw_text:
+        return ""
+    stripped = raw_text.strip()
+
+    # 1. Direct match or wrapped in quotes/backticks
+    m_direct = re.fullmatch(r"[`\"'\s]*([A-Za-z0-9]{4,6})[`\"'\s]*", stripped)
+    if m_direct:
+        return m_direct.group(1)
+
+    # 2. Markdown fenced block
+    m_fence = re.search(r"```(?:\w+)?\s*([A-Za-z0-9]{4,6})\s*```", stripped)
+    if m_fence:
+        return m_fence.group(1)
+
+    # 3. Explicit prefix like "code is: 2WB2S", "captcha is 5AHA9", "Answer: 2GML5"
+    m_prefix = re.search(
+        r"(?:captcha(?:\s+code)?|verification(?:\s+code)?|code|answer|result)\s*(?:is|:|=)\s*[`\"']?([A-Za-z0-9]{4,6})[`\"']?",
+        stripped,
+        re.I,
+    )
+    if m_prefix:
+        return m_prefix.group(1)
+
+    # 4. Mixed alphanumeric token (contains at least one digit)
+    mixed_tokens = re.findall(r"\b(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{4,6}\b", stripped)
+    if mixed_tokens:
+        return mixed_tokens[0]
+
+    # 5. Any 4-6 char token excluding common English words
+    tokens = re.findall(r"\b[A-Za-z0-9]{4,6}\b", stripped)
+    stop_words = {
+        "image", "shown", "there", "characters", "exact", "output", "empty",
+        "words", "which", "about", "above", "below", "code", "text", "here",
+        "captcha", "answer", "result", "please", "thanks", "thank", "hello",
+        "helps", "hope", "this", "that", "with", "from", "your",
+    }
+    candidate_tokens = [t for t in tokens if t.lower() not in stop_words]
+    if candidate_tokens:
+        return candidate_tokens[0]
+
+    # Fallback: clean all non-alphanumeric chars if short
+    cleaned = re.sub(r"[^a-zA-Z0-9]", "", stripped)
+    if 4 <= len(cleaned) <= 6:
+        return cleaned
+    return cleaned[:6] if cleaned else ""
+
+
 def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 30.0) -> str:
     """Use system-level vision LLM (glm-5.3-flash via new-api) to solve alphanumeric CAPTCHA.
 
     Notes & Pitfalls:
-    - Host: https://api.mangoqwq.com/v1/chat/completions
-    - Test Token: sk-LZn4iMxdgX6SCKNN4B5JwKMwdjQXcu7FG8r2lLiAN3BeGEHJ
-    - Model: glm-5.3-flash
+    - Host: https://api.mangoqwq.com/v1/chat/completions (configurable via DAILY_CHECKIN_VISION_API_BASE)
+    - Test Token: sk-LZn4iMxdgX6SCKNN4B5JwKMwdjQXcu7FG8r2lLiAN3BeGEHJ (configurable via DAILY_CHECKIN_VISION_API_KEY)
+    - Model: glm-5.3-flash (configurable via DAILY_CHECKIN_VISION_MODEL)
     - Cloudflare 1010 block: requires browser-like User-Agent.
     - GLM reasoning tokens: max_tokens >= 1024 to prevent empty answers.
     - SSL: explicit cafile handling for macOS/Linux environments.
@@ -9290,9 +9342,17 @@ def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 30.0) -> str:
     if not image_bytes:
         return ""
 
+    api_base = os.getenv("DAILY_CHECKIN_VISION_API_BASE", "https://api.mangoqwq.com/v1").rstrip("/")
+    if api_base.endswith("/chat/completions"):
+        endpoint = api_base
+    else:
+        endpoint = f"{api_base}/chat/completions"
+    api_key = os.getenv("DAILY_CHECKIN_VISION_API_KEY", "sk-LZn4iMxdgX6SCKNN4B5JwKMwdjQXcu7FG8r2lLiAN3BeGEHJ")
+    model = os.getenv("DAILY_CHECKIN_VISION_MODEL", "glm-5.3-flash")
+
     img_b64 = base64.b64encode(image_bytes).decode("ascii")
     payload = {
-        "model": "glm-5.3-flash",
+        "model": model,
         "messages": [
             {
                 "role": "user",
@@ -9324,10 +9384,10 @@ def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 30.0) -> str:
                 pass
 
     req = urllib.request.Request(
-        "https://api.mangoqwq.com/v1/chat/completions",
+        endpoint,
         data=json.dumps(payload).encode("utf-8"),
         headers={
-            "Authorization": "Bearer sk-LZn4iMxdgX6SCKNN4B5JwKMwdjQXcu7FG8r2lLiAN3BeGEHJ",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         },
@@ -9337,9 +9397,7 @@ def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 30.0) -> str:
         with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             raw = data["choices"][0]["message"].get("content", "").strip()
-            # Clean up: extract only alphanumeric characters
-            cleaned = re.sub(r"[^a-zA-Z0-9]", "", raw)
-            return cleaned
+            return extract_captcha_token(raw)
     except Exception as e:
         print(f"  [vision captcha] error: {e}", flush=True)
         return ""
@@ -9355,6 +9413,26 @@ def is_jianzhile_name(name: str) -> bool:
     """简直了名称判定."""
     n = (name or "").lower()
     return "简直了" in n or "jianzhile" in n
+
+
+async def _refresh_and_wait_new_captcha(modal, last_img_src: str) -> None:
+    """点击「刷新验证码」并轮询至 img.src 发生实质变化，根除盲目 sleep 的竞态条件."""
+    refresh_btn = modal.locator('button:has-text("刷新验证码")').first
+    if await refresh_btn.count() > 0 and await refresh_btn.is_visible(timeout=1000):
+        try:
+            await refresh_btn.click()
+        except Exception:
+            pass
+        img_loc = modal.locator("img").first
+        for _ in range(30):
+            await asyncio.sleep(0.1)
+            try:
+                new_src = await img_loc.get_attribute("src") or ""
+                if new_src and new_src != last_img_src:
+                    return
+            except Exception:
+                pass
+        await asyncio.sleep(0.5)
 
 
 async def jianzhile_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
@@ -9480,11 +9558,8 @@ async def jianzhile_checkin(page, adapter: SiteAdapter, browser=None) -> Checkin
         print(f"  jianzhile: vision recognized captcha = '{code}'", flush=True)
 
         if not code:
-            # 刷新验证码重试
-            refresh_btn = modal.locator('button:has-text("刷新验证码")').first
-            if await refresh_btn.count() > 0 and await refresh_btn.is_visible(timeout=1000):
-                await refresh_btn.click()
-                await asyncio.sleep(1.0)
+            # 刷新验证码重试 (消除竞态: 等待 img.src 变更)
+            await _refresh_and_wait_new_captcha(modal, img_src)
             continue
 
         # 填入验证码
@@ -9505,10 +9580,7 @@ async def jianzhile_checkin(page, adapter: SiteAdapter, browser=None) -> Checkin
         text_after = await page_text(page, 900)
         if any(err_msg in text_after for err_msg in ("验证码错误", "验证码不正确", "验证码失效")):
             print(f"  jianzhile: captcha incorrect on attempt {attempt + 1}, refreshing...", flush=True)
-            refresh_btn = modal.locator('button:has-text("刷新验证码")').first
-            if await refresh_btn.count() > 0 and await refresh_btn.is_visible(timeout=1000):
-                await refresh_btn.click()
-                await asyncio.sleep(1.0)
+            await _refresh_and_wait_new_captcha(modal, img_src)
             continue
         else:
             # 弹窗关闭或成功

@@ -7701,6 +7701,22 @@ class TestJianzhileCheckin(unittest.TestCase):
         self.assertIsNotNone(entry, "sites.yaml 应有 简直了 条目")
         self.assertEqual(entry.get("kind"), "jianzhile")
 
+    def test_extract_captcha_token(self):
+        f = self.m.extract_captcha_token
+        # 1. 纯字母数字验证码
+        self.assertEqual(f("2GML5"), "2GML5")
+        self.assertEqual(f("2wb2s"), "2wb2s")
+        # 2. Markdown 代码块与包裹引号
+        self.assertEqual(f("```\n2WB2S\n```"), "2WB2S")
+        self.assertEqual(f('"5AHA9"'), "5AHA9")
+        self.assertEqual(f("'XYZ1'"), "XYZ1")
+        # 3. 冗余自然语言说明与标点
+        self.assertEqual(f("The CAPTCHA code is 5AHA9."), "5AHA9")
+        self.assertEqual(f("Answer: 2GML5\nHope this helps!",), "2GML5")
+        # 4. 空值与边界
+        self.assertEqual(f(""), "")
+        self.assertEqual(f("   "), "")
+
     def test_solve_captcha_with_vision_logic(self):
         import io
         import json
@@ -7709,7 +7725,7 @@ class TestJianzhileCheckin(unittest.TestCase):
         # 1. 空图片直接返回空
         self.assertEqual(self.m.solve_captcha_with_vision(b""), "")
 
-        # 2. Mock 接口调用
+        # 2. Mock 接口调用 (默认配置)
         mock_response = MagicMock()
         mock_response.read.return_value = json.dumps({
             "choices": [{"message": {"content": " 2GML5 \n"}}]
@@ -7719,6 +7735,37 @@ class TestJianzhileCheckin(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=mock_response):
             code = self.m.solve_captcha_with_vision(b"fake_image_bytes")
             self.assertEqual(code, "2GML5")
+
+    def test_solve_captcha_with_vision_env_overrides(self):
+        import json
+        from unittest.mock import patch, MagicMock
+
+        captured_req = []
+
+        def fake_urlopen(req, context=None, timeout=None):
+            captured_req.append(req)
+            m = MagicMock()
+            m.read.return_value = json.dumps({
+                "choices": [{"message": {"content": "XYZ89"}}]
+            }).encode("utf-8")
+            m.__enter__.return_value = m
+            return m
+
+        custom_env = {
+            "DAILY_CHECKIN_VISION_API_BASE": "https://custom-gateway.io/v1",
+            "DAILY_CHECKIN_VISION_API_KEY": "sk-custom-secret-key-12345",
+            "DAILY_CHECKIN_VISION_MODEL": "custom-glm-vision",
+        }
+
+        with patch.dict(os.environ, custom_env), patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            code = self.m.solve_captcha_with_vision(b"test_bytes")
+            self.assertEqual(code, "XYZ89")
+            self.assertEqual(len(captured_req), 1)
+            req = captured_req[0]
+            self.assertEqual(req.full_url, "https://custom-gateway.io/v1/chat/completions")
+            self.assertEqual(req.headers.get("Authorization"), "Bearer sk-custom-secret-key-12345")
+            data = json.loads(req.data.decode("utf-8"))
+            self.assertEqual(data["model"], "custom-glm-vision")
 
 
 if __name__ == "__main__":
