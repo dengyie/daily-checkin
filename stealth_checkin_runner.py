@@ -9328,12 +9328,12 @@ def extract_captcha_token(raw_text: str) -> str:
     return cleaned[:6] if cleaned else ""
 
 
-def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 30.0) -> str:
+def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 12.0) -> str:
     """Use system-level vision LLM (glm-5.3-flash via new-api) to solve alphanumeric CAPTCHA.
 
-    Notes & Pitfalls:
-    - Host: https://api.mangoqwq.com/v1/chat/completions (configurable via DAILY_CHECKIN_VISION_API_BASE)
-    - Test Token: sk-LZn4iMxdgX6SCKNN4B5JwKMwdjQXcu7FG8r2lLiAN3BeGEHJ (configurable via DAILY_CHECKIN_VISION_API_KEY)
+    Notes & Configuration:
+    - Host: configurable via DAILY_CHECKIN_VISION_API_BASE or system_config
+    - Key: configurable via DAILY_CHECKIN_VISION_API_KEY or system_config('vision_api_key')
     - Model: glm-5.3-flash (configurable via DAILY_CHECKIN_VISION_MODEL)
     - Cloudflare 1010 block: requires browser-like User-Agent.
     - GLM reasoning tokens: max_tokens >= 1024 to prevent empty answers.
@@ -9347,7 +9347,21 @@ def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 30.0) -> str:
         endpoint = api_base
     else:
         endpoint = f"{api_base}/chat/completions"
-    api_key = os.getenv("DAILY_CHECKIN_VISION_API_KEY", "sk-LZn4iMxdgX6SCKNN4B5JwKMwdjQXcu7FG8r2lLiAN3BeGEHJ")
+
+    api_key = os.getenv("DAILY_CHECKIN_VISION_API_KEY", "").strip()
+    if not api_key:
+        try:
+            from checkin_core.store import SystemStore
+            api_key = SystemStore().get_config("vision_api_key", "").strip()
+        except Exception:
+            api_key = ""
+    if not api_key:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+
+    if not api_key:
+        print("  [vision captcha] error: DAILY_CHECKIN_VISION_API_KEY not configured", flush=True)
+        return ""
+
     model = os.getenv("DAILY_CHECKIN_VISION_MODEL", "glm-5.3-flash")
 
     img_b64 = base64.b64encode(image_bytes).decode("ascii")
@@ -12915,9 +12929,9 @@ def _reset_daily_task_content(
     for line in content.splitlines(keepends=True):
         raw = line.rstrip("\n\r")
         nl = "\n" if line.endswith("\n") else ""
-        if re.match(r"^\s*-\s*\[[ xX]\]\s*#task\s*#日常\b", raw):
+        if re.match(r"^\s*-\s*\[[ xX]\]\s*", raw) and "#task" in raw and "#日常" in raw:
             if excluded:
-                m_link = re.search(r"\[([^\]]+)\]\((https?://[^)]+)\)", raw) or re.search(r"#日常[^\n]*\[([^\]]+)\]", raw)
+                m_link = re.search(r"\[([^\]]+)\]\((https?://[^)]+)\)", raw) or re.search(r"#日常[^\n]*\[([^\]]+)\]", raw) or re.search(r"#task[^\n]*\[([^\]]+)\]", raw)
                 if m_link and m_link.group(1).strip() in excluded:
                     continue
             # force open checkbox

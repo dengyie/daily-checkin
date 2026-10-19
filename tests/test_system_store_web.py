@@ -1985,6 +1985,48 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
         self.assertIn("alive-site", content)
         self.assertIn("- [ ] #task #日常 [alive-site]", content)
 
+    def test_delete_site_markdown_projection_robust_against_tag_order_and_case(self):
+        """_project_obsidian_site_deleted must strip matching lines regardless of tag order or case."""
+        note_path = Path(self.td.name) / f"{self.day} 每日任务.md"
+        note_path.write_text(
+            f"# {self.day} 每日任务\n"
+            "- [ ] #日常 #task [CaseSite](https://case.example.com)\n"
+            "- [x] #task #日常 [casesite]\n"
+            "- [ ] #task #日常 [kept-site](https://kept.example.com)\n",
+            encoding="utf-8",
+        )
+        self.store.upsert_task(
+            self.day,
+            "casesite",
+            "https://case.example.com",
+            obsidian_path=str(note_path),
+        )
+
+        self.store.delete_site("casesite")
+        content = note_path.read_text(encoding="utf-8")
+        self.assertNotIn("casesite", content.lower())
+        self.assertIn("kept-site", content)
+
+    def test_solve_captcha_with_vision_credential_fallback_and_safety(self):
+        """solve_captcha_with_vision should safely fallback to store config and never crash if unset."""
+        from stealth_checkin_runner import solve_captcha_with_vision
+
+        old_env = os.environ.get("DAILY_CHECKIN_VISION_API_KEY")
+        try:
+            if "DAILY_CHECKIN_VISION_API_KEY" in os.environ:
+                del os.environ["DAILY_CHECKIN_VISION_API_KEY"]
+
+            # Empty image
+            self.assertEqual(solve_captcha_with_vision(b""), "")
+
+            # Non-empty image with no key configured anywhere should safely return "" without exception
+            with mock.patch("checkin_core.store.SystemStore.get_config", return_value=""):
+                res = solve_captcha_with_vision(b"fake-image-bytes")
+                self.assertEqual(res, "")
+        finally:
+            if old_env is not None:
+                os.environ["DAILY_CHECKIN_VISION_API_KEY"] = old_env
+
     def test_api_delete_site_error_handling(self):
         self.conn.request("GET", "/api/state")
         res = self.conn.getresponse()

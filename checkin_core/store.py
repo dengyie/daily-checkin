@@ -947,7 +947,8 @@ class SystemStore:
 
         escaped = re.escape(name)
         pattern = re.compile(
-            rf"^\s*-\s*\[[ xX]\]\s*#task\s*#日常[^\n]*\[{escaped}\](?:\([^)]*\))?[^\n]*$"
+            rf"^\s*-\s*\[[ xX]\]\s*(?=.*#task)(?=.*#日常)[^\n]*\[{escaped}\](?:\([^)]*\))?[^\n]*$",
+            re.IGNORECASE,
         )
 
         modified = False

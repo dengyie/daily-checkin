@@ -9,7 +9,10 @@ $env:DAILY_CHECKIN_TASKS_DIR = "E:\project\daily-checkin\data\tasks"
 $env:DAILY_CHECKIN_CREDENTIALS_FILE = "E:\project\daily-checkin\data\credentials.json"
 $env:DAILY_CHECKIN_ACCOUNTS_FILE = "E:\project\daily-checkin\data\accounts.md"
 $env:DAILY_CHECKIN_CREDENTIAL_BACKEND = "file"
-$env:DAILY_CHECKIN_WEB_PASSWORD = "2625451001"
+# Optional Web UI access password gate: set in user environment or leave empty for local development
+if (-not $env:DAILY_CHECKIN_WEB_PASSWORD) {
+    # $env:DAILY_CHECKIN_WEB_PASSWORD = ""
+}
 
 Set-Location "E:\project\daily-checkin"
 Write-Host "Starting daily-checkin API backend on http://127.0.0.1:8765..." -ForegroundColor Green
