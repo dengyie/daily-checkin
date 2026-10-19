@@ -2173,10 +2173,75 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
         h_data2 = json.loads(h_resp2.read())
         self.assertTrue(h_data2.get("ok"))
 
+    def test_store_delete_site_multi_credentials_cleanup(self):
+        # Create site
+        self.store.upsert_task(self.day, "multi-cred-site", "https://multicred.com", status="pending")
+        with self.store.connect() as db:
+            site = db.execute("SELECT id FROM sites WHERE name='multi-cred-site'").fetchone()
+            site_id = site["id"]
+            # Insert secondary credential directly into credentials table
+            db.execute(
+                "INSERT INTO credentials(ref, site_id, kind, label, updated_at) VALUES (?, ?, 'cookie', 'secondary', ?)",
+                ("cred:multi-cred-site:cookie", site_id, self.store.now()),
+            )
+        # Set primary credential ref
+        self.app.credentials.put("cred:multi-cred-site:token", "tok_val")
+        self.app.credentials.put("cred:multi-cred-site:cookie", "cook_val")
+        self.store.set_credential_ref("multi-cred-site", "cred:multi-cred-site:token", "token", "primary")
 
+        # Call delete_site
+        res = self.store.delete_site("multi-cred-site")
+        self.assertIn("cred:multi-cred-site:token", res["credential_refs"])
+        self.assertIn("cred:multi-cred-site:cookie", res["credential_refs"])
 
+        # Check DB rows in child tables are cleaned up
+        with self.store.connect() as db:
+            remaining_creds = db.execute("SELECT COUNT(*) FROM credentials WHERE site_id=?", (site_id,)).fetchone()[0]
+            self.assertEqual(remaining_creds, 0)
 
+    def test_delete_site_ignore_missing_and_api(self):
+        # 1. delete_site on non-existent with ignore_missing=True
+        res = self.store.delete_site("ghost-site-abc", ignore_missing=True)
+        self.assertEqual(res["name"], "ghost-site-abc")
+        self.assertIsNone(res["site_id"])
+        self.assertEqual(res["deleted_tasks"], 0)
+        self.assertTrue(self.store.is_site_deleted("ghost-site-abc"))
 
+        # 2. Call API with ignore_missing=True
+        self.conn.request("GET", "/api/state")
+        csrf = json.loads(self.conn.getresponse().read())["csrf"]
+        headers = {"Content-Type": "application/json", "X-CSRF-Token": csrf}
+        body = json.dumps({"name": "ghost-site-xyz", "ignore_missing": True}).encode()
+        self.conn.request("POST", "/api/sites/delete", body, headers)
+        resp = self.conn.getresponse()
+        self.assertEqual(resp.status, 200)
+        data = json.loads(resp.read())
+        self.assertTrue(data.get("ok"))
+        self.assertTrue(self.store.is_site_deleted("ghost-site-xyz"))
+
+    def test_terminate_process_tree_cross_platform(self):
+        from checkin_core.web import JobExecutor
+        executor = JobExecutor(self.store, start_worker=False)
+
+        # Mock a running process
+        proc_mock = mock.MagicMock()
+        proc_mock.pid = 999999
+        proc_mock.poll.return_value = None
+
+        # Test POSIX path
+        with mock.patch("sys.platform", "darwin"), \
+             mock.patch("os.killpg") as mock_killpg:
+            executor._terminate_process_tree(proc_mock, timeout=1.0)
+            mock_killpg.assert_called_with(999999, signal.SIGTERM)
+
+        # Test Windows path
+        with mock.patch("sys.platform", "win32"), \
+             mock.patch("subprocess.run") as mock_subrun:
+            executor._terminate_process_tree(proc_mock, timeout=1.0)
+            mock_subrun.assert_called_once()
+            args = mock_subrun.call_args[0][0]
+            self.assertEqual(args[:4], ["taskkill", "/F", "/T", "/PID"])
+            self.assertEqual(args[4], "999999")
 
 
 if __name__ == "__main__":

@@ -212,6 +212,44 @@ class JobExecutor:
             print(f"web: requeued {requeued} stale job(s) after restart", flush=True)
         return requeued
 
+    def _terminate_process_tree(self, process: subprocess.Popen, timeout: float = 10.0) -> None:
+        """Terminate a runner process and any spawned child processes cross-platform."""
+        poll_fn = getattr(process, "poll", None)
+        if callable(poll_fn) and poll_fn() is not None:
+            return
+        if sys.platform == "win32":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except Exception:
+                pass
+            try:
+                process.wait(timeout=timeout)
+            except Exception:
+                pass
+            return
+
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=timeout)
+            except Exception:
+                pass
+        except ProcessLookupError:
+            pass
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
     def _run(self, job_id: int, names: list[str]) -> None:
         if not self.store.claim_job(job_id):
             # Job was already picked up or completed by another worker/process
@@ -233,12 +271,7 @@ class JobExecutor:
                 # Own and terminate the whole runner process group; do not
                 # leave a side-effecting browser runner acting after the job
                 # has been marked failed.
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=10)
+                self._terminate_process_tree(process)
                 self.store.update_job(
                     job_id, "failed", finished_at=self.store.now(), exit_code=2,
                     message="runner_timeout: process group terminated and reaped",
@@ -550,13 +583,15 @@ class CheckinWebApp:
                         name = _clean_site_name(body.get("name"))
                         if not name:
                             raise ValueError("name required")
-                        res = app.store.delete_site(name)
-                        cred_ref = res.get("credential_ref")
-                        if cred_ref:
-                            try:
-                                app.credentials.delete(cred_ref)
-                            except Exception as exc:
-                                logging.warning("failed to delete keychain ref %s for site %s: %s", cred_ref, name, exc)
+                        ignore_missing = bool(body.get("ignore_missing", False))
+                        res = app.store.delete_site(name, ignore_missing=ignore_missing)
+                        cred_refs = res.get("credential_refs") or ([res.get("credential_ref")] if res.get("credential_ref") else [])
+                        for c_ref in cred_refs:
+                            if c_ref:
+                                try:
+                                    app.credentials.delete(c_ref)
+                                except Exception as exc:
+                                    logging.warning("failed to delete keychain ref %s for site %s: %s", c_ref, name, exc)
                         self.send_json({"ok": True, "name": name, "deleted_tasks": res["deleted_tasks"]})
                         return
                     if path == "/api/credentials":

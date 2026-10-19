@@ -863,10 +863,12 @@ class SystemStore:
             db.execute("UPDATE sites SET credential_ref=NULL WHERE credential_ref=?", (ref,))
             db.execute("DELETE FROM credentials WHERE ref=?", (ref,))
 
-    def delete_site(self, name: str) -> dict[str, Any]:
+    def delete_site(self, name: str, ignore_missing: bool = False) -> dict[str, Any]:
         """Permanently delete a site by name, cascading daily_tasks, site_health,
-        and credentials rows. Preserves historical run_items by disassociating site_id.
+        account_balances, and credentials rows. Preserves historical run_items by disassociating site_id.
         Records a tombstone in deleted_sites and projects removal to Obsidian task files.
+        If ignore_missing=True, gracefully tombstones and cleans up Markdown even if the site
+        is absent from the sites table.
         Returns dictionary with deleted site metadata and counts.
         """
         clean_name = str(name).strip() if name is not None else ""
@@ -880,37 +882,64 @@ class SystemStore:
                 (clean_name,),
             ).fetchone()
             if not site:
-                raise ValueError(f"site not found: {clean_name}")
+                if not ignore_missing:
+                    raise ValueError(f"site not found: {clean_name}")
+                # Defensive tombstone even if site row does not exist in sites table
+                db.execute(
+                    """INSERT INTO deleted_sites(name, deleted_at, reason)
+                       VALUES(?, ?, 'user_delete')
+                       ON CONFLICT(name) DO UPDATE SET deleted_at=excluded.deleted_at""",
+                    (clean_name, now),
+                )
+                site_id = None
+                cred_ref = None
+                cred_refs: list[str] = []
+                tasks_count = 0
+                obsidian_paths: list[str] = []
+            else:
+                site_id = int(site["id"])
+                cred_ref = site["credential_ref"]
 
-            site_id = int(site["id"])
-            cred_ref = site["credential_ref"]
+                # Collect all credential refs associated with this site before deletion
+                cred_refs = [
+                    row[0] for row in db.execute(
+                        "SELECT ref FROM credentials WHERE site_id=? AND ref IS NOT NULL AND ref!=''",
+                        (site_id,),
+                    ).fetchall()
+                ]
+                if cred_ref and cred_ref not in cred_refs:
+                    cred_refs.append(cred_ref)
 
-            # Collect any obsidian task file paths referencing this site before cascade delete
-            obsidian_paths = [
-                row[0] for row in db.execute(
-                    "SELECT DISTINCT obsidian_path FROM daily_tasks WHERE site_id=? AND obsidian_path IS NOT NULL AND obsidian_path!=''",
+                # Collect any obsidian task file paths referencing this site before cascade delete
+                obsidian_paths = [
+                    row[0] for row in db.execute(
+                        "SELECT DISTINCT obsidian_path FROM daily_tasks WHERE site_id=? AND obsidian_path IS NOT NULL AND obsidian_path!=''",
+                        (site_id,),
+                    ).fetchall()
+                ]
+
+                tasks_count = int(db.execute(
+                    "SELECT COUNT(*) FROM daily_tasks WHERE site_id=?",
                     (site_id,),
-                ).fetchall()
-            ]
+                ).fetchone()[0])
 
-            tasks_count = int(db.execute(
-                "SELECT COUNT(*) FROM daily_tasks WHERE site_id=?",
-                (site_id,),
-            ).fetchone()[0])
+                # Disassociate run_items.site_id to NULL to preserve historical records safely
+                db.execute("UPDATE run_items SET site_id=NULL WHERE site_id=?", (site_id,))
 
-            # Disassociate run_items.site_id to NULL to preserve historical records safely
-            db.execute("UPDATE run_items SET site_id=NULL WHERE site_id=?", (site_id,))
+                # Record tombstone in deleted_sites to prevent resurrection on future sync/cron
+                db.execute(
+                    """INSERT INTO deleted_sites(name, deleted_at, reason)
+                       VALUES(?, ?, 'user_delete')
+                       ON CONFLICT(name) DO UPDATE SET deleted_at=excluded.deleted_at""",
+                    (clean_name, now),
+                )
 
-            # Record tombstone in deleted_sites to prevent resurrection on future sync/cron
-            db.execute(
-                """INSERT INTO deleted_sites(name, deleted_at, reason)
-                   VALUES(?, ?, 'user_delete')
-                   ON CONFLICT(name) DO UPDATE SET deleted_at=excluded.deleted_at""",
-                (clean_name, now),
-            )
-
-            # Delete the site (foreign key cascades to daily_tasks, site_health, credentials)
-            db.execute("DELETE FROM sites WHERE id=?", (site_id,))
+                # Explicitly delete child rows to guarantee cascade even when PRAGMA foreign_keys is OFF
+                db.execute("DELETE FROM daily_tasks WHERE site_id=?", (site_id,))
+                db.execute("DELETE FROM site_health WHERE site_id=?", (site_id,))
+                db.execute("DELETE FROM credentials WHERE site_id=?", (site_id,))
+                db.execute("DELETE FROM account_balances WHERE site_id=?", (site_id,))
+                db.execute("DELETE FROM sites WHERE id=?", (site_id,))
 
         # Synchronously project deletion to active Obsidian markdown daily task files
         self._project_obsidian_site_deleted(clean_name, candidate_paths=obsidian_paths)
@@ -919,6 +948,7 @@ class SystemStore:
             "name": clean_name,
             "site_id": site_id,
             "credential_ref": cred_ref,
+            "credential_refs": cred_refs,
             "deleted_tasks": tasks_count,
         }
 
