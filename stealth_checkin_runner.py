@@ -13351,6 +13351,18 @@ def parse_auto_fail_tasks(tasks_content: str) -> list[tuple[str, str]]:
     return out
 
 
+def is_manual_row(r: dict[str, Any]) -> bool:
+    """判定任务行是否属于人工签到 (checkin_mode='manual' 权威优先，未设定模式时兜底兼容 tags 包含 manual)."""
+    mode = (r.get("checkin_mode") or "").strip().lower()
+    if mode == "manual":
+        return True
+    if mode == "auto":
+        return False
+    tags = r.get("tags") or ""
+    tags_set = {t.strip().lower() for t in tags.split(",") if t.strip()}
+    return "manual" in tags_set
+
+
 def select_retry_auto_fail_rows(
     system_rows: list[dict[str, Any]], tasks_content: str,
 ) -> list[dict[str, Any]]:
@@ -14199,21 +14211,15 @@ async def run(argv: list[str] | None = None) -> int:
         system_rows = store.tasks(today_str, pending_only=True)
         if projection_available:
             system_rows = [r for r in system_rows if r.get("name") in file_task_names]
-        # 每日定时/全量自动化批次排除人工签到站点 (checkin_mode='manual' 或包含 manual 标签)
-        manual_rows = [
-            r for r in system_rows
-            if r.get("checkin_mode") == "manual" or "manual" in (r.get("tags") or "").lower()
-        ]
+        # 每日定时/全量自动化批次排除人工签到站点 (checkin_mode='manual' 或在未设定模式时包含 manual 标签)
+        manual_rows = [r for r in system_rows if is_manual_row(r)]
         if manual_rows:
             print(
                 f"Excluded manual-checkin sites ({len(manual_rows)}): "
                 + ", ".join(r["name"] for r in manual_rows),
                 flush=True,
             )
-            system_rows = [
-                r for r in system_rows
-                if r.get("checkin_mode") != "manual" and "manual" not in (r.get("tags") or "").lower()
-            ]
+            system_rows = [r for r in system_rows if not is_manual_row(r)]
     system_rows, suppressed_rows = filter_unhealthy_rows(
         system_rows, force=bool(only or args.retry_auto_fail)
     )

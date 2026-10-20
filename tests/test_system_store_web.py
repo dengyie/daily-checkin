@@ -8,6 +8,7 @@ import queue
 import signal
 import sqlite3
 import subprocess
+import sys
 import threading
 import unittest
 from unittest import mock
@@ -677,6 +678,7 @@ class FileCredentialsTests(unittest.TestCase):
             store.delete("daily-checkin:abc")
             self.assertIsNone(store.get("daily-checkin:abc"))
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX file permission mode 0600/0700 not applicable on Windows")
     def test_file_and_dir_mode_0600_0700(self):
         with TemporaryDirectory() as td:
             path = Path(td) / "sub" / "credentials.json"
@@ -740,6 +742,7 @@ class FileCredentialsTests(unittest.TestCase):
             # would have lost secret-1 entirely via O_TRUNC.
             self.assertIn("not json", path.read_text(encoding="utf-8"))
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX directory permission checking not applicable on Windows")
     def test_put_refuses_when_parent_not_private(self):
         # If the credential directory is world/group-writable (not 0700 self-owned)
         # at put time, put must refuse rather than write into a looser directory.
@@ -839,6 +842,7 @@ class FakeCredentials:
 
 class WebTests(unittest.TestCase):
     def setUp(self):
+        self._orig_password = os.environ.pop("DAILY_CHECKIN_WEB_PASSWORD", None)
         self.td = TemporaryDirectory()
         self.store = SystemStore(Path(self.td.name) / "system.db")
         self.creds = FakeCredentials()
@@ -856,6 +860,10 @@ class WebTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(3)
         self.td.cleanup()
+        if self._orig_password is not None:
+            os.environ["DAILY_CHECKIN_WEB_PASSWORD"] = self._orig_password
+        else:
+            os.environ.pop("DAILY_CHECKIN_WEB_PASSWORD", None)
 
     def request_json(self, method, path, body=None, csrf=None, auth=None):
         headers = {"Content-Type": "application/json"}
@@ -1074,6 +1082,7 @@ class WebTests(unittest.TestCase):
             resp = self.conn.request("GET", path)
             self.assertEqual(self.conn.getresponse().status, 404, path)
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX file permission mode 0600 not applicable on Windows")
     def test_token_file_created_with_0600(self):
         token_path = Path(self.td.name) / "web.token"
         self.assertTrue(token_path.is_file())
@@ -1128,20 +1137,28 @@ class WebTests(unittest.TestCase):
                 calls.append(("wait", timeout))
                 return self.returncode
 
-        old_popen, old_killpg = web_module.subprocess.Popen, web_module.os.killpg
+        old_popen = web_module.subprocess.Popen
+        had_killpg = hasattr(web_module.os, "killpg")
+        old_killpg = getattr(web_module.os, "killpg", None)
         web_module.subprocess.Popen = lambda *a, **k: TimedOutProcess()
-        web_module.os.killpg = lambda pid, sig: calls.append(("killpg", pid, sig))
+        if sys.platform != "win32":
+            web_module.os.killpg = lambda pid, sig: calls.append(("killpg", pid, sig))
         try:
             job_id = self.store.create_job("site", ["A"])
             self.app.executor._run(job_id, ["A"])
-            self.assertIn(("killpg", 4242, signal.SIGTERM), calls)
+            if sys.platform != "win32":
+                self.assertIn(("killpg", 4242, signal.SIGTERM), calls)
             self.assertIn(("wait", 10), calls)
             job = [j for j in self.store.jobs() if j["id"] == job_id][0]
             self.assertEqual(job["status"], "failed")
             self.assertEqual(job["exit_code"], 2)
             self.assertIn("runner_timeout", job["message"])
         finally:
-            web_module.subprocess.Popen, web_module.os.killpg = old_popen, old_killpg
+            web_module.subprocess.Popen = old_popen
+            if had_killpg:
+                web_module.os.killpg = old_killpg
+            elif hasattr(web_module.os, "killpg"):
+                delattr(web_module.os, "killpg")
 
     def test_recover_stale_jobs_requeues_queued_rows(self):
         """After a web-process restart, persistent 'queued' jobs must be
@@ -1758,6 +1775,45 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
         self.assertEqual(tasks["manual-site"]["tags"], "captcha,turnstile")
         self.assertEqual(tasks["auto-site"]["checkin_mode"], "auto")
 
+    def test_store_update_site_config_cleans_manual_tag_on_auto(self):
+        # Set manual mode with manual tag
+        self.store.update_site_config("manual-site", checkin_mode="manual", tags="manual,custom")
+        tasks = {t["name"]: t for t in self.store.tasks(self.day)}
+        self.assertEqual(tasks["manual-site"]["checkin_mode"], "manual")
+        self.assertIn("manual", tasks["manual-site"]["tags"])
+
+        # Switch to auto with tags including manual -> manual tag must be stripped
+        self.store.update_site_config("manual-site", checkin_mode="auto", tags="manual,custom")
+        tasks = {t["name"]: t for t in self.store.tasks(self.day)}
+        self.assertEqual(tasks["manual-site"]["checkin_mode"], "auto")
+        self.assertEqual(tasks["manual-site"]["tags"], "custom")
+
+        # Now re-add manual tag and switch to auto without passing tags -> must be stripped from DB
+        self.store.update_site_config("manual-site", checkin_mode="manual", tags="manual,vip")
+        self.store.update_site_config("manual-site", checkin_mode="auto")
+        tasks = {t["name"]: t for t in self.store.tasks(self.day)}
+        self.assertEqual(tasks["manual-site"]["checkin_mode"], "auto")
+        self.assertEqual(tasks["manual-site"]["tags"], "vip")
+
+    def test_is_manual_row_priority(self):
+        from stealth_checkin_runner import is_manual_row
+        # 1. Explicit auto with manual tag -> False (not manual)
+        self.assertFalse(is_manual_row({"checkin_mode": "auto", "tags": "manual"}))
+        self.assertFalse(is_manual_row({"checkin_mode": "auto", "tags": "custom,manual,vip"}))
+        self.assertFalse(is_manual_row({"checkin_mode": "Auto", "tags": "MANUAL"}))
+
+        # 2. Explicit manual -> True (manual)
+        self.assertTrue(is_manual_row({"checkin_mode": "manual", "tags": ""}))
+        self.assertTrue(is_manual_row({"checkin_mode": "manual", "tags": "auto"}))
+        self.assertTrue(is_manual_row({"checkin_mode": "MANUAL", "tags": None}))
+
+        # 3. Mode not set (or empty) -> fallback to tags
+        self.assertTrue(is_manual_row({"checkin_mode": "", "tags": "manual"}))
+        self.assertTrue(is_manual_row({"checkin_mode": None, "tags": "some,manual,tag"}))
+        self.assertFalse(is_manual_row({"checkin_mode": "", "tags": "auto"}))
+        self.assertFalse(is_manual_row({"checkin_mode": None, "tags": ""}))
+        self.assertFalse(is_manual_row({}))
+
     def test_api_update_site_config(self):
         # Get CSRF from state
         self.conn.request("GET", "/api/state")
@@ -2214,8 +2270,9 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
         body = json.dumps({"name": "ghost-site-xyz", "ignore_missing": True}).encode()
         self.conn.request("POST", "/api/sites/delete", body, headers)
         resp = self.conn.getresponse()
-        self.assertEqual(resp.status, 200)
-        data = json.loads(resp.read())
+        resp_data = resp.read()
+        self.assertEqual(resp.status, 200, f"delete failed: {resp_data.decode()}")
+        data = json.loads(resp_data)
         self.assertTrue(data.get("ok"))
         self.assertTrue(self.store.is_site_deleted("ghost-site-xyz"))
 
@@ -2230,7 +2287,7 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
 
         # Test POSIX path
         with mock.patch("sys.platform", "darwin"), \
-             mock.patch("os.killpg") as mock_killpg:
+             mock.patch("os.killpg", create=True) as mock_killpg:
             executor._terminate_process_tree(proc_mock, timeout=1.0)
             mock_killpg.assert_called_with(999999, signal.SIGTERM)
 

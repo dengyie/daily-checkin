@@ -325,6 +325,12 @@ class SystemStore:
         INSERT left a stray committed site row).
         """
         now = self.now()
+        mode_clean = str(checkin_mode or "auto").strip().lower()
+        if mode_clean == "auto" and tags:
+            tags = ",".join(
+                t.strip() for t in str(tags).split(",")
+                if t.strip() and t.strip().lower() != "manual"
+            )
         with self.connect() as db:
             db.execute("DELETE FROM deleted_sites WHERE name=?", (name,))
             db.execute(
@@ -833,11 +839,37 @@ class SystemStore:
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             raise ValueError("no valid fields to update")
+
+        # 归一化 checkin_mode 大小写与空白符，防止模式匹配被旁路跳过
+        if "checkin_mode" in updates:
+            updates["checkin_mode"] = str(updates["checkin_mode"] or "").strip().lower()
+            if not updates["checkin_mode"]:
+                updates["checkin_mode"] = "auto"
+
         now = self.now()
         updates["updated_at"] = now
-        sets = [f"{k}=?" for k in updates]
-        params = list(updates.values()) + [name]
+
         with self.connect() as db:
+            # 当切换为 auto 时，在统一事务内清除传入或现存的 'manual' 标签，杜绝幻读/脏写
+            if updates.get("checkin_mode") == "auto":
+                if "tags" in updates:
+                    clean_tags = ",".join(
+                        t.strip() for t in str(updates["tags"]).split(",")
+                        if t.strip() and t.strip().lower() != "manual"
+                    )
+                    updates["tags"] = clean_tags
+                else:
+                    curr = db.execute("SELECT tags FROM sites WHERE name=?", (name,)).fetchone()
+                    if curr and curr[0]:
+                        tags_set = [t.strip() for t in str(curr[0]).split(",") if t.strip()]
+                        if any(t.lower() == "manual" for t in tags_set):
+                            clean_tags = ",".join(
+                                t for t in tags_set if t.lower() != "manual"
+                            )
+                            updates["tags"] = clean_tags
+
+            sets = [f"{k}=?" for k in updates]
+            params = list(updates.values()) + [name]
             cur = db.execute(f"UPDATE sites SET {', '.join(sets)} WHERE name=?", params)
             if cur.rowcount == 0:
                 # Upsert site if not present

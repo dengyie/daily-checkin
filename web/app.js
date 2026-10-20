@@ -309,7 +309,14 @@ function debounce(fn, delayMs = 150) {
 
 function isManualTask(task) {
   if (!task) return false;
-  return task.checkin_mode === "manual" || Boolean(task.tags && task.tags.toLowerCase().includes("manual"));
+  const mode = String(task.checkin_mode || "").trim().toLowerCase();
+  if (mode === "manual") return true;
+  if (mode === "auto") return false;
+  const tagsSet = String(task.tags || "")
+    .split(",")
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  return tagsSet.includes("manual");
 }
 
 function applyCredentialKindRules({ kind, accountRow, accountInput, secretLabel, secretInput, storageDesc = "macOS Keychain" }) {
@@ -783,7 +790,7 @@ function openSiteDetailDrawer(siteName) {
                 <button type="button" class="btn sm" id="drawer-site-add-tag-btn">${uiIcon("plus", { size: 12 })} 添加标签</button>
               </div>
             </div>
-            <input type="hidden" name="tags" id="site-drawer-tags" value="${esc(task.tags || (isManualMode ? "manual" : ""))}">
+            <input type="hidden" name="tags" id="site-drawer-tags" value="${esc(task.tags || "")}">
           </div>
           <div class="form-group-item">
             <label for="site-drawer-url">入口网址 (Target URL)</label>
@@ -805,13 +812,19 @@ function openSiteDetailDrawer(siteName) {
       </div>
     `;
 
-    initTagsPicker(
+    const drawerTagsPicker = initTagsPicker(
       "#drawer-site-tags-checkboxes",
       "#site-drawer-tags",
       "#drawer-site-custom-tag-input",
       "#drawer-site-add-tag-btn",
-      task.tags || (isManualMode ? "manual" : "")
+      task.tags || ""
     );
+
+    $("#site-drawer-checkin-mode")?.addEventListener("change", (e) => {
+      if (e.target.value === "auto") {
+        drawerTagsPicker?.removeTag("manual");
+      }
+    });
 
     $("#site-drawer-delete-site-btn")?.addEventListener("click", async () => {
       const confirmText = `确定彻底删除站点「${task.name}」吗？\n\n此操作将同时清理：\n1. 今日签到待办任务\n2. 绑定的 Keychain 凭据密钥（如有）\n3. 健康状态与熔断抑制记录\n\n操作不可逆，是否继续？`;
@@ -856,6 +869,14 @@ function openSiteDetailDrawer(siteName) {
       try {
         const formData = new FormData(e.target);
         const formObj = Object.fromEntries(formData);
+        if (formObj.checkin_mode === "auto") {
+          const cleanTags = (formObj.tags || "")
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s && s.toLowerCase() !== "manual")
+            .join(",");
+          formObj.tags = cleanTags;
+        }
         const targetSiteName = formObj.name || task.name;
         const res = await api("/api/sites/update", formObj);
         showToast(`站点「${targetSiteName}」配置已更新为 ${formObj.checkin_mode === "manual" ? "手动签到" : "自动签到"}`, "success");
@@ -1552,6 +1573,19 @@ function initTagsPicker(containerSelector, hiddenInputSelector, customInputSelec
   }
 
   renderTagsCloud();
+  return {
+    removeTag: (tag) => {
+      const val = (tag || "").trim().toLowerCase();
+      currentTags.delete(val);
+      syncStateAndClasses();
+    },
+    addTag: (tag) => {
+      const val = (tag || "").trim().toLowerCase();
+      if (val) currentTags.add(val);
+      syncStateAndClasses();
+    },
+    getTags: () => Array.from(currentTags),
+  };
 }
 
 function closeEvidenceDrawer() {
@@ -2898,7 +2932,9 @@ $("#tasks-add-site-quick-btn")?.addEventListener("click", () => {
 
 // Init new site form tag picker when switching to site-manage or on reset
 function initNewSiteTagsPicker() {
-  initTagsPicker(
+  const form = $("#new-site-manage-form");
+  if (!form) return;
+  form._tagsPicker = initTagsPicker(
     "#new-site-tags-checkboxes",
     "#new-site-tags",
     "#new-site-custom-tag-input",
@@ -2906,6 +2942,13 @@ function initNewSiteTagsPicker() {
     ""
   );
 }
+
+$("#new-site-checkin-mode")?.addEventListener("change", (e) => {
+  if (e.target.value === "auto") {
+    const form = $("#new-site-manage-form");
+    form?._tagsPicker?.removeTag("manual");
+  }
+});
 
 $("#new-site-manage-form")?.addEventListener("reset", () => {
   setTimeout(initNewSiteTagsPicker, 10);
@@ -2922,6 +2965,14 @@ $("#new-site-manage-form")?.addEventListener("submit", async (event) => {
   try {
     const formData = new FormData(event.target);
     const formObj = Object.fromEntries(formData);
+    if (formObj.checkin_mode === "auto") {
+      const cleanTags = (formObj.tags || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s && s.toLowerCase() !== "manual")
+        .join(",");
+      formObj.tags = cleanTags;
+    }
     await api("/api/tasks", formObj);
     event.target.reset();
     initNewSiteTagsPicker();
