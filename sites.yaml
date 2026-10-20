@@ -1235,3 +1235,19 @@ sites:
 
 
 
+  # yunxii(yunxii.org / 云栖 Emby)—— 2026-10-21 接入。
+  # Emby 媒体服务器账号管理页，非 New API 站。
+  # 签到位于 /account 页面「每日签到」卡片:
+  # 未签: button:has-text("正常签到") (非 disabled) -> 点击签到获得 +5 星星
+  # 已签: button[disabled]:has-text("正常签到") 且展示「今日已签」
+  # 登录方式: 账号密码登录（非 OAuth），账密存于 vault 账密文档。
+  - name: 'yunxii'
+    url: https://yunxii.org/account
+    kind: browser
+    signs:
+      - 'button:has-text("正常签到"):not([disabled])'
+      - 'button:has-text("正常签到")'
+    already:
+      - 'button[disabled]:has-text("正常签到")'
+      - 'text=今日已签'
+      - 'text=签到成功'

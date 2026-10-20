@@ -1418,6 +1418,20 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
         kind="browser",
     ),
+    _B(
+        "yunxii",
+        "https://yunxii.org/account",
+        signs=[
+            'button:has-text("正常签到"):not([disabled])',
+            'button:has-text("正常签到")',
+        ],
+        already=[
+            'button[disabled]:has-text("正常签到")',
+            'text=今日已签',
+            'text=签到成功',
+        ],
+        kind="browser",
+    ),
 ]
 
 
