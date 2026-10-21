@@ -3885,7 +3885,7 @@ class TestSitesYaml(unittest.TestCase):
         不得断言真实账号值(2026-10-01 CI 修复)。
         """
         fixture_md = (
-            "0api（https://sub2api.0api.cc.cd）\n"
+            "0api（https://sub2api.0api.me）\n"
             "ci-account-0api@example.invalid\n"
             "ci-password-0api\n"
             "\n"
@@ -3893,7 +3893,7 @@ class TestSitesYaml(unittest.TestCase):
             "ci-account-hcnsec\n"
             "ci-password-hcnsec\n"
             "\n"
-            "sub2api（https://sub2api.0api.cc.cd）\n"
+            "sub2api（https://sub2api.0api.me）\n"
             "ci-account-sub2api\n"
             "ci-password-sub2api\n"
         )
@@ -4231,19 +4231,19 @@ class TestSitesYaml(unittest.TestCase):
         from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential
         a = _adapter_from_yaml_entry(entry)
         self.assertEqual(a.kind, "sub2api")
-        self.assertEqual(a.url, "https://sub2api.0api.cc.cd/custom/activity")
+        self.assertEqual(a.url, "https://sub2api.0api.me/custom/activity")
         self.assertTrue(a.prefer_catalog_url)
         joined_signs = " ".join(a.sign_selectors)
         self.assertIn("#checkin", joined_signs)
         joined_already = " ".join(a.already_selectors)
         self.assertIn("今日已签", joined_already)
         resolved = resolve_site("0api", "https://newapi.0api.cc.cd/profile")
-        self.assertEqual(resolved.url, "https://sub2api.0api.cc.cd/custom/activity")
+        self.assertEqual(resolved.url, "https://sub2api.0api.me/custom/activity")
         self.assertEqual(resolved.kind, "sub2api")
         builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "0api"), None)
         self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 0api")
         self.assertEqual(builtin_entry.kind, "sub2api")
-        self.assertEqual(builtin_entry.url, "https://sub2api.0api.cc.cd/custom/activity")
+        self.assertEqual(builtin_entry.url, "https://sub2api.0api.me/custom/activity")
         self.assertTrue(builtin_entry.prefer_catalog_url)
         cred = get_account_credential("0api")
         self.assertIsNotNone(cred)
@@ -4354,25 +4354,25 @@ class TestSitesYaml(unittest.TestCase):
         from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential, is_sub2api_site, is_sub2api_name
         a = _adapter_from_yaml_entry(entry)
         self.assertEqual(a.kind, "sub2api")
-        self.assertEqual(a.url, "https://sub2api.0api.cc.cd/custom/activity")
+        self.assertEqual(a.url, "https://sub2api.0api.me/custom/activity")
         self.assertTrue(a.prefer_catalog_url)
-        self.assertEqual(a.login_url, "https://sub2api.0api.cc.cd/login")
+        self.assertEqual(a.login_url, "https://sub2api.0api.me/login")
         joined_signs = " ".join(a.sign_selectors)
         self.assertIn("#checkin", joined_signs)
         joined_already = " ".join(a.already_selectors)
         self.assertIn("今日已签", joined_already)
-        resolved = resolve_site("sub2api", "https://sub2api.0api.cc.cd/profile")
-        self.assertEqual(resolved.url, "https://sub2api.0api.cc.cd/custom/activity")
+        resolved = resolve_site("sub2api", "https://sub2api.0api.me/profile")
+        self.assertEqual(resolved.url, "https://sub2api.0api.me/custom/activity")
         self.assertEqual(resolved.kind, "sub2api")
-        self.assertEqual(resolved.login_url, "https://sub2api.0api.cc.cd/login")
-        self.assertTrue(is_sub2api_site("https://sub2api.0api.cc.cd/custom/activity"))
+        self.assertEqual(resolved.login_url, "https://sub2api.0api.me/login")
+        self.assertTrue(is_sub2api_site("https://sub2api.0api.me/custom/activity"))
         self.assertTrue(is_sub2api_name("sub2api"))
         builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "sub2api"), None)
         self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 sub2api")
         self.assertEqual(builtin_entry.kind, "sub2api")
-        self.assertEqual(builtin_entry.url, "https://sub2api.0api.cc.cd/custom/activity")
+        self.assertEqual(builtin_entry.url, "https://sub2api.0api.me/custom/activity")
         self.assertTrue(builtin_entry.prefer_catalog_url)
-        self.assertEqual(builtin_entry.login_url, "https://sub2api.0api.cc.cd/login")
+        self.assertEqual(builtin_entry.login_url, "https://sub2api.0api.me/login")
         cred = get_account_credential("sub2api")
         self.assertIsNotNone(cred)
         self.assertEqual(cred[0], "ci-account-sub2api")

@@ -692,10 +692,10 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     ),
     _B(
         "0api",
-        "https://sub2api.0api.cc.cd/custom/activity",
+        "https://sub2api.0api.me/custom/activity",
         kind="sub2api",
         prefer_catalog_url=True,
-        login_url="https://sub2api.0api.cc.cd/login",
+        login_url="https://sub2api.0api.me/login",
     ),
     _N(
         "happycoding",
@@ -708,14 +708,14 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
         login_url="https://nailao.biz/sign-in",
     ),
-    # sub2api(sub2api.0api.cc.cd Sub2API 站)—— 2026-09-25 接入。
+    # sub2api(sub2api.0api.me Sub2API 站)—— 2026-09-25 接入。
     # 纯账密站(在 签到公益站账密.md 注册),签到位于 /custom/activity 的 iframe 中。
     _B(
         "sub2api",
-        "https://sub2api.0api.cc.cd/custom/activity",
+        "https://sub2api.0api.me/custom/activity",
         kind="sub2api",
         prefer_catalog_url=True,
-        login_url="https://sub2api.0api.cc.cd/login",
+        login_url="https://sub2api.0api.me/login",
     ),
     # dygyz(dygyz.pmcat.top, PM订阅公益站)—— 2026-09-25 接入。
     # LinuxDo OAuth 登录(复用 9222 共享 profile 的 mango 会话)。
@@ -1617,7 +1617,7 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             kind="pool",
         )
     if kind == "sub2api":
-        # sub2api.0api.cc.cd 专属 sub2api_checkin 流程:进入 /custom/activity
+        # sub2api.0api.me 专属 sub2api_checkin 流程:进入 /custom/activity
         # 定位 operations-ui iframe 并点击 #checkin 立即签到。
         return _B(
             name, url,
@@ -8790,9 +8790,9 @@ async def pool_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResul
 
 
 def is_sub2api_site(site_url: str) -> bool:
-    """sub2api.0api.cc.cd 专属站判定."""
+    """sub2api.0api.me 专属站判定."""
     u = (site_url or "").lower()
-    return "sub2api.0api.cc.cd" in u or ("sub2api" in u and "0api" in u)
+    return "sub2api.0api.me" in u or ("sub2api" in u and "0api" in u)
 
 
 def is_sub2api_name(name: str) -> bool:
@@ -8801,7 +8801,7 @@ def is_sub2api_name(name: str) -> bool:
 
 
 async def sub2api_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
-    """sub2api (sub2api.0api.cc.cd) 专属签到流程.
+    """sub2api (sub2api.0api.me) 专属签到流程.
 
     2026-09-25 接入:
     纯账号密码站(在 签到公益站账密.md 注册)。
@@ -8815,7 +8815,7 @@ async def sub2api_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRe
     严格遵守 P0: 复用 9222 共享 profile 登录态，禁止全清 Cookie。
     """
     kind = adapter.kind or "sub2api"
-    site_url = adapter.url or "https://sub2api.0api.cc.cd/custom/activity"
+    site_url = adapter.url or "https://sub2api.0api.me/custom/activity"
     print(f"  sub2api flow: {adapter.name}", flush=True)
 
     # 1. 确保登录态
@@ -13569,17 +13569,17 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
                 trusted_already_selectors=True,
             )
         if is_sub2api_site(url_from_note) or is_sub2api_name(name):
-            # sub2api.0api.cc.cd(Sub2API 站):纯账密登录,签到位于 /custom/activity 的 iframe 中。
+            # sub2api.0api.me(Sub2API 站):纯账密登录,签到位于 /custom/activity 的 iframe 中。
             return SiteAdapter(
                 name=name,
-                url="https://sub2api.0api.cc.cd/custom/activity",
+                url="https://sub2api.0api.me/custom/activity",
                 kind="sub2api",
                 sign_selectors=['#checkin', 'button:has-text("立即签到")'],
                 already_selectors=['#checkin-badge:has-text("今日已签")', 'text=今日已签到', 'text=今天已经签到过了', 'text=签到成功'],
                 trusted_sign_selectors=True,
                 trusted_already_selectors=True,
                 prefer_catalog_url=True,
-                login_url="https://sub2api.0api.cc.cd/login",
+                login_url="https://sub2api.0api.me/login",
             )
         if is_dygyz_site(url_from_note) or is_dygyz_name(name):
             # dygyz.pmcat.top(PM订阅公益站):LinuxDo 登录,签到位于 /dashboard 的「每日签到」卡片。

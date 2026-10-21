@@ -90,15 +90,15 @@ sites:
     url: https://newapi.do.techmob.net/profile
     kind: newapi_profile
     prefer_catalog_url: true
-  # 0api(0api.cc.cd / 原 newapi.0api.cc.cd 308 重定向至 sub2api.0api.cc.cd)—— 2026-09-23 接入，2026-09-25 迁移。
+  # 0api(0api.cc.cd / 原 newapi.0api.cc.cd 308 重定向至 sub2api.0api.me)—— 2026-09-23 接入，2026-09-25 迁移。
   # 纯账号密码登录(在 签到公益站账密.md 注册)。站方全站迁移且前台重构，签到从 /profile 迁移至
   # /custom/activity 的 operations-ui iframe 中。
   # 走专属 sub2api_checkin 流程:进入 /custom/activity → 定位 iframe → 点击 #checkin「立即签到」+ 确认门。
   - name: '0api'
-    url: https://sub2api.0api.cc.cd/custom/activity
+    url: https://sub2api.0api.me/custom/activity
     kind: sub2api
     prefer_catalog_url: true
-    login_url: https://sub2api.0api.cc.cd/login
+    login_url: https://sub2api.0api.me/login
     signs:
       - '#checkin'
       - 'button:has-text("立即签到")'
@@ -1014,15 +1014,15 @@ sites:
       - 'button:has-text("今日已签到")'
       - 'text=今日已签到'
       - 'text=签到成功'
-  # sub2api(sub2api.0api.cc.cd Sub2API 站)—— 2026-09-25 接入。纯账号密码登录
+  # sub2api(sub2api.0api.me Sub2API 站)—— 2026-09-25 接入。纯账号密码登录
   # (在 签到公益站账密.md 注册)。
   # 签到从旧 /profile 迁移至 /custom/activity 的 operations-ui iframe 中。
   # 走专属 sub2api_checkin 流程:进入 /custom/activity → 定位 iframe → 点击 #checkin「立即签到」+ 确认门。
   - name: 'sub2api'
-    url: https://sub2api.0api.cc.cd/custom/activity
+    url: https://sub2api.0api.me/custom/activity
     kind: sub2api
     prefer_catalog_url: true
-    login_url: https://sub2api.0api.cc.cd/login
+    login_url: https://sub2api.0api.me/login
     signs:
       - '#checkin'
       - 'button:has-text("立即签到")'
