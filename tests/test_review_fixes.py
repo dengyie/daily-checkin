@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1288,6 +1289,294 @@ class TurnstileTokenWaitTests(unittest.TestCase):
         self.assertIn("getBoundingClientRect", probe)
         self.assertIn("offsetParent", probe)
         self.assertIn("r.width > 0 || r.height > 0", probe)
+
+
+class _CtaLocator:
+    """One matched element: visibility, href, text, and click recording so a
+    test can prove the runner did NOT force-click a link."""
+
+    def __init__(self, visible=True, href=None, sink=None, sel="", text=""):
+        self.first = self
+        self._visible = visible
+        self._href = href
+        self._sink = sink
+        self._sel = sel
+        self._text = text
+
+    async def is_visible(self, **kwargs):
+        return self._visible
+
+    async def get_attribute(self, name):
+        return self._href if name == "href" else None
+
+    async def inner_text(self):
+        return self._text
+
+    async def click(self, **kwargs):
+        if self._sink is not None:
+            self._sink.append(self._sel)
+        return None
+
+    async def evaluate(self, *a, **k):
+        return None
+
+    async def count(self):
+        return 1
+
+    def nth(self, index):
+        return self if index == 0 else _CtaLocator(False, None, self._sink, self._sel)
+
+
+class _CtaMatches:
+    """Playwright-like query result exposing count()/nth()."""
+
+    def __init__(self, items):
+        self._items = list(items)
+        self.first = self._items[0] if self._items else _CtaLocator(False)
+
+    async def count(self):
+        return len(self._items)
+
+    def nth(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return _CtaLocator(False)
+
+
+class _CtaPage:
+    """Fake page: `matches` maps selector -> [(visible, href, text), ...]."""
+
+    def __init__(self, url, matches=None):
+        self.url = url
+        self.clicks: list[str] = []
+        self._matches = matches or {}
+
+    async def evaluate(self, *a, **k):
+        return ""
+
+    def locator(self, sel):
+        items = [
+            _CtaLocator(vis, href, self.clicks, sel, text)
+            for (vis, href, text) in self._matches.get(sel, [])
+        ]
+        return _CtaMatches(items)
+
+
+class LinuxdoCtaSelectionTests(unittest.TestCase):
+    """2026-10-22 regression: LINUXDO_SELECTORS' bare link matchers
+    (a:has-text("Linux DO"/"LinuxDO"/"Linux.do")) also matched LINUX DO's own
+    chrome — the authorize page nav brand (href="/") and footer (href to
+    linux.do) — plus account dashboard links. force-clicking those navigated
+    away from the OAuth confirm onto https://connect.linux.do/ (the account
+    detail/stats page), so 「允许」 was never clicked. Logs held 22 such
+    nav-brand hits and 14 tabs stranded on connect.linux.do/."""
+
+    def test_destination_rules(self):
+        m = load_runner("cta_dest_rules")
+        ok = m._linuxdo_cta_destination_ok
+        auth_base = "https://connect.linux.do/oauth2/authorize?client_id=x"
+        # LINUX DO's own chrome / account pages are never a CTA target
+        self.assertFalse(ok("/", auth_base))
+        self.assertFalse(ok("https://linux.do", auth_base))
+        self.assertFalse(ok("https://connect.linux.do/", "https://site.example/login"))
+        self.assertFalse(ok("https://connect.linux.do/dash/email", "https://site.example/login"))
+        self.assertFalse(ok("https://linux.do/u/mangoqwq", "https://site.example/login"))
+        # real OAuth initiators (site-relative or the authorize endpoint) are fine
+        self.assertTrue(ok("/api/oauth/linuxdo", "https://site.example/login"))
+        self.assertTrue(ok("https://connect.linux.do/oauth2/authorize?client_id=x",
+                           "https://site.example/login"))
+        # handler-only anchors cannot be resolved and stay clickable
+        self.assertTrue(ok("#", "https://site.example/login"))
+        self.assertTrue(ok("", "https://site.example/login"))
+        self.assertTrue(ok("javascript:void(0)", "https://site.example/login"))
+
+    def test_skips_linuxdo_chrome_and_dashboard_links(self):
+        m = load_runner("cta_skip_chrome")
+        auth = "https://connect.linux.do/oauth2/authorize?client_id=x"
+        cases = [
+            (auth, "/"),                                  # nav brand on authorize page
+            (auth, "https://linux.do"),                   # footer on authorize page
+            (auth, "https://connect.linux.do/"),          # dashboard (absolute)
+            ("https://site.example/login", "https://connect.linux.do/"),  # dashboard from site
+            ("https://site.example/login", "https://linux.do/u/mangoqwq"),  # profile
+        ]
+        for url, href in cases:
+            page = _CtaPage(url, {'a:has-text("Linux DO")': [(True, href, "LINUX DO")]})
+            used = asyncio.run(m.click_linuxdo_cta(page, timeout_each=10))
+            self.assertIsNone(used, (url, href))
+            self.assertEqual(page.clicks, [], (url, href))
+
+    def test_clicks_origin_oauth_link(self):
+        m = load_runner("cta_click_origin")
+        page = _CtaPage(
+            "https://site.example/login",
+            {'a:has-text("Linux DO")': [(True, "/api/oauth/linuxdo", "Linux DO")]},
+        )
+        used = asyncio.run(m.click_linuxdo_cta(page, timeout_each=10))
+        self.assertEqual(used, 'a:has-text("Linux DO")')
+        self.assertEqual(page.clicks, ['a:has-text("Linux DO")'])
+
+    def test_bare_cta_allowed_on_login_page_without_login_word(self):
+        """On a login surface a bare-token anchor IS the SSO entry even when its
+        destination names neither oauth nor login (e.g. /linuxdo). Gating on
+        intent there would turn a working site into NO_BUTTON."""
+        m = load_runner("cta_bare_login_page")
+        page = _CtaPage(
+            "https://site.example/login",
+            {'a:has-text("LinuxDO")': [(True, "/linuxdo", "LinuxDO")]},
+        )
+        used = asyncio.run(m.click_linuxdo_cta(page, timeout_each=10))
+        self.assertEqual(used, 'a:has-text("LinuxDO")')
+        self.assertEqual(page.clicks, ['a:has-text("LinuxDO")'])
+
+    def test_never_scans_cta_on_linuxdo_host(self):
+        """Structural guard: even a handler-href bare-token anchor on a
+        linux.do page is chrome, never an origin CTA — the login-page
+        exemption must not be able to reopen the original misclick."""
+        m = load_runner("cta_linuxdo_structural")
+        for url in ("https://connect.linux.do/",
+                    "https://connect.linux.do/oauth2/authorize?client_id=x",
+                    "https://linux.do/u/someone"):
+            page = _CtaPage(
+                url,
+                {'a:has-text("LinuxDO")': [(True, "#", "LinuxDO")],
+                 'button:has-text("LinuxDO")': [(True, "", "LinuxDO")]},
+            )
+            self.assertFalse(asyncio.run(m.has_linuxdo_cta(page)), url)
+            self.assertIsNone(
+                asyncio.run(m.click_linuxdo_cta(page, timeout_each=10)), url)
+            self.assertEqual(page.clicks, [], url)
+
+    def test_login_page_exemption_excludes_site_root_logo(self):
+        """The login-page exemption must not turn a brand logo into a CTA: an
+        anchor pointing at the site root is chrome even on a login page, and a
+        handler-only anchor carries no proof of intent."""
+        m = load_runner("cta_login_root_logo")
+        page = _CtaPage(
+            "https://site.example/login",
+            {'a:has-text("LinuxDO")': [
+                (True, "/", "LinuxDO"),
+                (True, "#", "LinuxDO"),
+            ]},
+        )
+        self.assertFalse(asyncio.run(m.has_linuxdo_cta(page)))
+        self.assertIsNone(asyncio.run(m.click_linuxdo_cta(page, timeout_each=10)))
+        self.assertEqual(page.clicks, [])
+
+    def test_allows_authorize_destination_link(self):
+        m = load_runner("cta_authorize_dest")
+        page = _CtaPage(
+            "https://site.example/login",
+            {'a:has-text("Linux DO")': [
+                (True, "https://connect.linux.do/oauth2/authorize?client_id=x", "Linux DO"),
+            ]},
+        )
+        used = asyncio.run(m.click_linuxdo_cta(page, timeout_each=10))
+        self.assertEqual(used, 'a:has-text("Linux DO")')
+
+    def test_has_cta_ignores_linuxdo_hosts(self):
+        m = load_runner("cta_host_guard")
+        # On LINUX DO's own pages the "Linux DO" chrome link must not read as a CTA.
+        page = _CtaPage("https://connect.linux.do/",
+                        {'a:has-text("Linux DO")': [(True, "/", "LINUX DO Connect")]})
+        self.assertFalse(asyncio.run(m.has_linuxdo_cta(page)))
+        page2 = _CtaPage("https://connect.linux.do/oauth2/authorize?client_id=x",
+                         {'a:has-text("Linux DO")': [(True, "/", "LINUX DO Connect")]})
+        self.assertFalse(asyncio.run(m.has_linuxdo_cta(page2)))
+        # On the origin site a real login button is still detected.
+        page3 = _CtaPage("https://site.example/login",
+                         {'button:has-text("使用 LinuxDO 继续")': [
+                             (True, None, "使用 LinuxDO 继续"),
+                         ]})
+        self.assertTrue(asyncio.run(m.has_linuxdo_cta(page3)))
+
+    def test_skips_site_nav_link_with_bare_text(self):
+        """jianzhile 2026-10-23 live probe: a site nav item "Linux.DO Credit
+        兑换" -> /console/linuxdo-credit matched `a:has-text("Linux.do")`. It is
+        site-relative, so the LINUX DO host guard alone lets it through; the
+        bare-text intent gate must reject it."""
+        m = load_runner("cta_nav_link")
+        page = _CtaPage(
+            "https://jianzhile.vip/console/personal",
+            {'a:has-text("Linux.do")': [
+                (True, "/console/linuxdo-credit", "Linux.DO Credit 兑换"),
+            ]},
+        )
+        self.assertFalse(asyncio.run(m.has_linuxdo_cta(page)))
+        self.assertIsNone(asyncio.run(m.click_linuxdo_cta(page, timeout_each=10)))
+        self.assertEqual(page.clicks, [])
+
+    def test_scans_past_chrome_match_to_real_cta(self):
+        """A chrome link sorting first in the DOM must not hide a real CTA that
+        shares the same bare selector."""
+        m = load_runner("cta_multi_match")
+        sel = 'a:has-text("Linux DO")'
+        page = _CtaPage(
+            "https://site.example/login",
+            {sel: [
+                (True, "https://connect.linux.do/", "LINUX DO"),   # chrome, first in DOM
+                (True, "/api/oauth/linuxdo", "Linux DO"),          # real CTA
+            ]},
+        )
+        used = asyncio.run(m.click_linuxdo_cta(page, timeout_each=10))
+        self.assertEqual(used, sel)
+        self.assertEqual(page.clicks, [sel])
+
+    def test_try_linuxdo_sso_skips_origin_cta_on_authorize_page(self):
+        """When a site hard-redirects to the authorize UI, try_linuxdo_sso must
+        not hunt for (or click) an origin CTA — that is how the nav brand used
+        to steal the flow."""
+        m = load_runner("sso_authorize_guard")
+        auth = "https://connect.linux.do/oauth2/authorize?client_id=x"
+
+        class P:
+            url = auth
+
+            async def evaluate(self, *a, **k):
+                return None
+
+        async def fake_page_url(page):
+            return auth
+
+        async def _run():
+            with mock.patch.object(m, "wait_out_cloudflare", mock.AsyncMock(return_value=None)), \
+                 mock.patch.object(m, "page_url", fake_page_url), \
+                 mock.patch.object(m, "page_cdp_target_id", mock.AsyncMock(return_value="t")), \
+                 mock.patch.object(m, "sso_target_snapshot", lambda *a, **k: []), \
+                 mock.patch.object(m, "register_sso_popup_tracker",
+                                   lambda *a, **k: {"events": 0}), \
+                 mock.patch.object(m, "click_linuxdo_cta", mock.AsyncMock()) as cta, \
+                 mock.patch.object(m, "SSO_TIMEOUT_S", 0.0), \
+                 mock.patch.object(m, "MIN_DWELL_AFTER_SSO_CLICK_S", 0.0):
+                res = await m.try_linuxdo_sso(P(), origin_host="", browser=None)
+                return res, cta
+
+        res, cta = asyncio.run(_run())
+        self.assertEqual(res, "TIMEOUT")
+        cta.assert_not_called()
+
+    def test_maybe_sso_approves_directly_on_authorize_page(self):
+        """Landing on the authorize page means approve, never re-enter SSO."""
+        m = load_runner("maybe_sso_authorize_guard")
+        auth = "https://connect.linux.do/oauth2/authorize?client_id=x"
+
+        class P:
+            url = auth
+
+            async def evaluate(self, *a, **k):
+                return None
+
+        async def _run():
+            with mock.patch.object(m, "page_url", mock.AsyncMock(return_value=auth)), \
+                 mock.patch.object(m, "_approve_linuxdo_authorize",
+                                   mock.AsyncMock(return_value='a:has-text("允许")')), \
+                 mock.patch.object(m, "has_linuxdo_cta", mock.AsyncMock()) as hc:
+                res = await m.maybe_sso_if_needed(P())
+                return res, hc
+
+        res, hc = asyncio.run(_run())
+        self.assertEqual(res, "OK")
+        hc.assert_not_called()
 
 
 if __name__ == "__main__":

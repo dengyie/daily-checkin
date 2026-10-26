@@ -444,7 +444,8 @@ class TestSuccessGate(unittest.TestCase):
         self.assertTrue(
             "is_valid_checkin_confirm" in after_spin or "has_success_text" in after_spin
         )
-        self.assertIn("return confirmed_done_result(", after_spin)
+        # 2026-10-27 起 post-spin 返回点统一走收益富化包装(内部仍 confirmed_done_result)
+        self.assertIn("return await _postclick_enriched_done_result(", after_spin)
 
     def test_page_text_contract_in_source(self):
         src = TARGET.read_text(encoding="utf-8")
@@ -516,6 +517,137 @@ class TestSuccessGate(unittest.TestCase):
         )
         self.assertTrue(self.m.is_valid_checkin_confirm(yeelo_signed))
         self.assertTrue(self.m.confirm_signal(yeelo_signed))
+
+    def test_zerocat_calendar_hint_not_today_confirm(self):
+        # zerocat 2026-10-27 regression: 改版后 /profile/checkin 未签页常驻
+        # 日历说明「点选已签到日期，查看奖励」,与日历「今天」格跨行拼成
+        # today+weak → 未签日恒报 ALREADY(10-24/25/26 三天实跑假阳性)。
+        # 以下为 2026-10-27 真机抓取的未签态页面原文(节选)。
+        zerocat_unsigned = (
+            "个人设置\n每日签到\n今天\n\n27\n\n星期二\n\n每天一点小收获\n\n"
+            "每日签到可获得随机额度奖励\n\n立即签到\n2026-10\n\n当月奖励 ¥0.2353\n\n"
+            "周日\n周一\n27\n今天\n28\n29\n30\n31\n\n点选已签到日期，查看奖励\n\n"
+            "累计签到\n46\n累计获得\n¥0.4986"
+        )
+        self.assertFalse(self.m.is_valid_checkin_confirm(zerocat_unsigned))
+        self.assertEqual(self.m.confirm_signal(zerocat_unsigned), "")
+        # 真已签态:按钮翻成「已签到」,弱文本层仍应能确认(不引入假阴性)
+        zerocat_signed = zerocat_unsigned.replace("立即签到", "已签到")
+        self.assertTrue(self.m.is_valid_checkin_confirm(zerocat_signed))
+        # 点击回执 toast 为强确认
+        self.assertTrue(self.m.is_valid_checkin_confirm("签到成功！获得 ¥0.0079"))
+
+    # ---- 2026-10-27 审计修复:post-click 金额漏采 + 盲回退 CTA 守卫 ----
+
+    def test_postclick_already_enriches_reward_from_wide_text(self):
+        """grok-heavy/guxiaomo/hcnsec 漏采根因:强文本门只读 900 字符,长侧栏页把
+        ~2.8s toast 挤出窗口;already_done 的 2000 字符窗命中裸「签到成功」后
+        组装结果时丢弃收益上下文。修复后 post-click 已签路径必须从宽窗文本
+        找回「获得 ¥N」行供 _enrich_result_balance 解析。"""
+        import asyncio
+
+        sidebar = "主页\n控制台\n模型广场\n" + "侧栏导航项\n" * 200  # >900 chars
+        body = sidebar + "今日已签到\n已签到\n\n签到成功！获得 ¥36.84"
+        action = self.m.ActionEvidence(
+            kind="dom_click", target='button:has-text("立即签到")',
+            attempted_at="2026-10-27T08:31:30",
+        )
+        page = _make_fake_selector_page(body, {})
+        res = asyncio.run(self.m._postclick_enriched_done_result(
+            page, "签到成功", kind="newapi_profile", action=action))
+        self.assertEqual(res.status, "OK")
+        self.assertIn("¥36.84", res.confirmation.summary)
+        self.assertEqual(
+            self.m._extract_reward_from_text(res.confirmation.summary), "+¥36.84")
+
+    def test_postclick_enrichment_skips_precheck_and_nonparseable(self):
+        """pre-click ALREADY(无点击)不得把站内记录/统计金额领成今日收益;
+        宽窗里没有任何可解析收益行时保持原 summary。"""
+        import asyncio
+
+        action_none = self.m.ActionEvidence(kind="none")
+        page = _make_fake_selector_page("已签到\n当前余额 $62.81\n累计获得 $308", {})
+        res = asyncio.run(self.m._postclick_enriched_done_result(
+            page, "btn:disabled:已签到", kind="newapi_profile", action=action_none))
+        self.assertEqual(res.status, "ALREADY")
+        self.assertEqual(res.confirmation.summary, "btn:disabled:已签到")
+        # post-click 但宽窗无可解析收益行 → 原样保留
+        action_click = self.m.ActionEvidence(kind="dom_click")
+        res2 = asyncio.run(self.m._postclick_enriched_done_result(
+            page, "btn:disabled:已签到", kind="newapi_profile", action=action_click))
+        self.assertEqual(res2.confirmation.summary, "btn:disabled:已签到")
+
+    def test_postclick_enrichment_cans_and_date_record_rejection(self):
+        """ark717/bohe 同款场景:罐头收益行可被宽窗找回;带日期前缀的历史记录行
+        (「10-26 签到成功 +¥2.6」)绝不能被领成今日收益。"""
+        import asyncio
+
+        action = self.m.ActionEvidence(kind="dom_click", target="sign")
+        # 罐头:fallback 路径(confirm_signal_line 找不到含信号可解析行 → 上下文兜底)
+        page_can = _make_fake_selector_page("已签到\n签到成功\n罐头+49.71", {})
+        res_can = asyncio.run(self.m._postclick_enriched_done_result(
+            page_can, "text-confirm", kind="arkengine", action=action))
+        self.assertIn("罐头+49.71", res_can.confirmation.summary)
+        self.assertEqual(
+            self.m._extract_reward_from_text(res_can.confirmation.summary), "罐头+49.71")
+        # 历史记录行:唯一可解析行带日期前缀 → 不富化
+        page_rec = _make_fake_selector_page("已签到\n10-26 签到成功 +¥2.6", {})
+        res_rec = asyncio.run(self.m._postclick_enriched_done_result(
+            page_rec, "text-confirm", kind="newapi_profile", action=action))
+        self.assertNotIn("+¥2.6", res_rec.confirmation.summary)
+
+    def test_already_done_blind_sel_kept_when_cta_disabled(self):
+        """守卫只压制启用中的 CTA:已签页按钮翻转 disabled 时,信任选择器命中
+        仍走盲回退(nodeseek 类真阳性路径保留)。"""
+        import asyncio
+
+        page = _make_fake_selector_page(
+            "已签到",
+            {
+                "text=已签到": dict(count=1, visible=True, disabled=False,
+                                    label="已签到"),
+                'button:has-text("立即签到")': dict(count=1, visible=True, disabled=True),
+            },
+        )
+        self.assertEqual(asyncio.run(self.m.already_done(
+            page, ["text=已签到"], trusted_already=True)), "sel:text=已签到")
+
+    def test_abuai_button_guard_short_circuits_when_logged_out(self):
+        """登出态(登录页)直接跳过轮询,不在 dismiss 每阶段烧满 12s。"""
+        import asyncio
+
+        page = _make_fake_selector_page("请先登录后再签到。\n用户名或密码", {})
+        self.assertFalse(asyncio.run(
+            self.m._ensure_abuai_checkin_button_ready(page, max_wait_s=12.0)))
+
+    def test_already_done_blind_sel_guarded_by_enabled_cta(self):
+        """信任选择器盲回退守卫:页面正文无业务确认 + 启用中的 立即签到 CTA
+        在场时,text=已签到 命中常驻说明文案不得判 ALREADY(zerocat 教训);
+        无 CTA 时保留盲回退(nodeseek 类站点依赖)。"""
+        import asyncio
+
+        zerocat_unsigned = (
+            "个人设置\n每日签到\n今天\n\n27\n\n星期二\n\n每天一点小收获\n\n"
+            "每日签到可获得随机额度奖励\n\n立即签到\n2026-10\n\n当月奖励 ¥0.2353\n\n"
+            "27\n今天\n28\n29\n30\n31\n\n点选已签到日期，查看奖励\n\n累计签到\n46"
+        )
+        page_cta = _make_fake_selector_page(
+            zerocat_unsigned,
+            {
+                "text=已签到": dict(count=1, visible=True, disabled=False,
+                                    label="点选已签到日期，查看奖励"),
+                'button:has-text("立即签到")': dict(count=1, visible=True, disabled=False),
+            },
+        )
+        self.assertEqual(asyncio.run(self.m.already_done(
+            page_cta, ["text=已签到"], trusted_already=True)), "")
+        page_no_cta = _make_fake_selector_page(
+            zerocat_unsigned,
+            {"text=已签到": dict(count=1, visible=True, disabled=False,
+                                 label="点选已签到日期，查看奖励")},
+        )
+        self.assertEqual(asyncio.run(self.m.already_done(
+            page_no_cta, ["text=已签到"], trusted_already=True)), "sel:text=已签到")
 
     def test_linuxdo_authorize_and_turnstile_contracts(self):
         auth = list(self.m.AUTHORIZE_SELECTORS)
@@ -1854,6 +1986,61 @@ class TestAccountLoginFlow(unittest.TestCase):
         )
         self.assertEqual(res, "FAIL")  # submit 按钮不可见→ FAIL(但已走到 fill 阶段,非 NO_BUTTON)
 
+    def test_verification_polls_through_slow_spa_redirect(self):
+        """提交后 SPA 慢跳转(先 /login?expired=true 再 /console)不得误判 FAIL.
+
+        tokenrouter 2026-10-23 实测: 提交后 2.5s 仍在 /login?expired=true,
+        数秒后才跳 /console; 原先一次性校验会返回 FAIL 并丢弃一个有效会话.
+        """
+        class Loc:
+            @property
+            def first(self):
+                return self
+
+            async def is_visible(self, timeout=None):
+                return True
+
+            async def click(self, timeout=None, force=False):
+                return None
+
+            async def evaluate(self, *a, **k):
+                return "checkbox"
+
+        class SlowPage:
+            def locator(self, sel):
+                return Loc()
+
+        async def fake_fill(page, selectors, value, timeout_each=800):
+            return selectors[0]
+
+        state = {"n": 0}
+
+        async def fake_url(page):
+            state["n"] += 1
+            if state["n"] <= 2:
+                return "https://www.tokenrouter.tech/login?expired=true"
+            return "https://www.tokenrouter.tech/console"
+
+        async def fake_text(page, n=600):
+            return "控制台 当前余额 $16.38"
+
+        adapter = self.m.SiteAdapter(
+            name="tokenrouter", url="https://www.tokenrouter.tech/console/personal"
+        )
+        with mock.patch.object(self.m, "check_terms", mock.AsyncMock(return_value=0)), \
+             mock.patch.object(self.m, "page_url", fake_url), \
+             mock.patch.object(self.m, "page_text", fake_text), \
+             mock.patch.object(self.m, "LOGIN_VERIFY_POLL_S", 0.01):
+            res = self.m.asyncio.run(
+                self.m.try_account_login_if_needed(
+                    SlowPage(), adapter,
+                    _get_credential=lambda name: ("USERNAME", "not-a-real-password"),
+                    _fill_first_visible=fake_fill,
+                )
+            )
+        self.assertEqual(res, "OK")
+        self.assertGreater(state["n"], 2)
+
     def test_fill_first_visible_fills_first_visible_selector(self):
         filled = {}
 
@@ -2009,6 +2196,49 @@ class _FakePage:
         if self.eval_error is not None:
             raise self.eval_error
         return dict(self.fetch_result or {})
+
+
+class _FakeLoc:
+    """Locator double configurable per selector (already_done / CTA guard tests)."""
+
+    def __init__(self, *, count=0, visible=False, disabled=False, label=""):
+        self._c, self._v, self._d, self._l = count, visible, disabled, label
+
+    @property
+    def first(self):
+        return self
+
+    def nth(self, i):
+        return self
+
+    async def count(self):
+        return self._c
+
+    async def is_visible(self, timeout=0):
+        return self._v
+
+    async def is_disabled(self):
+        return self._d
+
+    async def inner_text(self, timeout=0):
+        return self._l
+
+
+def _make_fake_selector_page(body, locators):
+    """Page double: evaluate returns `body`; locator(sel) served from `locators`
+    (selector -> _FakeLoc kwargs), everything else an empty invisible locator."""
+
+    class _FakeSelPage:
+        def __init__(self):
+            self.url = "https://api.example.com/profile"
+
+        def locator(self, sel):
+            return _FakeLoc(**(locators.get(sel) or {}))
+
+        async def evaluate(self, js):
+            return body
+
+    return _FakeSelPage()
 
 
 class TestNotifyDailySummary(unittest.TestCase):
@@ -3896,6 +4126,10 @@ class TestSitesYaml(unittest.TestCase):
             "sub2api（https://sub2api.0api.me）\n"
             "ci-account-sub2api\n"
             "ci-password-sub2api\n"
+            "\n"
+            "tokenrouter（https://www.tokenrouter.tech）\n"
+            "ci-account-tokenrouter\n"
+            "ci-password-tokenrouter\n"
         )
         fd, path = tempfile.mkstemp(suffix=".md")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -3989,6 +4223,35 @@ class TestSitesYaml(unittest.TestCase):
         joined = " ".join(a.sign_selectors)
         self.assertIn("立即签到", joined)
         self.assertTrue(a.already_selectors)
+
+    def test_yaml_registers_zerocat_entry(self):
+        """zerocat 2026-10-27 改版守卫:URL 迁到 /profile/checkin,already 必须
+        钉死 button:text-is 精确匹配——页面常驻「点选已签到日期」说明文案,
+        任何 text= 已签到/签到成功 子串选择器都会在未签日假 ALREADY。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "zerocat"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 zerocat 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://zero.cat/profile/checkin")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn('button:has-text("立即签到")', joined_signs)
+        # 子串选择器地雷清除:already 不得含裸 text= 或宽松 button:has-text 已签到
+        joined_already = " ".join(a.already_selectors)
+        self.assertNotIn("text=已签到", joined_already)
+        self.assertNotIn("text=签到成功", joined_already)
+        self.assertNotIn('button:has-text("已签到")', joined_already)
+        for sel in a.already_selectors:
+            self.assertTrue(
+                sel.startswith("button:text-is("),
+                f"zerocat already 选择器必须精确 button:text-is: {sel}",
+            )
+        # LinuxDO OAuth 站:不得配置 prefer_cta_before_auth(未登录必须先走 SSO)
+        self.assertFalse(a.prefer_cta_before_auth)
 
     def test_yaml_registers_aihappy_entry(self):
         """sites.yaml 的 aihappy 条目解析为 kind=browser,带 quota bar 精确选择器与已签签名。"""
@@ -4340,6 +4603,180 @@ class TestSitesYaml(unittest.TestCase):
         self.assertIsNotNone(cred)
         self.assertEqual(cred[0], "ci-account-hcnsec")
         self.assertTrue(len(cred[1]) > 0)
+
+    def test_yaml_registers_tokenrouter_entry(self):
+        """sites.yaml 的 tokenrouter 条目解析为 newapi_profile,/console/personal,/login,且账密注册有效。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "tokenrouter"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 tokenrouter 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://www.tokenrouter.tech/console/personal")
+        self.assertEqual(a.login_url, "https://www.tokenrouter.tech/login")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("立即签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("今日已签到", joined_already)
+        resolved = resolve_site("tokenrouter", "https://www.tokenrouter.tech/console/personal")
+        self.assertEqual(resolved.url, "https://www.tokenrouter.tech/console/personal")
+        self.assertEqual(resolved.login_url, "https://www.tokenrouter.tech/login")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "tokenrouter"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 tokenrouter")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://www.tokenrouter.tech/console/personal")
+        self.assertEqual(builtin_entry.login_url, "https://www.tokenrouter.tech/login")
+        cred = get_account_credential("tokenrouter")
+        self.assertIsNotNone(cred)
+        self.assertEqual(cred[0], "ci-account-tokenrouter")
+        self.assertTrue(len(cred[1]) > 0)
+
+    def test_yaml_registers_ai_facai_entry(self):
+        """sites.yaml 的 AI 发财网条目解析为 newapi_profile/dashboard,且无账密(LinuxDO 登录)。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "AI 发财网"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 AI 发财网 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://ai.facai.cloudns.org/dashboard")
+        self.assertEqual(a.login_url, "")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("已签到", joined_already)
+        resolved = resolve_site("AI 发财网", "https://ai.facai.cloudns.org/dashboard")
+        self.assertEqual(resolved.url, "https://ai.facai.cloudns.org/dashboard")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "AI 发财网"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 AI 发财网")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://ai.facai.cloudns.org/dashboard")
+        # LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
+        self.assertIsNone(get_account_credential("AI 发财网"))
+
+    def test_yaml_registers_hyxapi_entry(self):
+        """sites.yaml 的 HyxAPI 条目解析为 newapi_profile//topup,且无账密(LinuxDO 登录)。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "HyxAPI"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 HyxAPI 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://hyxware.com/topup")
+        self.assertEqual(a.login_url, "")
+        joined_signs = " ".join(a.sign_selectors)
+        self.assertIn("签到", joined_signs)
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("已签到", joined_already)
+        resolved = resolve_site("HyxAPI", "https://hyxware.com/topup")
+        self.assertEqual(resolved.url, "https://hyxware.com/topup")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "HyxAPI"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 HyxAPI")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://hyxware.com/topup")
+        # LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
+        self.assertIsNone(get_account_credential("HyxAPI"))
+
+    def test_yaml_registers_abuai_entry(self):
+        """sites.yaml 的 AbuAI 条目解析为 newapi_profile/welfare,sign 钉死「领取今日签到奖励」,无账密。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "AbuAI"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 AbuAI 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://www.abuai.chat/console/welfare")
+        self.assertEqual(a.login_url, "")
+        # 福利中心同页有抽奖/补签/每周领取按钮,sign 必须钉死精确文案而非裸「签到」
+        self.assertIn("领取今日签到奖励", " ".join(a.sign_selectors))
+        self.assertIn("今日已签到", " ".join(a.already_selectors))
+        resolved = resolve_site("AbuAI", "https://www.abuai.chat/console/welfare")
+        self.assertEqual(resolved.url, "https://www.abuai.chat/console/welfare")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "AbuAI"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 AbuAI")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://www.abuai.chat/console/welfare")
+        self.assertIn("领取今日签到奖励", " ".join(builtin_entry.sign_selectors))
+        # LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
+        self.assertIsNone(get_account_credential("AbuAI"))
+
+    def test_yaml_registers_superqiyu_entry(self):
+        """sites.yaml 的 superqiyu 条目解析为 newapi_profile//profile,通用签到选择器,无账密。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "superqiyu"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 superqiyu 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://www.superqiyu.org/profile")
+        self.assertEqual(a.login_url, "")
+        # 标准 New API 默认前端:走通用「签到/已签到」判定,无需自定义选择器
+        self.assertIn("签到", " ".join(a.sign_selectors))
+        self.assertIn("已签到", " ".join(a.already_selectors))
+        resolved = resolve_site("superqiyu", "https://www.superqiyu.org/profile")
+        self.assertEqual(resolved.url, "https://www.superqiyu.org/profile")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "superqiyu"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 superqiyu")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://www.superqiyu.org/profile")
+        # LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
+        self.assertIsNone(get_account_credential("superqiyu"))
+
+    def test_yaml_registers_ssftt_entry(self):
+        """sites.yaml 的 ssftt 条目解析为 newapi_profile//profile,login_url 显式,纯账密站。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "ssftt"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 ssftt 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://api.ssftt.vip/profile")
+        # 纯账密站:标准登录入口显式钉死,避免派生路径猜错
+        self.assertEqual(a.login_url, "https://api.ssftt.vip/login")
+        self.assertIn("签到", " ".join(a.sign_selectors))
+        self.assertIn("已签到", " ".join(a.already_selectors))
+        resolved = resolve_site("ssftt", "https://api.ssftt.vip/profile")
+        self.assertEqual(resolved.url, "https://api.ssftt.vip/profile")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "ssftt"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 ssftt")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://api.ssftt.vip/profile")
+        self.assertEqual(builtin_entry.login_url, "https://api.ssftt.vip/login")
 
     def test_yaml_registers_sub2api_entry(self):
         """sites.yaml 的 sub2api 条目解析为 sub2api,/custom/activity,prefer_catalog_url,且账密注册有效。"""
@@ -7766,6 +8203,221 @@ class TestJianzhileCheckin(unittest.TestCase):
             self.assertEqual(req.headers.get("Authorization"), "Bearer sk-custom-secret-key-12345")
             data = json.loads(req.data.decode("utf-8"))
             self.assertEqual(data["model"], "custom-glm-vision")
+
+
+class TestPipiwangcomSpaLogin(unittest.TestCase):
+    """皮皮智绘 2026-10-25 改版:登录入口在 SPA 遮罩层,通用 SSO 扫不到。
+
+    当日 11:33 实证:未登录落地页只有「进入控制台」,签到按钮是隐藏 DOM;
+    通用流程不识别遮罩层 → no_button。修复:本站专属先登录再走通用 CTA 扫描。
+    """
+
+    def setUp(self):
+        self.m = load_mod()
+
+    def test_is_pipiwangcom_site(self):
+        m = self.m
+        self.assertTrue(m.is_pipiwangcom_site("https://img.pipiwangcom.com/"))
+        self.assertTrue(m.is_pipiwangcom_site("https://img.pipiwangcom.com/profile"))
+        self.assertFalse(m.is_pipiwangcom_site("https://example.com/"))
+        self.assertFalse(m.is_pipiwangcom_site(""))
+
+    def test_login_clicks_overlay_then_authorizes(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        m = self.m
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://img.pipiwangcom.com/"
+                self.clicks = []
+                self.logged_in = False
+
+            async def click(self, selector, timeout=0):
+                self.clicks.append(selector)
+                if "Linux.do" in selector:
+                    self.url = (
+                        "https://connect.linux.do/oauth2/authorize"
+                        "?response_type=code&client_id=test"
+                    )
+
+        page = FakePage()
+
+        async def fake_console_ready(_page):
+            return page.logged_in
+
+        async def fake_approve(_page):
+            page.logged_in = True
+            page.url = "https://img.pipiwangcom.com/"
+            return "a:has-text('允许')"
+
+        with patch.object(m, "SSO_TIMEOUT_S", 3), \
+             patch.object(m, "_pipiwangcom_console_ready", fake_console_ready), \
+             patch.object(m, "_approve_linuxdo_authorize", fake_approve), \
+             patch.object(m.asyncio, "sleep", AsyncMock()):
+            status = asyncio.run(m._pipiwangcom_login(page))
+
+        self.assertEqual(status, "OK")
+        self.assertIn('button.btn-primary:has-text("进入控制台")', page.clicks)
+        self.assertIn('button.btn-linux:has-text("Linux.do")', page.clicks)
+
+    def test_login_skips_opener_when_overlay_already_open(self):
+        """遮罩层已弹开时不得再点「进入控制台」(否则宽泛「登录」会提交空账密表单)。"""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        m = self.m
+
+        class First:
+            async def is_visible(self, timeout=0):
+                return True
+
+        class Loc:
+            first = First()
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://img.pipiwangcom.com/"
+                self.clicks = []
+                self.logged_in = False
+
+            def locator(self, selector):
+                return Loc()
+
+            async def click(self, selector, timeout=0):
+                self.clicks.append(selector)
+                if "Linux.do" in selector:
+                    self.url = "https://connect.linux.do/oauth2/authorize?client_id=test"
+
+        page = FakePage()
+
+        async def fake_console_ready(_page):
+            return page.logged_in
+
+        async def fake_approve(_page):
+            page.logged_in = True
+            page.url = "https://img.pipiwangcom.com/"
+            return "a:has-text('允许')"
+
+        with patch.object(m, "SSO_TIMEOUT_S", 3), \
+             patch.object(m, "_pipiwangcom_console_ready", fake_console_ready), \
+             patch.object(m, "_approve_linuxdo_authorize", fake_approve), \
+             patch.object(m.asyncio, "sleep", AsyncMock()):
+            status = asyncio.run(m._pipiwangcom_login(page))
+
+        self.assertEqual(status, "OK")
+        self.assertFalse(any("进入控制台" in c for c in page.clicks))
+        self.assertIn('button.btn-linux:has-text("Linux.do")', page.clicks)
+
+    def test_login_returns_no_button_without_overlay_cta(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        m = self.m
+
+        class FakePage:
+            url = "https://img.pipiwangcom.com/"
+
+            async def click(self, selector, timeout=0):
+                raise RuntimeError("not found")
+
+        with patch.object(m, "SSO_TIMEOUT_S", 1), \
+             patch.object(m.asyncio, "sleep", AsyncMock()):
+            status = asyncio.run(m._pipiwangcom_login(FakePage()))
+
+        self.assertEqual(status, "NO_BUTTON")
+
+    def test_dismiss_notice_clicks_visible_button(self):
+        """公告遮罩 #noticeModal 会拦住签到按钮点击;先点可见的关闭按钮。"""
+        import asyncio
+
+        m = self.m
+
+        class Loc:
+            def __init__(self, visible):
+                self.visible = visible
+                self.clicked = False
+
+            async def is_visible(self, timeout=0):
+                return self.visible
+
+            async def click(self, timeout=0):
+                self.clicked = True
+
+        class FakePage:
+            def __init__(self, visible_selectors):
+                self.locs = {sel: Loc(sel in visible_selectors) for sel in visible_selectors}
+
+            def locator(self, selector):
+                loc = self.locs.setdefault(selector, Loc(False))
+                return type("W", (), {"first": loc})()
+
+        page = FakePage({"#btnNoticeOk"})
+        asyncio.run(m._pipiwangcom_dismiss_notice(page))
+        self.assertTrue(page.locs["#btnNoticeOk"].clicked)
+
+    def test_dismiss_notice_noop_without_modal(self):
+        import asyncio
+
+        m = self.m
+
+        class Loc:
+            async def is_visible(self, timeout=0):
+                return False
+
+            async def click(self, timeout=0):
+                raise AssertionError("must not click an invisible notice button")
+
+        class FakePage:
+            def locator(self, selector):
+                return type("W", (), {"first": Loc()})()
+
+        asyncio.run(m._pipiwangcom_dismiss_notice(FakePage()))  # 不抛异常即通过
+
+    def test_source_wires_pipiwangcom_login_before_generic(self):
+        """源码守卫:本站登录钩子必须在通用 SSO/CTA 扫描之前接入。"""
+        src = TARGET.read_text(encoding="utf-8")
+        hook = re.search(
+            r"if is_pipiwangcom_site\(site_url\).*?_pipiwangcom_console_ready\(page\).*?"
+            r"_pipiwangcom_login\(page\)",
+            src,
+            re.S,
+        )
+        self.assertIsNotNone(hook, "pipiwangcom 登录钩子必须在 legacy_checkin_on_page 接入")
+        self.assertIn('button.btn-linux:has-text("Linux.do")', src)
+        self.assertIn("#btnNoticeOk", src)
+        body = src[src.index("async def legacy_checkin_on_page"):]
+        self.assertLess(
+            body.index("await _pipiwangcom_login(page)"),
+            body.index("maybe_sso_if_needed(page, browser=browser)"),
+        )
+
+    def test_source_orders_pipiwangcom_login_after_block_classification(self):
+        """Chrome 错误页/CF 墙必须先被归类,否则会被误报成 auth_required。"""
+        src = TARGET.read_text(encoding="utf-8")
+        body = src[src.index("async def legacy_checkin_on_page"):]
+        login_at = body.index("await _pipiwangcom_login(page)")
+        self.assertGreater(
+            login_at, body.index("initial_block = classify_page_block("),
+            "pipiwangcom 登录钩子必须排在 CF/upstream 分类之后",
+        )
+        self.assertLess(
+            login_at, body.index("maybe_sso_if_needed(page, browser=browser)"),
+            "钩子必须在通用 SSO 扫描之前",
+        )
+
+    def test_dismiss_obstructing_dialogs_handles_pipiwangcom_notice(self):
+        """公告在每个阶段都该被清掉(pre_already/pre_cta/pre_click),放进通用 dismiss。"""
+        src = TARGET.read_text(encoding="utf-8")
+        block = re.search(
+            r"async def dismiss_obstructing_dialogs.*?return total_closed",
+            src,
+            re.S,
+        )
+        self.assertIsNotNone(block)
+        self.assertIn('if "pipiwangcom.com" in url_str:', block.group(0))
+        self.assertIn("_pipiwangcom_dismiss_notice(page)", block.group(0))
 
 
 if __name__ == "__main__":

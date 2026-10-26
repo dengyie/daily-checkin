@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import async_playwright
 
@@ -970,6 +970,45 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     _N("yiming", "https://newapi.yimingtalk.online/profile"),
     _N("maimaidx", "https://newapi.maimaidx.icu/profile"),
     _N("chuanapi", "https://chuanapi.com/profile"),
+    _N("orbitix", "https://new.orbitix.site/profile"),
+    # tokenrouter(tokenrouter.tech / JUAPI):标准 New API 个人中心;未登录跳 /login,
+    # 登录页要求先勾选同意《用户协议》《隐私政策》(用户本人确认,自动流程不代勾)。
+    _N(
+        "tokenrouter",
+        "https://www.tokenrouter.tech/console/personal",
+        login_url="https://www.tokenrouter.tech/login",
+    ),
+    # AI 发财网(ai.facai.cloudns.org):New API fork,签到在 /dashboard「每日签到」
+    # 卡片(button「签到」,奖励 $2.00~$10.00)。LinuxDO OAuth 登录,无账密,
+    # 复用 9222 LinuxDO 会话,失效时由 LinuxDO SSO 兜底。
+    _N("AI 发财网", "https://ai.facai.cloudns.org/dashboard"),
+    # HyxAPI(hyxware.com/topup):New API 二改自研 React SPA,签到卡片在钱包
+    # 充值页 /topup(section[data-wallet-checkin],GET/POST /api/user/checkin)。
+    # button「签到」/已签「今日已签到」,LinuxDO OAuth 登录,无账密,走通用
+    # newapi_profile 通道,复用 9222 LinuxDO 会话,失效时由 SSO 兜底。
+    _N("HyxAPI", "https://hyxware.com/topup"),
+    # AbuAI(www.abuai.chat/console/welfare):New API 二改自研 React SPA,签到在
+    # 福利中心「每日签到」卡片(POST /api/user/welfare/checkin)。未签 button
+    # 「领取今日签到奖励」,已签「今日已签到」(disabled);sign 钉死精确文案,
+    # 同页有抽奖/补签/每周领取按钮,裸「签到」有歧义。LinuxDO OAuth,无账密。
+    _N(
+        "AbuAI",
+        "https://www.abuai.chat/console/welfare",
+        signs=['button:text-is("领取今日签到奖励")', 'button:has-text("领取今日签到奖励")'],
+        already=['button:text-is("今日已签到")', 'text=签到成功，获得', 'text=今日已签到'],
+    ),
+    # superqiyu(www.superqiyu.org, 奇遇API):标准 New API 默认前端,/profile
+    # 「每日签到」卡片(立即签到/今日已签到),通用选择器即可。LinuxDO OAuth
+    # 登录,无账密,复用 9222 LinuxDO 会话,失效时由 SSO 兜底。
+    _N("superqiyu", "https://www.superqiyu.org/profile"),
+    # ssftt(api.ssftt.vip, 蓝鹰 N站):标准 New API 默认前端,纯账密站
+    # (账密在 签到公益站账密.md + staging data/accounts.md),/profile 走通用
+    # 「立即签到/今日已签到」判定。login_url 钉死标准登录入口。
+    _N(
+        "ssftt",
+        "https://api.ssftt.vip/profile",
+        login_url="https://api.ssftt.vip/login",
+    ),
     # mailhub(mailhub.pigeonw.com/wallet):邮箱额度站,POST /wallet/checkin。
     # 同页「兑换」不是签到,选择器钉死 button.primary「立即签到」。
     # 默认 LinuxDO 登录(login_url=/login);已登录页有「退出登录」,不走 SSO。
@@ -3278,9 +3317,11 @@ def is_valid_checkin_confirm(text: str) -> bool:
             # 「已签到 N 天」绝不与下方的「今天(还)未签到」跨行拼成假已签到
             # (yeelo 2026-08-26: 已签到 4 天 + 今天还未签到 → 被误判 today+weak,
             # 实际按钮没点)。若「已签到」后紧跟 N 天/N 次统计,禁止跨行拼「今天」。
+            # zerocat 2026-10-27 改版:日历常驻说明「点选已签到日期，查看奖励」与
+            # 日历「今天」格跨行拼合同样假阳性(未签页恒真),排除「已签到日期」。
             if re.search(
-                r"已签到(?!\s*\d+\s*(?:天|次))(?:[\s\S]{0,40}?(?:今天|今日))"
-                r"|(?:今天|今日)[\s\S]{0,40}?已签到(?!\s*\d+\s*(?:天|次))",
+                r"已签到(?!\s*\d+\s*(?:天|次))(?!日期)(?:[\s\S]{0,40}?(?:今天|今日))"
+                r"|(?:今天|今日)[\s\S]{0,40}?已签到(?!\s*\d+\s*(?:天|次))(?!日期)",
                 t,
             ):
                 return True
@@ -3382,6 +3423,51 @@ def confirmed_done_result(
         transition="PENDING_TO_DONE" if post_click else "NONE",
         attribution="runner" if post_click else "precheck",
     )
+
+
+# Post-click reward enrichment: a fresh grant toast never opens with a date,
+# so any date-bearing parse is a history/calendar record line — never claim it
+# as today's reward (「10-26 签到成功 +¥2.6」 style rows).
+_REWARD_DATE_PREFIX_RE = re.compile(r"\d{1,2}[-/]\d{1,2}|\d{1,2}月\d{1,2}日")
+
+
+async def _postclick_enriched_done_result(
+    page, sig: str, *, kind: str, action: ActionEvidence | None
+) -> CheckinResult:
+    """confirmed_done_result + reward context recovered from the wide page text.
+
+    Post-click done-state confirms resolve to bare snippets (「签到成功」):
+    the strong-text gate only reads a 900-char window that long sidebar-first
+    pages push the ~2.8s reward toast out of, so the already-path's wider
+    2000-char read matches first — and confirm_signal drops the toast's
+    「获得 ¥N」 tail. Re-read the same wide window and prefer the reward-bearing
+    line so _enrich_result_balance can parse the fresh grant into reward_text
+    (grok-heavy/guxiaomo/hcnsec 2026-10 审计: 月漏采 16/16/12 天). Only applies
+    to post-click results — pre-click ALREADY has no fresh grant to attribute,
+    and record/calendar amounts must never be claimed as today's reward.
+    Lines carrying a date prefix (「10-26 签到成功 +¥2.6」历史记录) are rejected:
+    a fresh toast never opens with a date, so a date-bearing parse is a history
+    record, not today's grant.
+    """
+    result = confirmed_done_result(sig, adapter=kind, action=action)
+    if action is None or action.kind == "none":
+        return result
+    if _extract_reward_from_text(sig):
+        return result
+    try:
+        text_wide = await page_text(page, 2000)
+    except Exception:
+        return result
+    line = confirm_signal_line(text_wide, sig)
+    if not _extract_reward_from_text(line):
+        line = reward_context_summary(text_wide, sig)
+    if (
+        _extract_reward_from_text(line)
+        and line != sig
+        and not _REWARD_DATE_PREFIX_RE.search(line)
+    ):
+        result.confirmation = dom_confirmation(line, done_state=True)
+    return result
 
 
 async def click_first_visible(page, selectors: list[str], timeout_each: int = 800) -> str | None:
@@ -4159,9 +4245,245 @@ async def check_terms(page) -> int:
     return hits
 
 
+# Bare-token anchor selectors: the text carries only "LinuxDO" / "Linux DO" /
+# "Linux.do" / "Continue with Linux". These also match unrelated chrome and nav
+# links, so they need an intent check on top of the href check. Selectors that
+# spell out a login action ("使用 LinuxDO 继续", ...) are unambiguous and skip it.
+_LINUXDO_BARE_ANCHORS = frozenset({
+    'a:has-text("LinuxDO")',
+    'a:has-text("Linux DO")',
+    'a:has-text("Linux.do")',
+    'a:has-text("Continue with Linux")',
+})
+
+# Textual evidence that an element starts a login instead of being a nav item
+# (jianzhile 2026-10-23 live probe: "Linux.DO Credit 兑换" -> /console/linuxdo-credit).
+_LINUXDO_LOGIN_WORDS = (
+    "登录", "登陆", "继续", "授权", "绑定", "关联",
+    "sign in", "signin", "log in", "login", "continue",
+    "authorize", "approve", "connect",
+)
+
+# Destinations that plausibly initiate OAuth even when the anchor text is bare.
+_LINUXDO_OAUTH_INIT_RE = re.compile(
+    r"oauth|authorize|(?:^|/)auth(?:/|$)|login|signin|sign-in|sso|callback",
+    re.I,
+)
+
+# How many DOM matches of a selector to inspect before giving up. Chrome and a
+# real CTA can share the same bare text; scanning past the first match stops a
+# chrome link that sorts first from hiding the real CTA behind it.
+_LINUXDO_CTA_SCAN_LIMIT = 5
+
+
+def _linuxdo_own_host(host: str) -> bool:
+    h = (host or "").lower().rstrip(".")
+    return h == "linux.do" or h.endswith(".linux.do")
+
+
+def _linuxdo_handler_href(href: str) -> bool:
+    """True for hrefs that carry no destination (JS-only / same-page anchors)."""
+    h = (href or "").strip()
+    return not h or h.startswith("#") or h.lower().startswith("javascript:")
+
+
+def _linuxdo_site_root_href(href: str) -> bool:
+    """True when a href points at the site's home page (a logo/brand link)."""
+    h = (href or "").strip()
+    if _linuxdo_handler_href(h):
+        return False
+    try:
+        path = (urlparse(h).path or "").lower().rstrip("/")
+    except Exception:
+        return False
+    return path in {"", "/index", "/index.html", "/home", "index", "index.html"}
+
+
+async def _linuxdo_page_context(page) -> tuple[str, bool]:
+    """Return ``(base_url, on_auth_page)`` for the current document.
+
+    Bare-token anchors are only suspicious when the page is not asking for a
+    login. On a login/auth surface every non-chrome anchor is a plausible SSO
+    entry — some sites route it through a path that names neither oauth nor
+    login (e.g. ``/linuxdo``) — so the intent gate stays off there and the
+    href destination guard alone decides.
+    """
+    try:
+        base = await page_url(page)
+    except Exception:
+        base = ""
+    try:
+        on_auth = is_auth_page_url(base)
+    except Exception:
+        on_auth = False
+    if not on_auth:
+        try:
+            on_auth = looks_logged_out(await page_text(page, 400))
+        except Exception:
+            on_auth = False
+    return base, on_auth
+
+
+def _linuxdo_cta_destination_ok(href: str, base_url: str) -> bool:
+    """Whether a matched LINUXDO_SELECTORS candidate may be clicked as a CTA.
+
+    LINUXDO_SELECTORS deliberately carries broad text matchers ("Linux DO",
+    "LinuxDO", "Linux.do"). LINUX DO's own pages render chrome links with that
+    exact text — the authorize page's nav brand (``<a href="/">LINUX DO
+    Connect</a>``) and footer (``<a href="https://linux.do">LINUX DO</a>``), plus
+    the account dashboard at ``connect.linux.do/``. force-clicking one of those
+    navigates away from the OAuth authorize UI onto the account page and drops
+    the confirm step. 2026-10-22: 22 nav-brand hits and tabs stranded on
+    https://connect.linux.do/ across fengwind/landppt/pool/67/pipiwangcom.
+
+    A real CTA never targets LINUX DO's own chrome. On a linux.do host only the
+    OAuth authorize endpoint is allowed; empty or handler-only hrefs (a site's
+    own button rendered as ``<a href="#" onclick=...>``) stay allowed.
+
+    Unparseable hrefs fail open by design: a real CTA is never unparseable, and
+    refusing would turn a markup quirk into NO_BUTTON. Intent for bare-text
+    anchors is enforced separately by ``_linuxdo_bare_anchor_ok``.
+    """
+    if _linuxdo_handler_href(href):
+        return True
+    try:
+        parsed = urlparse(urljoin(base_url or "", href.strip()))
+    except Exception:
+        return True
+    if not _linuxdo_own_host(parsed.hostname or ""):
+        return True
+    path = (parsed.path or "").lower()
+    return "oauth2/authorize" in path or path.endswith("/oauth/authorize")
+
+
+def _linuxdo_bare_anchor_ok(sel: str, text: str, href: str, on_auth_page: bool = False) -> bool:
+    """Bare-token anchors must prove login intent.
+
+    The href guard only rejects LINUX DO's own hosts. A site's own nav link can
+    still carry the bare text ("Linux.DO Credit 兑换" -> /console/linuxdo-credit)
+    and would be clicked as if it were the SSO CTA. Accept such an anchor only
+    when its text names a login action or its destination looks like an OAuth
+    entry point. Handler-only anchors are rejected here: with bare text and no
+    destination there is nothing left to prove intent, and clicking one is
+    exactly the chrome misclick this guards against.
+
+    ``on_auth_page`` disables the gate: on a page that is itself asking for a
+    login, a bare-token anchor is the SSO entry by default. Two shapes stay
+    rejected even there — handler-only hrefs (nothing proves intent) and site
+    root hrefs (``<a href="/">LinuxDO</a>`` is a logo, not a login button).
+    """
+    if sel not in _LINUXDO_BARE_ANCHORS:
+        return True
+    if any(word in (text or "").lower() for word in _LINUXDO_LOGIN_WORDS):
+        return True
+    if _linuxdo_handler_href(href):
+        return False
+    if on_auth_page:
+        return not _linuxdo_site_root_href(href)
+    try:
+        parsed = urlparse(urljoin("https://placeholder.invalid/", href.strip()))
+    except Exception:
+        return False
+    return bool(_LINUXDO_OAUTH_INIT_RE.search(parsed.path or ""))
+
+
+async def _linuxdo_cta_candidate(page, sel: str, timeout_each: int, base_url=None,
+                                 on_auth_page: bool = False):
+    """Return (locator, skipped_any) for the first *allowed* `sel` match.
+
+    Scans up to _LINUXDO_CTA_SCAN_LIMIT visible matches instead of only the
+    first: a chrome link can sort before the real CTA under the same bare
+    selector, and stopping at ``.first`` would report NO_BUTTON.
+    """
+    try:
+        locs = page.locator(sel)
+        total = int(await locs.count())
+    except Exception:
+        return None, False
+    if base_url is None:
+        base_url = await page_url(page)
+    skipped = False
+    for i in range(min(total, _LINUXDO_CTA_SCAN_LIMIT)):
+        try:
+            loc = locs.nth(i)
+            if not await loc.is_visible(timeout=timeout_each):
+                continue
+        except Exception:
+            continue
+        try:
+            href = await loc.get_attribute("href") or ""
+        except Exception:
+            href = ""
+        try:
+            text = (await loc.inner_text() or "").strip()
+        except Exception:
+            text = ""
+        if _linuxdo_cta_destination_ok(href, base_url) and _linuxdo_bare_anchor_ok(
+            sel, text, href, on_auth_page
+        ):
+            return loc, skipped
+        skipped = True
+    return None, skipped
+
+
+def _linuxdo_page_host(base_url: str) -> str:
+    try:
+        return urlparse(base_url or "").hostname or ""
+    except Exception:
+        return ""
+
+
 async def has_linuxdo_cta(page) -> bool:
-    loc, _sel = await first_visible(page, LINUXDO_SELECTORS, timeout_each=250)
-    return loc is not None
+    try:
+        host = _linuxdo_page_host(await page_url(page))
+    except Exception:
+        host = ""
+    if _linuxdo_own_host(host):
+        # LINUX DO-hosted pages (authorize UI, account dashboard) carry their
+        # own "Linux DO" chrome links; they are never an origin login CTA.
+        return False
+    base_url, on_auth_page = await _linuxdo_page_context(page)
+    for sel in LINUXDO_SELECTORS:
+        loc, _skipped = await _linuxdo_cta_candidate(
+            page, sel, 250, base_url, on_auth_page
+        )
+        if loc is not None:
+            return True
+    return False
+
+
+async def click_linuxdo_cta(page, timeout_each: int = 1200) -> str | None:
+    """Click the first LINUX DO login CTA whose destination and intent are safe.
+
+    Skips LINUX DO's own chrome/dashboard links and bare-text nav links instead
+    of force-clicking them, so the SSO flow cannot be hijacked onto
+    connect.linux.do account pages or a site's own unrelated pages.
+    """
+    try:
+        host = _linuxdo_page_host(await page_url(page))
+    except Exception:
+        host = ""
+    if _linuxdo_own_host(host):
+        # Structural guard: on LINUX DO's own pages nothing is an origin CTA.
+        # The destination whitelist already blocks them; this keeps a future
+        # widening of the bare-text gate from ever re-enabling the misclick.
+        print("  skip LinuxDO CTA scan (on linux.do host)", flush=True)
+        return None
+    base_url, on_auth_page = await _linuxdo_page_context(page)
+    for sel in LINUXDO_SELECTORS:
+        loc, skipped = await _linuxdo_cta_candidate(
+            page, sel, timeout_each, base_url, on_auth_page
+        )
+        if loc is None:
+            if skipped:
+                print(f"  skip LinuxDO CTA {sel} (LINUX DO chrome/dashboard link)", flush=True)
+            continue
+        try:
+            await loc.click(timeout=3000, force=True)
+            return sel
+        except Exception:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -4248,29 +4570,36 @@ async def try_linuxdo_sso(page, origin_host: str = "", browser=None) -> str:
     if cf:
         return "CLOUDFLARE"
 
-    _, found = await wait_for_any_visible(page, LINUXDO_SELECTORS, CTA_WAIT_S)
-    if found == "CLOUDFLARE":
-        cf = await wait_out_cloudflare(page, CF_WAIT_S)
-        if cf:
-            return "CLOUDFLARE"
-        _, found = await wait_for_any_visible(page, LINUXDO_SELECTORS, 8.0)
-
-    if found is None:
-        login_clicked = await click_first_visible(page, LOGIN_SELECTORS, timeout_each=700)
-        if login_clicked:
-            print(f"  opened login via {login_clicked}", flush=True)
-            await wait_text_ready(page, 30, 10)
-            await asyncio.sleep(1.0)
+    # 若 gate page 本身已是 connect.linux.do 授权页(站点未登录自动重定向直落 OAuth),
+    # 不要再找/点 origin CTA:LINUXDO_SELECTORS 的裸文本会命中授权页自身 nav-brand
+    # (「LINUX DO Connect」→ /)把流程导航到账号详情页。直接进主循环点「允许」。
+    page_is_authorize = is_linuxdo_authorize_url(await page_url(page))
+    if page_is_authorize:
+        print("  LinuxDO: page already on authorize UI; skipping origin CTA", flush=True)
+    else:
+        _, found = await wait_for_any_visible(page, LINUXDO_SELECTORS, CTA_WAIT_S)
+        if found == "CLOUDFLARE":
             cf = await wait_out_cloudflare(page, CF_WAIT_S)
             if cf:
                 return "CLOUDFLARE"
-            _, found = await wait_for_any_visible(page, LINUXDO_SELECTORS, CTA_WAIT_S)
-        if found is None or found == "CLOUDFLARE":
-            return "NO_BUTTON"
+            _, found = await wait_for_any_visible(page, LINUXDO_SELECTORS, 8.0)
 
-    hits = await check_terms(page)
-    print(f"  terms_hits={hits}", flush=True)
-    await asyncio.sleep(0.45)
+        if found is None:
+            login_clicked = await click_first_visible(page, LOGIN_SELECTORS, timeout_each=700)
+            if login_clicked:
+                print(f"  opened login via {login_clicked}", flush=True)
+                await wait_text_ready(page, 30, 10)
+                await asyncio.sleep(1.0)
+                cf = await wait_out_cloudflare(page, CF_WAIT_S)
+                if cf:
+                    return "CLOUDFLARE"
+                _, found = await wait_for_any_visible(page, LINUXDO_SELECTORS, CTA_WAIT_S)
+            if found is None or found == "CLOUDFLARE":
+                return "NO_BUTTON"
+
+        hits = await check_terms(page)
+        print(f"  terms_hits={hits}", flush=True)
+        await asyncio.sleep(0.45)
 
     pre_ids = page_ids(browser) if browser is not None else set()
     pre_ids.add(id(page))
@@ -4289,17 +4618,24 @@ async def try_linuxdo_sso(page, origin_host: str = "", browser=None) -> str:
             owned_root_target_id=sso_root_target_id,
         )
 
-    await wait_turnstile_token(page)
-    clicked = await click_first_visible(page, LINUXDO_SELECTORS, timeout_each=1200)
-    if not clicked:
-        await check_terms(page)
-        await asyncio.sleep(0.4)
-        clicked = await click_first_visible(page, LINUXDO_SELECTORS, timeout_each=1500)
-    if not clicked:
-        return "NO_BUTTON"
+    if page_is_authorize:
+        # The page already IS the authorize UI; the main loop will click the
+        # 「允许」 approve link. Never hunt for an origin CTA here.
+        clicked = "already-on-authorize"
+        print(f"  SSO targets before click: {before_targets}", flush=True)
+        print(f"  clicked LinuxDO: {clicked}", flush=True)
+    else:
+        await wait_turnstile_token(page)
+        clicked = await click_linuxdo_cta(page, timeout_each=1200)
+        if not clicked:
+            await check_terms(page)
+            await asyncio.sleep(0.4)
+            clicked = await click_linuxdo_cta(page, timeout_each=1500)
+        if not clicked:
+            return "NO_BUTTON"
 
-    print(f"  SSO targets before click: {before_targets}", flush=True)
-    print(f"  clicked LinuxDO: {clicked}", flush=True)
+        print(f"  SSO targets before click: {before_targets}", flush=True)
+        print(f"  clicked LinuxDO: {clicked}", flush=True)
     click_t0 = time.monotonic()
 
     try:
@@ -4443,7 +4779,7 @@ async def try_linuxdo_sso(page, origin_host: str = "", browser=None) -> str:
                 reclicked = True
                 print("  re-click LinuxDO (OAuth not started)", flush=True)
                 await check_terms(active)
-                await click_first_visible(active, LINUXDO_SELECTORS, timeout_each=800)
+                await click_linuxdo_cta(active, timeout_each=800)
 
         remain = MIN_DWELL_AFTER_SSO_CLICK_S - (time.monotonic() - click_t0)
         if remain > 0:
@@ -4460,6 +4796,13 @@ async def try_linuxdo_sso(page, origin_host: str = "", browser=None) -> str:
 
 
 async def maybe_sso_if_needed(page, force: bool = False, browser=None) -> str | None:
+    # 站点把未登录访问直接重定向到 connect.linux.do/oauth2/authorize 时,
+    # page 已是授权页:直接点「允许」完成授权(勿再找 origin CTA)。
+    if is_linuxdo_authorize_url(await page_url(page)):
+        print("  already on LinuxDO authorize page; approving directly", flush=True)
+        used = await _approve_linuxdo_authorize(page)
+        return "OK" if used else "TIMEOUT"
+
     text = await page_text(page, 900)
     cta = await has_linuxdo_cta(page)
     logged_out = looks_logged_out(text)
@@ -4640,6 +4983,11 @@ def _is_github_login_page(text: str, url: str = "") -> bool:
     return False
 
 
+# Post-submit login verification: poll instead of one-shot (slow SPA redirects).
+LOGIN_VERIFY_POLL_S = 0.6
+LOGIN_VERIFY_TIMEOUT_S = 8.0
+
+
 async def try_account_login_if_needed(
     page,
     adapter,
@@ -4694,6 +5042,10 @@ async def try_account_login_if_needed(
         pass
 
     submit_sel = None
+    # Some New API clones gate the login form behind Cloudflare Turnstile
+    # (turnstile_check=true, e.g. ssftt 蓝鹰 N站 2026-10-24). Wait for the token
+    # before submitting, else the POST is rejected. No widget → instant no-op.
+    await wait_turnstile_token(page, min(TURNSTILE_TOKEN_WAIT_S, 8.0))
     # Submit: standard click first (actionability-checked) — React/Semi forms like
     # Sub2API need a real click event; force=True can fire before the handler binds
     # and the POST never goes out. Fall back to force, then native evaluate click.
@@ -4722,19 +5074,24 @@ async def try_account_login_if_needed(
     if submit_sel is None:
         return "FAIL"
 
-    # Verify login succeeded: URL leaves /login AND page no longer looks logged out.
-    await asyncio.sleep(2.5)
-    try:
-        url = await page_url(page)
-        text = await page_text(page, 600)
-    except Exception:
-        return "FAIL"
-    if is_auth_page_url(url):
-        return "FAIL"
-    if looks_logged_out(text):
-        return "FAIL"
-    print(f"  account login OK for {adapter.name}", flush=True)
-    return "OK"
+    # Verify login succeeded: URL leaves /login AND page no longer looks logged
+    # out. SPA redirects can lag well past the first seconds (tokenrouter
+    # 2026-10-23: still /login?expired=true at 2.5s, /console a few seconds
+    # later) — one-shot checks return a false FAIL that strands a valid session,
+    # so poll up to LOGIN_VERIFY_TIMEOUT_S instead.
+    deadline = time.monotonic() + LOGIN_VERIFY_TIMEOUT_S
+    while True:
+        await asyncio.sleep(LOGIN_VERIFY_POLL_S)
+        try:
+            url = await page_url(page)
+            text = await page_text(page, 600)
+        except Exception:
+            return "FAIL"
+        if not is_auth_page_url(url) and not looks_logged_out(text):
+            print(f"  account login OK for {adapter.name}", flush=True)
+            return "OK"
+        if time.monotonic() >= deadline:
+            return "FAIL"
 
 
 async def _ensure_account_logged_in(page, adapter) -> bool:
@@ -4942,6 +5299,26 @@ async def scan_done_dom_signal(page) -> str:
     return ""
 
 
+async def _enabled_sign_cta_visible(page) -> bool:
+    """True when an ENABLED 立即签到/立即打卡 button is on the page.
+
+    An enabled sign CTA is the site's own declaration that today's check-in is
+    still open — authoritative over any bare ``text=`` substring match (zerocat
+    2026-10-27: 常驻日历说明「点选已签到日期，查看奖励」被 text=已签到 命中,
+    trusted_already 盲回退把它当成已签态 → 未签日恒假 ALREADY). A genuinely
+    done page flips or removes the CTA; if some site kept it enabled while
+    done, the suppressed already-signal merely falls through to a click.
+    """
+    for sel in ('button:has-text("立即签到")', 'button:has-text("立即打卡")'):
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=300) and not await loc.is_disabled():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 async def already_done(
     page, already_selectors: list[str], *, trusted_already: bool = False
 ) -> str:
@@ -4987,10 +5364,20 @@ async def already_done(
             if trusted_already:
                 # Curated adapter phrase matched a visible element — that is
                 # the site's own done-state indicator (今日签到获得鸡腿N个).
-                return confirm_signal(await page_text(page, 2000)) or f"sel:{sel}"
+                # Body confirm first; when the body carries NO business confirm
+                # at all, a bare substring match must not beat an enabled sign
+                # CTA (the page is declaring itself unchecked — zerocat 2026-10-27).
+                body = await page_text(page, 2000)
+                body_sig = confirm_signal(body)
+                if body_sig:
+                    return body_sig
+                if await _enabled_sign_cta_visible(page):
+                    continue
+                return f"sel:{sel}"
             # text selectors still need body confirm for weak labels
-            if is_valid_checkin_confirm(await page_text(page, 2000)):
-                return confirm_signal(await page_text(page, 2000)) or "sel-confirm"
+            untrusted_body = await page_text(page, 2000)
+            if is_valid_checkin_confirm(untrusted_body):
+                return confirm_signal(untrusted_body) or "sel-confirm"
         except Exception:
             continue
     return ""
@@ -5022,6 +5409,14 @@ _ARK717_CHECKIN_URL = "https://game.ark717.com/"
 
 async def _approve_linuxdo_authorize(page) -> str | None:
     """在 connect.linux.do/oauth2/authorize 页点「允许」。返回所用 selector 或 None。"""
+    # A CF/Turnstile wall over the authorize page hides 「允许」. Callers that
+    # reach this directly (maybe_sso_if_needed's authorize-page guard) would
+    # otherwise time out where try_linuxdo_sso's loop clears CF first.
+    try:
+        if await wait_out_cloudflare(page, CF_WAIT_S):
+            return None
+    except Exception:
+        pass
     for _ in range(2):
         if not is_linuxdo_authorize_url(await page_url(page)):
             return None
@@ -5103,9 +5498,10 @@ async def arkengine_checkin(page, adapter: SiteAdapter, browser=None) -> Checkin
     for _ in range(10):
         text3 = await page_text(page, 800)
         if any(k in text3 for k in already_markers) or is_valid_checkin_confirm(text3):
-            return confirmed_done_result(
+            return await _postclick_enriched_done_result(
+                page,
                 confirm_signal(text3) or "text-confirm",
-                adapter=kind,
+                kind=kind,
                 action=ActionEvidence(
                     kind="dom_click", target=str(used or "sign"),
                     attempted_at=datetime.now().isoformat(timespec="seconds"),
@@ -5115,9 +5511,10 @@ async def arkengine_checkin(page, adapter: SiteAdapter, browser=None) -> Checkin
 
     text4 = await page_text(page, 800)
     if any(k in text4 for k in already_markers) or is_valid_checkin_confirm(text4):
-        return confirmed_done_result(
+        return await _postclick_enriched_done_result(
+            page,
             confirm_signal(text4) or "text-confirm",
-            adapter=kind,
+            kind=kind,
             action=ActionEvidence(
                 kind="dom_click", target=str(used or "sign"),
                 attempted_at=datetime.now().isoformat(timespec="seconds"),
@@ -8292,8 +8689,10 @@ async def bohe_click_spin(page) -> CheckinResult:
     for _ in range(8):
         text2 = await page_text(page, 800)
         if is_valid_checkin_confirm(text2):
-            return confirmed_done_result(
-                confirm_signal(text2) or "text-confirm", adapter="bohe",
+            return await _postclick_enriched_done_result(
+                page,
+                confirm_signal(text2) or "text-confirm",
+                kind="bohe",
                 action=ActionEvidence(
                     kind="dom_click", target=str(used or "spin"),
                     attempted_at=datetime.now().isoformat(timespec="seconds"),
@@ -8310,8 +8709,10 @@ async def bohe_click_spin(page) -> CheckinResult:
             await asyncio.sleep(4.0)
             text4 = await page_text(page, 800)
             if is_valid_checkin_confirm(text4):
-                return confirmed_done_result(
-                    confirm_signal(text4) or "text-confirm", adapter="bohe",
+                return await _postclick_enriched_done_result(
+                    page,
+                    confirm_signal(text4) or "text-confirm",
+                    kind="bohe",
                     action=ActionEvidence(
                         kind="dom_click", target=str(used2 or "spin"),
                         attempted_at=datetime.now().isoformat(timespec="seconds"),
@@ -8322,8 +8723,10 @@ async def bohe_click_spin(page) -> CheckinResult:
 
     # spin button gone but no success text → still not confirmed
     if is_valid_checkin_confirm(text3):
-        return confirmed_done_result(
-            confirm_signal(text3) or "text-confirm", adapter="bohe",
+        return await _postclick_enriched_done_result(
+            page,
+            confirm_signal(text3) or "text-confirm",
+            kind="bohe",
             action=ActionEvidence(
                 kind="dom_click", target=str(used or "spin"),
                 attempted_at=datetime.now().isoformat(timespec="seconds"),
@@ -11321,6 +11724,50 @@ async def _activate_404api_checkin_tab(page) -> bool:
         return False
 
 
+async def _ensure_abuai_checkin_button_ready(page, max_wait_s: float = 12.0) -> bool:
+    """AbuAI (www.abuai.chat/console/welfare) 福利中心按钮就绪守卫(2026-10-24 实证)。
+
+    「领取今日签到奖励」按钮在 /api/user/welfare/overview 返回前渲染为 disabled
+    (loading 态),而 click_first_visible 的 force 点击对 disabled <button> 是无效
+    no-op(浏览器吞掉 disabled 按钮的 click)→ 首跑 FAIL:no_confirm 且
+    request_seen=null。此处在 CTA 扫描/点击前轮询等待:按钮 enabled 即就绪;
+    翻转为「今日已签到」则视为已签,交给通用 already 判定。幂等且有界,数据
+    未就绪超时返回 False 放行原流程。dismiss_obstructing_dialogs 在 post_load /
+    pre_already / pre_cta 三处都会被调用,水合慢时后续阶段会再等。
+    """
+    if page is None or not hasattr(page, "evaluate") or not callable(getattr(page, "evaluate", None)):
+        return False
+    # 登出态(登录页)永无该按钮;dismiss 在 post_load/pre_already/pre_cta 多阶段
+    # 调用本守卫,不短路会让会话过期恢复路径每阶段空等满 max_wait_s。
+    try:
+        if looks_logged_out(await page_text(page, 400)):
+            return False
+    except Exception:
+        pass
+    js = r"""() => {
+        const btns = [...document.querySelectorAll('button')];
+        const sign = btns.find(b => (b.innerText || '').includes('领取今日签到奖励'));
+        if (sign) return 'sign:' + (sign.disabled ? 'disabled' : 'enabled');
+        const done = btns.find(b => (b.innerText || '').trim() === '今日已签到');
+        if (done) return 'already';
+        return 'none';
+    }"""
+    deadline = time.monotonic() + max_wait_s
+    last = "none"
+    while time.monotonic() < deadline:
+        try:
+            state = await page.evaluate(js)
+        except Exception:
+            return False
+        last = str(state)
+        if state in ("sign:enabled", "already"):
+            print(f"  AbuAI check-in button ready: {state}", flush=True)
+            return True
+        await asyncio.sleep(0.8)
+    print(f"  AbuAI check-in button NOT ready after {max_wait_s:.0f}s: {last}", flush=True)
+    return False
+
+
 async def dismiss_obstructing_dialogs(page, stage: str = "interaction") -> int:
     """Close announcement-style modal dialogs and full-screen overlays that would
     swallow interactions. Returns how many dialogs were dismissed (0 = nothing to do)."""
@@ -11334,6 +11781,14 @@ async def dismiss_obstructing_dialogs(page, stage: str = "interaction") -> int:
             total_closed += await _dismiss_404api_announcements(page)
             # 改版后签到 CTA 藏在「签到与账本」tab 面板内;不切 tab 就点不到。
             await _activate_404api_checkin_tab(page)
+        if "abuai.chat" in url_str:
+            # 福利中心签到按钮在 overview 数据返回前是 disabled(loading 态),
+            # force 点击无效;先等按钮 enabled / 翻已签态(2026-10-24 实证)。
+            await _ensure_abuai_checkin_button_ready(page)
+        if "pipiwangcom.com" in url_str:
+            # 控制台公告 (#noticeModal) 盖在签到按钮上,且不在通用 dismiss 选择器内;
+            # 漏掉它会在后续 CTA 点击时被 mask 拦截 15s(2026-10-25 实证)。
+            await _pipiwangcom_dismiss_notice(page)
     except Exception:
         pass
 
@@ -11585,7 +12040,9 @@ async def _click_cta_and_confirm(
         )
         if already_sig:
             print(f"  confirm(already): {already_sig}", flush=True)
-            return confirmed_done_result(already_sig, adapter=kind, action=action)
+            return await _postclick_enriched_done_result(
+                page, already_sig, kind=kind, action=action
+            )
         await asyncio.sleep(0.8)
 
     text3 = await page_text(page, 900)
@@ -11631,7 +12088,9 @@ async def _click_cta_and_confirm(
             )
             if already_r:
                 print(f"  confirm(already after reload): {already_r}", flush=True)
-                return confirmed_done_result(already_r, adapter=kind, action=action)
+                return await _postclick_enriched_done_result(
+                    page, already_r, kind=kind, action=action
+                )
             await asyncio.sleep(1.5)
     except Exception as reload_err:
         print(f"  ! reload confirm skipped: {reload_err}", flush=True)
@@ -11666,6 +12125,81 @@ async def _click_cta_and_confirm(
     return fail_result(
         "no_confirm", detail=text3[:100], adapter=kind, action=action,
     )
+
+
+def is_pipiwangcom_site(site_url: str) -> bool:
+    """皮皮智绘 img.pipiwangcom.com 专属站判定。"""
+    return "pipiwangcom.com" in (site_url or "").lower()
+
+
+async def _pipiwangcom_console_ready(page) -> bool:
+    """签到按钮只在登录后的控制台可见;落地页里同名节点是隐藏的。"""
+    try:
+        btn, _ = await first_visible(page, ['button:has-text("签到")'], timeout_each=700)
+    except Exception:
+        return False
+    return btn is not None
+
+
+async def _pipiwangcom_dismiss_notice(page) -> None:
+    """控制台公告 (#noticeModal) 盖在签到按钮上,且不在通用 dismiss 选择器内。"""
+    for sel in ("#btnNoticeOk", "#btnCloseNotice"):
+        try:
+            loc = page.locator(sel).first
+            if not await loc.is_visible(timeout=400):
+                continue
+            await loc.click(timeout=1500)
+            print("  pipiwang: notice modal dismissed", flush=True)
+            return
+        except Exception:
+            continue
+
+
+async def _pipiwangcom_login(page) -> str:
+    """皮皮智绘 2026-10-25 改版后的登录入口。
+
+    改版后未登录页是 SPA 落地页,登录入口是遮罩层里的 <button>(无 href),
+    通用 LinuxDO CTA 扫描看不到它,会话过期时只能报 no_button。流程:
+    落地页「进入控制台」→ 遮罩层「Linux.do 登录」→ connect.linux.do 授权。
+    """
+    # 遮罩层可能已由站点自己弹开;此时「进入控制台」被盖住,别再点,否则宽泛的
+    # 「登录」选择器会命中遮罩层里的「账号密码登录」并提交空表单。
+    try:
+        overlay_open = await page.locator(
+            'button.btn-linux:has-text("Linux.do")'
+        ).first.is_visible(timeout=400)
+    except Exception:
+        overlay_open = False
+    if not overlay_open:
+        for sel in (
+            'button.btn-primary:has-text("进入控制台")',
+            'button:has-text("进入控制台")',
+            'button.btn-ghost:has-text("登录")',
+        ):
+            try:
+                await page.click(sel, timeout=1200)
+                break
+            except Exception:
+                continue
+        else:
+            return "NO_BUTTON"
+        await asyncio.sleep(0.8)
+    try:
+        await page.click('button.btn-linux:has-text("Linux.do")', timeout=4000)
+    except Exception:
+        return "NO_BUTTON"
+    for _ in range(max(1, int(SSO_TIMEOUT_S))):
+        await asyncio.sleep(1.0)
+        try:
+            url = await page_url(page)
+        except Exception:
+            continue
+        if is_linuxdo_authorize_url(url):
+            await _approve_linuxdo_authorize(page)
+            continue
+        if "pipiwangcom.com" in url and await _pipiwangcom_console_ready(page):
+            return "OK"
+    return "TIMEOUT"
 
 
 async def legacy_checkin_on_page(
@@ -11762,6 +12296,18 @@ async def legacy_checkin_on_page(
         if initial_block and not initial_auth_gate:
             reason, detail = initial_block
             return fail_result(reason, detail=detail, adapter=kind)
+        # 皮皮智绘 2026-10-25 改版:未登录时是 SPA 落地页,签到按钮只在登录后的
+        # 控制台可见;遮罩层里的登录按钮未展开时不可见,通用 SSO 扫描找不到它,
+        # 会话过期就只剩 no_button。必须放在 CF/upstream 分类之后,否则 Chrome
+        # 错误页会被误判成 auth_required(2026-10-25 08:19 实证)。
+        if is_pipiwangcom_site(site_url) and not await _pipiwangcom_console_ready(page):
+            pipi_status = await _pipiwangcom_login(page)
+            if pipi_status != "OK":
+                return fail_result(
+                    "auth_required",
+                    detail=f"pipiwang login {pipi_status}",
+                    adapter=kind,
+                )
 
         cta_preferred = False
         if adapter.prefer_cta_before_auth:
@@ -13446,6 +13992,15 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
     for a in SITE_ADAPTERS:
         if a.name == name:
             url = a.url if a.prefer_catalog_url else (url_from_note or "").strip() or a.url
+            if url != a.url and not a.prefer_catalog_url:
+                # 任务行/note URL 与 yaml catalog 不一致:实际导航用 note URL。
+                # zerocat 2026-10-27 改版实证:只改 yaml 不改任务行,晨批仍按旧
+                # URL 静默跑偏——显式告警让这类漂移在晨批日志里可见。
+                print(
+                    f"  ! site URL mismatch {name}: note/task={url} vs yaml={a.url}"
+                    f" (using {url}; sync task row + DB upsert_site, or the yaml entry)",
+                    flush=True,
+                )
             if url != a.url or url_from_note:
                 return SiteAdapter(
                     name=a.name,

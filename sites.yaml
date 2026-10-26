@@ -428,6 +428,85 @@ sites:
   - name: 'chuanapi'
     url: https://chuanapi.com/profile
     kind: newapi_profile
+  # -- 2026-10-22 接入新站点 new.orbitix.site (orbitix / New API) --
+  # 标准 LinuxDO OAuth + newapi_profile, checkin_enabled=true、linuxdo_oauth=true、
+  # turnstile_check=false(2026-10-22 /api/status 实测, v1.0.0-rc.45,
+  # quota_per_unit=500000 / quota_display_type=USD)。
+  # 无自定义适配器:LinuxDO SSO 与「立即签到/今日已签到」判定全走通用 newapi_profile 通道。
+  - name: 'orbitix'
+    url: https://new.orbitix.site/profile
+    kind: newapi_profile
+  # tokenrouter(tokenrouter.tech / JUAPI, QuantumNous New API 站)—— 2026-10-22 接入。
+  # 个人中心 /console/personal 有「立即签到」;未登录时站方 302 到 /login,
+  # 登录表单为「用户名或邮箱 + 密码」,且提交按钮要求先勾选同意《用户协议》《隐私政策》。
+  # 纯账密站(账密在 签到公益站账密.md),login_url 显式钉死实测登录入口。
+  # 注意:协议勾选属于用户本人的法律同意,自动流程不得代勾;启用前需用户先手动登录。
+  - name: 'tokenrouter'
+    url: https://www.tokenrouter.tech/console/personal
+    kind: newapi_profile
+    login_url: https://www.tokenrouter.tech/login
+  # AI 发财网(ai.facai.cloudns.org)—— 2026-10-23 接入。
+  # New API fork(status 显示 checkin_enabled,接口 /api/user/checkin)。
+  # 签到位于 /dashboard「每日签到」卡片:未签 button「签到」(奖励 $2.00~$10.00),
+  # 已签时按钮/卡片转「已签到」态。余额按「当前余额 $24.43」标准格式渲染。
+  # 登录方式为 LinuxDO OAuth(status linuxdo=true),不登记账密:复用 9222 已有
+  # LinuxDO 登录态,会话失效时由 runner 的 LinuxDO SSO 兜底重新授权。
+  - name: 'AI 发财网'
+    url: https://ai.facai.cloudns.org/dashboard
+    kind: newapi_profile
+  # HyxAPI(hyxware.com)—— 2026-10-24 接入。
+  # New API 二改自研 React SPA(status 显示 checkin_enabled=true、
+  # linuxdo_oauth=true、turnstile_check=false、quota_per_unit=500000 /
+  # quota_display_type=USD,2026-10-24 /api/status 实测,version 0.0.1-dev)。
+  # 签到卡片挂在钱包充值页 /topup(section[data-wallet-checkin],
+  # 接口 GET/POST /api/user/checkin):未签 button「签到」,已签「今日已签到」。
+  # LinuxDO OAuth 登录,不登记账密:复用 9222 已有 LinuxDO 登录态,
+  # 会话失效时由 runner 的 LinuxDO SSO 兜底重新授权。
+  - name: 'HyxAPI'
+    url: https://hyxware.com/topup
+    kind: newapi_profile
+  # AbuAI(www.abuai.chat, AbuAI API)—— 2026-10-24 接入。
+  # New API 二改自研 React SPA(status 实测 checkin_center_enabled=true、
+  # welfare_enabled=true、linuxdo_oauth=true、turnstile_check=false、
+  # turnstile_require_on_checkin=false、quota_per_unit=500000 /
+  # quota_display_type=USD, version v1.0.0, 2026-10-24)。
+  # 签到在福利中心 /console/welfare「每日签到」卡片(接口 POST
+  # /api/user/welfare/checkin):未签 button「领取今日签到奖励」,
+  # 已签 button「今日已签到」(disabled)。sign 必须钉死「领取今日签到奖励」:
+  # 同页有抽奖/补签/每周领取等同域按钮,裸「签到」有歧义。
+  # LinuxDO OAuth 登录,不登记账密:复用 9222 已有 LinuxDO 登录态,
+  # 会话失效时由 runner 的 LinuxDO SSO 兜底重新授权。
+  - name: 'AbuAI'
+    url: https://www.abuai.chat/console/welfare
+    kind: newapi_profile
+    signs:
+      - 'button:text-is("领取今日签到奖励")'
+      - 'button:has-text("领取今日签到奖励")'
+    already:
+      - 'button:text-is("今日已签到")'
+      - 'text=签到成功，获得'
+      - 'text=今日已签到'
+  # superqiyu(www.superqiyu.org, 奇遇API)—— 2026-10-24 接入。
+  # 标准 New API 默认前端(status 实测 checkin_enabled=true、linuxdo_oauth=true、
+  # turnstile_check=true、quota_per_unit=500000 / quota_display_type=USD,
+  # version traffic-archive-20260910-bdef117-dirty, 2026-10-24)。
+  # 签到在个人资料页 /profile「每日签到」卡片,未签「立即签到」/已签「今日已签到」,
+  # 走通用 newapi_profile 通道,无自定义选择器。
+  # LinuxDO OAuth 登录,不登记账密:复用 9222 已有 LinuxDO 登录态,
+  # 会话失效时由 runner 的 LinuxDO SSO 兜底重新授权。
+  - name: 'superqiyu'
+    url: https://www.superqiyu.org/profile
+    kind: newapi_profile
+  # ssftt(api.ssftt.vip, 蓝鹰 N站)—— 2026-10-24 接入。
+  # 标准 New API 默认前端(status 实测 checkin_enabled=true、linuxdo_oauth=false、
+  # password_login_enabled=true、turnstile_check=true、quota_display_type=CNY /
+  # quota_per_unit=500000, version v1.0.0-rc.43, 2026-10-24)。
+  # 纯账密站(账密在 签到公益站账密.md 与 staging data/accounts.md),
+  # login_url 显式钉死标准登录入口;登录后 /profile「每日签到」走通用判定。
+  - name: 'ssftt'
+    url: https://api.ssftt.vip/profile
+    kind: newapi_profile
+    login_url: https://api.ssftt.vip/login
   # mailhub(mailhub.pigeonw.com, Mailhub 邮箱额度站)—— 2026-10-01 接入。
   # 非 New API:钱包页 POST /wallet/checkin(表单 csrf)。同页另有「兑换」按钮,
   # 选择器必须钉死 button.primary「立即签到」,不能用裸「签到」。
@@ -731,6 +810,12 @@ sites:
     kind: browser
     # LinuxDO-OAuth 站：登录态失效时必须走 LinuxDO SSO，不能用 prefer_cta_before_auth
     # 提前命中恒常存在的顶栏「签到 +10」按钮而跳过登录（会话过期即 auth_required）。
+    # 2026-10-25 改版为 SPA 落地页：签到按钮只在登录后的控制台可见，登录入口是
+    # 遮罩层里的 <button>（无 href，遮罩层默认关闭→不可见），通用 SSO 的可见 CTA
+    # 扫描扫不到。runner 用 is_pipiwangcom_site 专属前置（排在 CF/upstream 分类
+    # 之后，避免错误页误判 auth_required）：未登录 →「进入控制台」→「Linux.do
+    # 登录」→ 授权 → 再走通用 CTA。控制台公告 #noticeModal 由
+    # dismiss_obstructing_dialogs 的站点分支清理。
     signs:
       - 'button:has-text("签到")'
       - 'button:has-text("立即签到")'
@@ -825,23 +910,22 @@ sites:
       - 'text=今日已签'
       - 'button:has-text("已签到")'
       - 'button:has-text("今日已签到")'
-  # zero.cat(ZeroCat):QuantumNous 模板站,LinuxDo OAuth 登录(共享 9222
-  # profile 的 Linux.do 会话),走标准 maybe_sso_if_needed → try_linuxdo_sso
-  # 流程。签到页 /checkin,按钮 「立即签到 」(Check in now),成功回执
-  # 「签到成功！获得…」,已签状态「已签到 / Checked in」。
+  # zero.cat(ZeroCat):2026-10-22 起整体改版为自研平台(非 QuantumNous 模板),
+  # LinuxDo OAuth 登录(共享 9222 profile 的 Linux.do 会话),走标准
+  # maybe_sso_if_needed → try_linuxdo_sso 流程。签到移至个人设置页
+  # /profile/checkin(默认「每日签到」tab),未签「立即签到」(enabled),已签翻成
+  # 「已签到」(disabled),成功回执 toast「签到成功！获得 ¥N」。旧 /checkin 路由
+  # 只剩 SPA 兜底页,页面常驻日历说明「点选已签到日期，查看奖励」——already
+  # 必须钉死 button:text-is,严禁 text= 子串匹配(2026-10-27 假 ALREADY 修复)。
   - name: 'zerocat'
-    url: https://zero.cat/checkin
+    url: https://zero.cat/profile/checkin
     kind: browser
     signs:
       - 'button:has-text("立即签到")'
       - 'button:has-text("Check in now")'
-      - 'button:has-text("签到")'
     already:
-      - 'text=签到成功'
-      - 'text=已签到'
-      - 'button:has-text("已签到")'
-      - 'text=Checked in'
-      - 'button:has-text("Checked in")'
+      - 'button:text-is("已签到")'
+      - 'button:text-is("今日已签到")'
   # fluxionai.space(Fluxion AI / 流元AI):Sub2API 系福利站(非 New API),
   # LinuxDo OAuth 登录(共享 9222 profile 的 Linux.do 会话),走标准
   # maybe_sso_if_needed → try_linuxdo_sso 流程。福利中心 /welfare,签到按钮
@@ -865,6 +949,9 @@ sites:
   # 签到页 /check-in,签到按钮「立即签到」,已签状态按钮变「今日已签到」(disabled),
   # 挂 Cloudflare Turnstile(runner 内置 wait_turnstile_token 会等 token 就绪)。
   # 两个任务都先登出:只点站内「退出登录」(清 NEXA 域 localStorage),P0 红线守。
+  # 2026-10-20 两账号曾被用户从 Web UI 删除(墓碑);2026-10-24 应用户要求恢复
+  # nexavlinks-linuxdo 为**手动签到池**(站点需过风控,不做自动签到):DB
+  # checkin_mode=manual,自动批次排除,Web UI #/manual 手动执行;email 账号保持墓碑。
   - name: 'nexavlinks-linuxdo'
     url: https://www.nexavlinks.com/check-in
     kind: nexa
