@@ -4140,6 +4140,10 @@ class TestSitesYaml(unittest.TestCase):
             "ci-account-sub2api\n"
             "ci-password-sub2api\n"
             "\n"
+            "nailao（https://nailao.biz）\n"
+            "ci-account-nailao\n"
+            "ci-password-nailao\n"
+            "\n"
             "tokenrouter（https://www.tokenrouter.tech）\n"
             "ci-account-tokenrouter\n"
             "ci-password-tokenrouter\n"
@@ -4554,7 +4558,11 @@ class TestSitesYaml(unittest.TestCase):
         self.assertTrue(builtin_entry.prefer_catalog_url)
 
     def test_yaml_registers_nailao_entry(self):
-        """sites.yaml 的 nailao 条目解析为 newapi_profile,/profile,prefer_catalog_url。"""
+        """sites.yaml 的 nailao 条目解析为 nailao 专用流程,/sign-in,prefer_catalog_url。
+
+        2026-10-27 改版后 UI 无签到 CTA,真入口是 POST /api/user/checkin,
+        不再走 newapi_profile 的 /profile「立即签到」通用通道。
+        """
         import yaml
         yaml_path = ROOT / "sites.yaml"
         self.assertTrue(yaml_path.exists())
@@ -4564,21 +4572,20 @@ class TestSitesYaml(unittest.TestCase):
         self.assertIsNotNone(entry, "sites.yaml 应有 nailao 条目")
         from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS
         a = _adapter_from_yaml_entry(entry)
-        self.assertEqual(a.kind, "newapi_profile")
-        self.assertEqual(a.url, "https://nailao.biz/profile")
+        self.assertEqual(a.kind, "nailao")
+        self.assertEqual(a.url, "https://nailao.biz/sign-in")
         self.assertTrue(a.prefer_catalog_url)
         self.assertEqual(a.login_url, "https://nailao.biz/sign-in")
-        joined_signs = " ".join(a.sign_selectors)
-        self.assertIn("立即签到", joined_signs)
-        joined_already = " ".join(a.already_selectors)
-        self.assertIn("今日已签到", joined_already)
+        # 任务行仍是旧 /profile 时,prefer_catalog_url 必须钉住 catalog 的 /sign-in,
+        # 否则晨批会导航到改版后不再承载签到的 /profile。
         resolved = resolve_site("nailao", "https://nailao.biz/profile")
-        self.assertEqual(resolved.url, "https://nailao.biz/profile")
+        self.assertEqual(resolved.kind, "nailao")
+        self.assertEqual(resolved.url, "https://nailao.biz/sign-in")
         self.assertEqual(resolved.login_url, "https://nailao.biz/sign-in")
         builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "nailao"), None)
         self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 nailao")
-        self.assertEqual(builtin_entry.kind, "newapi_profile")
-        self.assertEqual(builtin_entry.url, "https://nailao.biz/profile")
+        self.assertEqual(builtin_entry.kind, "nailao")
+        self.assertEqual(builtin_entry.url, "https://nailao.biz/sign-in")
         self.assertEqual(builtin_entry.login_url, "https://nailao.biz/sign-in")
         self.assertTrue(builtin_entry.prefer_catalog_url)
 
@@ -4859,6 +4866,105 @@ class TestSitesYaml(unittest.TestCase):
         self.assertIsNotNone(cred)
         self.assertEqual(cred[0], "ci-account-sub2api")
         self.assertTrue(len(cred[1]) > 0)
+
+    def test_nailao_checkin_api_flow(self):
+        """nailao 2026-10-27 改版流程:登录 → 拦截 Bearer → POST /api/user/checkin。
+        成功路径 success:true + quota_awarded → OK 且 detail 带奖励;token 不进 detail。"""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        m = self.m
+        fake_page = AsyncMock()
+        # 登录成功后 SPA 离开 /sign-in 落在 dashboard
+        fake_page.url = "https://nailao.biz/dashboard/overview"
+
+        def fake_evaluate(js, *args, **kw):
+            if "/api/user/checkin" in js:
+                return {"status": 200, "success": True, "message": "签到成功", "quota_awarded": 0.897804}
+            return None
+
+        fake_page.evaluate = AsyncMock(side_effect=fake_evaluate)
+        pw_loc = AsyncMock()
+        pw_loc.count = AsyncMock(return_value=1)
+        user_loc = AsyncMock()
+        btn_loc = AsyncMock()
+        btn_loc.count = AsyncMock(return_value=2)
+        btn0 = AsyncMock()
+        btn0.get_attribute = AsyncMock(return_value="button")
+        btn1 = AsyncMock()
+        btn1.get_attribute = AsyncMock(return_value="submit")
+        btn1.is_disabled = AsyncMock(return_value=False)
+        btn_loc.nth = lambda i: [btn0, btn1][i]
+        fake_page.locator = lambda sel: {"input[type='password']": pw_loc, "input[name='username']": user_loc, "button:has-text('登录')": btn_loc}[sel]
+
+        def on_request(req):
+            # 模拟 SPA 登录后自身请求带 Bearer
+            async def _noop():
+                return {"authorization": "Bearer ci-token"}
+            req.all_headers = _noop
+        bearer_req = AsyncMock()
+        bearer_req.url = "https://nailao.biz/api/user/models"
+        bearer_req.all_headers = AsyncMock(return_value={"authorization": "Bearer ci-token"})
+        fake_page.on = lambda ev, cb: cb(bearer_req)
+
+        adapter = m.resolve_site("nailao", "https://nailao.biz/profile")
+        with patch.object(m, "get_account_credential", return_value=("ci-account-nailao", "ci-password-nailao")), \
+             patch.object(m, "GOTO_TIMEOUT_MS", 5000):
+            fake_page.goto = AsyncMock()
+            res = asyncio.run(m.nailao_checkin(fake_page, adapter))
+        self.assertTrue(res.ok, f"nailao_checkin 应 OK: {res.detail}")
+        self.assertIn("签到成功", res.detail)
+        self.assertIn("0.89", res.detail)
+        self.assertNotIn("ci-token", res.detail, "Bearer token 绝不落结果 detail")
+        self.assertNotIn("ci-password-nailao", res.detail)
+
+    def test_nailao_checkin_already(self):
+        """幂等响应「今日已签到」→ ALREADY(真 done-state,非失败)。"""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        m = self.m
+        fake_page = AsyncMock()
+        fake_page.url = "https://nailao.biz/sign-in"
+        fake_page.evaluate = AsyncMock(return_value={"status": 200, "success": False, "message": "今日已签到", "quota_awarded": None})
+        pw_loc = AsyncMock()
+        pw_loc.count = AsyncMock(return_value=0)  # 已登录,无密码框
+        fake_page.locator = lambda sel: pw_loc
+        bearer_req = AsyncMock()
+        bearer_req.url = "https://nailao.biz/api/user/models"
+        bearer_req.all_headers = AsyncMock(return_value={"authorization": "Bearer ci-token"})
+        fake_page.on = lambda ev, cb: cb(bearer_req)
+
+        adapter = m.resolve_site("nailao", "https://nailao.biz/profile")
+        with patch.object(m, "get_account_credential", return_value=("ci-account-nailao", "ci-password-nailao")):
+            fake_page.goto = AsyncMock()
+            res = asyncio.run(m.nailao_checkin(fake_page, adapter))
+        self.assertEqual(res.status, "ALREADY")
+        self.assertIn("今日已签到", res.detail)
+
+    def test_nailao_checkin_no_token_auth_required(self):
+        """未拦截到 Bearer(会话未建立)→ auth_required,不得伪造成功。"""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        m = self.m
+        fake_page = AsyncMock()
+        fake_page.url = "https://nailao.biz/sign-in"
+        pw_loc = AsyncMock()
+        pw_loc.count = AsyncMock(return_value=0)
+        fake_page.locator = lambda sel: pw_loc
+        # 页面请求无 authorization 头
+        bearer_req = AsyncMock()
+        bearer_req.url = "https://nailao.biz/api/user/models"
+        bearer_req.all_headers = AsyncMock(return_value={})
+        fake_page.on = lambda ev, cb: cb(bearer_req)
+
+        adapter = m.resolve_site("nailao", "https://nailao.biz/profile")
+        with patch.object(m, "get_account_credential", return_value=("ci-account-nailao", "ci-password-nailao")):
+            fake_page.goto = AsyncMock()
+            res = asyncio.run(m.nailao_checkin(fake_page, adapter))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "auth_required")
 
     def test_yaml_registers_feixingwawa_entry(self):
         """sites.yaml 的 feixingwawa 条目解析为 newapi_profile,/profile(标准 LinuxDO New API 站)."""
@@ -7310,6 +7416,150 @@ class TestXmiaomCheckin(unittest.TestCase):
             self.assertTrue(any("立即签到" in c for c in clicks))
         finally:
             m.page_text = orig_page_text
+
+
+class TestNailaoCheckin(unittest.TestCase):
+    """nailao (nailao.biz) 2026-10-27 改版后的专用流程.
+
+    会话是 SPA 内存里的 Bearer,整页跳转即丢;UI 无签到 CTA,
+    真入口是同页 fetch POST /api/user/checkin。token 不得进日志或结果。
+    """
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+        import asyncio as _aio
+        self.asyncio = _aio
+        self.m.get_account_credential = lambda name: ("user", "secret-token-value")
+
+    def _adapter(self):
+        return self.m.SiteAdapter(
+            name="nailao",
+            url="https://nailao.biz/sign-in",
+            kind="nailao",
+            prefer_catalog_url=True,
+            login_url="https://nailao.biz/sign-in",
+        )
+
+    def _page(self, api_body):
+        """已登录页:无密码框。on('request') 时回放一条带 Bearer 的 /api/user 请求。"""
+        seen = {"token": None}
+
+        class FakeLocator:
+            def __init__(self, n):
+                self._n = n
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return self._n
+
+        class FakePage:
+            url = "https://nailao.biz/dashboard/overview"
+
+            async def goto(self, *a, **k):
+                pass
+
+            def locator(self, sel):
+                return FakeLocator(0)
+
+            def on(self, event, handler):
+                # 流程用 ensure_future 挂监听,假事件循环不会在 sleep 前跑它。
+                # 按闭包变量名找到 bearer_box 再写入,不依赖单元格顺序。
+                fn = getattr(handler, "__wrapped__", None) or handler
+                # lambda req: ensure_future(_capture_bearer(req)) —— token 在内层函数里。
+                inner = None
+                for cell in fn.__closure__ or ():
+                    val = cell.cell_contents
+                    if callable(val) and "bearer_box" in (val.__code__.co_freevars or ()):
+                        inner = val
+                        break
+                names = inner.__code__.co_freevars
+                box = inner.__closure__[names.index("bearer_box")].cell_contents
+                box["token"] = "secret-token-value"
+
+            async def evaluate(self, expr, *args):
+                if args:
+                    seen["token"] = args[0]
+                return api_body
+
+        return FakePage(), seen
+
+    def test_p0_no_cookie_clear_and_token_not_logged(self):
+        """只复用 9222 会话:不清 Cookie / localStorage,日志也不打 token。"""
+        import inspect
+        import re
+        src = inspect.getsource(self.m.nailao_checkin)
+        code = re.sub(r'"""[\s\S]*?"""', "", src)
+        code = "\n".join(
+            line for line in code.splitlines() if not line.lstrip().startswith("#")
+        ).lower()
+        for banned in (
+            "clear_cookies(",
+            "clear_localstorage",
+            "clear_all(",
+            "localstorage.clear",
+            "document.cookie",
+            "deleteallcookies",
+        ):
+            self.assertNotIn(banned, code)
+        for line in src.splitlines():
+            if "print(" in line:
+                self.assertNotIn("bearer_box", line)
+                self.assertNotIn("{token", line)
+
+    def test_dispatch_routes_nailao_kind(self):
+        import inspect
+        src = inspect.getsource(self.m.legacy_checkin_on_page)
+        self.assertIn('kind == "nailao"', src)
+        self.assertIn("nailao_checkin", src)
+        self.assertLess(src.find('kind == "nailao"'), src.find('kind == "xmiaom"'))
+
+    def test_missing_credential_fails_closed(self):
+        self.m.get_account_credential = lambda name: None
+        page, seen = self._page({"status": 200, "success": True, "message": "", "quota_awarded": 1})
+        res = self.asyncio.run(self.m.nailao_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "auth_required")
+        self.assertIn("no registered credential", res.detail)
+        self.assertIsNone(seen["token"])
+
+    def test_success_maps_ok_without_echoing_token(self):
+        page, seen = self._page(
+            {"status": 200, "success": True, "message": "ok", "quota_awarded": 7}
+        )
+        res = self.asyncio.run(self.m.nailao_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "OK")
+        self.assertIn("+7", res.detail)
+        self.assertEqual(res.action.kind, "api_post")
+        self.assertEqual(res.action.target, "/api/user/checkin")
+        self.assertEqual(seen["token"], "secret-token-value")
+        self.assertNotIn("secret-token-value", res.detail)
+        self.assertNotIn("secret-token-value", res.msg())
+
+    def test_already_message_maps_already(self):
+        page, _seen = self._page(
+            {"status": 200, "success": False, "message": "今日已签到", "quota_awarded": None}
+        )
+        res = self.asyncio.run(self.m.nailao_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "ALREADY")
+        self.assertNotIn("secret-token-value", res.detail)
+
+    def test_unauthorized_maps_auth_required(self):
+        page, _seen = self._page(
+            {"status": 401, "success": False, "message": "unauthorized", "quota_awarded": None}
+        )
+        res = self.asyncio.run(self.m.nailao_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "auth_required")
+        self.assertNotIn("secret-token-value", res.detail)
+
+    def test_other_failure_maps_no_grant(self):
+        page, _seen = self._page(
+            {"status": 500, "success": False, "message": "upstream", "quota_awarded": None}
+        )
+        res = self.asyncio.run(self.m.nailao_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_grant")
 
 
 class GladosCheckinTest(unittest.TestCase):

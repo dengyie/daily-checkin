@@ -115,13 +115,15 @@ sites:
     url: https://happycoding.xyz/profile
     kind: newapi_profile
     prefer_catalog_url: true
-  # nailao(nailao.biz, 奶酪公益站)—— 2026-09-28 接入。标准 New API 站点 (sha-779b233de21c),
-  # 账密登录站(在 签到公益站账密.md 注册),未登录时自动去 /sign-in 执行账密登录。
-  # 走标准 newapi_profile 流程: /profile → 点击「立即签到」+ 确认门。
-  # 严格遵守 P0: 复用当前调试 profile 会话，禁止全清 Cookie。
+  # nailao(nailao.biz, 奶酪公益站)—— 2026-10-27 改版后走专用 nailao_checkin。
+  # 会话改为纯 Bearer access_token(SPA 内存持有),整页 reload 即丢;refresh cookie
+  # 被单会话策略吊销(AUTH_SESSION_REVOKED),「登录 OK → goto /profile」必回登录页。
+  # UI 无签到 CTA,真入口 POST /api/user/checkin(需 Bearer)。专用流程:
+  # 同一 page 内 登录 → 拦截页面自身请求的 Bearer → 带 token fetch 签到。
+  # 账密登录站(在 签到公益站账密.md 注册)。严格遵守 P0: 禁止全清 Cookie。
   - name: 'nailao'
-    url: https://nailao.biz/profile
-    kind: newapi_profile
+    url: https://nailao.biz/sign-in
+    kind: nailao
     prefer_catalog_url: true
     login_url: https://nailao.biz/sign-in
   # abnt(api.abnt.it New API 站):LinuxDo OAuth 登录(linuxdo_oauth2=true,

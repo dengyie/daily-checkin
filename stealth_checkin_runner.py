@@ -442,7 +442,7 @@ TERMS_CLICK_SELECTORS = [
 ]
 
 Status = Literal["OK", "ALREADY", "FAIL"]
-AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool", "sub2api", "xmiaom", "glados", "yunzhi", "ilovecat", "jianzhile"]
+AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool", "sub2api", "xmiaom", "glados", "yunzhi", "ilovecat", "jianzhile", "nailao"]
 
 
 @dataclass
@@ -708,9 +708,17 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         "https://happycoding.xyz/profile",
         prefer_catalog_url=True,
     ),
-    _N(
+    # nailao(nailao.biz 奶酪公益站)—— 2026-10-27 改版后走专用 nailao_checkin。
+    # 改版要点:会话是纯 Bearer access_token(SPA 内存持有),整页 reload 即丢;
+    # refresh cookie(new_api_refresh)被服务端单会话策略反复吊销
+    # (AUTH_SESSION_REVOKED),跨页跳转不可依赖。UI 登录后无签到 CTA,
+    # 真入口是 POST /api/user/checkin(需 Authorization: Bearer)。
+    # 专用流程:同一 page 内 登录→拦截 Bearer→带 token fetch 签到,
+    # token 不出页面、不进日志。账密在 签到公益站账密.md。
+    _B(
         "nailao",
-        "https://nailao.biz/profile",
+        "https://nailao.biz/sign-in",
+        kind="nailao",
         prefer_catalog_url=True,
         login_url="https://nailao.biz/sign-in",
     ),
@@ -1684,6 +1692,19 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
             login_url=str(entry.get("login_url", "") or ""),
             kind="sub2api",
+        )
+    if kind == "nailao":
+        # nailao.biz 奶酪公益站 2026-10-27 改版:纯 Bearer 会话(SPA 内存)+ 无 CTA,
+        # 真签到入口 POST /api/user/checkin。专用 nailao_checkin 流程(kind 必须透传,
+        # 否则落 browser 默认走不到 API 登录链路)。
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else None,
+            already=list(already) if already is not None else None,
+            ready_rounds=rr,
+            prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
+            login_url=str(entry.get("login_url", "") or ""),
+            kind="nailao",
         )
     if kind == "xmiaom":
         return _B(
@@ -9365,6 +9386,175 @@ async def sub2api_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRe
     )
 
 
+def is_nailao_site(site_url: str) -> bool:
+    """nailao.biz 奶酪公益站判定."""
+    return "nailao.biz" in (site_url or "").lower()
+
+
+def is_nailao_name(name: str) -> bool:
+    """nailao 站点名称判定."""
+    return "nailao" in (name or "").lower()
+
+
+async def nailao_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """nailao (nailao.biz 奶酪公益站) 签到 — 2026-10-27 改版后的专用流程。
+
+    改版后的会话模型决定了通用 newapi_profile 流程必然失败:
+    - 登录响应只发 new_api_refresh cookie,access_token 是纯 Bearer 模式、
+      只存在于 SPA 内存,整页 reload 即丢——「goto /profile」必然回到 /sign-in
+      (auth_required 假象,实为会话模型变更,非凭据失效);
+    - refresh cookie 被服务端单会话策略吊销(AUTH_SESSION_REVOKED),跨页不可依赖;
+    - 登录后的 UI 无「立即签到」CTA,真签到入口是 POST /api/user/checkin
+      (需 Authorization: Bearer <token>)。
+
+    流程(全部在同一个 page 内,token 不出页面、不落日志):
+      1) 打开 /sign-in;已有会话则页面自带 token,直接跳到步骤 3 的探测
+      2) 凭据填写(账密来自 签到公益站账密.md)→ 勾选协议 → 提交
+      3) 从页面后续 /api/user/* 请求头里拦截 Bearer token
+      4) 同页 fetch POST /api/user/checkin:success:true → OK(带 quota_awarded);
+         「今日已签到」→ ALREADY;401 → auth_required;其他 → no_grant
+    严格遵守 P0: 复用 9222 会话,禁止 clear_cookies;token 不写日志/不入库。
+    """
+    kind = adapter.kind or "nailao"
+    site_url = adapter.url or "https://nailao.biz/sign-in"
+    print(f"  nailao flow: {adapter.name}", flush=True)
+
+    creds = get_account_credential(adapter.name)
+    if not creds:
+        return fail_result("auth_required", detail="nailao: no registered credential", adapter=kind, stage="auth")
+
+    try:
+        await page.goto(site_url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+    except Exception as exc:
+        return fail_result("upstream_unavailable", detail=f"goto sign-in: {str(exc)[:80]}", adapter=kind)
+    await asyncio.sleep(3)
+
+    # 拦截页面自己发出的 Bearer(nailao 的 token 只活在 SPA 内存,唯一可靠
+    # 的获取方式是监听它自己的 /api/user/* 请求)。
+    bearer_box: dict[str, str] = {}
+
+    async def _capture_bearer(req):
+        try:
+            if "nailao.biz/api/user/" in req.url and "login" not in req.url and "refresh" not in req.url:
+                h = await req.all_headers()
+                auth = (h or {}).get("authorization", "")
+                if auth.startswith("Bearer "):
+                    bearer_box["token"] = auth[len("Bearer "):]
+        except Exception:
+            pass
+
+    page.on("request", lambda req: asyncio.ensure_future(_capture_bearer(req)))
+
+    login_ok = False
+    try:
+        pw_count = await page.locator("input[type='password']").count()
+    except Exception:
+        pw_count = 0
+
+    if pw_count:
+        try:
+            await page.locator("input[name='username']").first.click(timeout=3000)
+            await page.keyboard.type(creds[0], delay=30)
+            await page.locator("input[type='password']").first.click(timeout=3000)
+            await page.keyboard.type(creds[1], delay=30)
+            # 协议复选框是 aria-hidden 的原生 checkbox(id=legal-consent),
+            # 点击其 label / force 点本体都点不到,只能 JS click 同步 React state
+            await page.evaluate(
+                "() => { const el = document.getElementById('legal-consent'); if (el) el.click(); }"
+            )
+            await asyncio.sleep(2)
+            btns = page.locator("button:has-text('登录')")
+            submitted = False
+            for i in range(await btns.count()):
+                b = btns.nth(i)
+                if (await b.get_attribute("type")) == "submit" and not await b.is_disabled():
+                    await b.click(timeout=5000)
+                    submitted = True
+                    break
+            if not submitted:
+                return fail_result("no_button", detail="nailao: 登录按钮未启用(协议勾选/表单校验未过)", adapter=kind, stage="auth")
+            for _ in range(12):
+                await asyncio.sleep(1)
+                if "/sign-in" not in (page.url or ""):
+                    break
+            await asyncio.sleep(5)  # 等 SPA 首屏 API(user/models 等)发出,带出 Bearer
+            login_ok = "/sign-in" not in (page.url or "")
+            if not login_ok:
+                return fail_result("auth_required", detail="nailao: 登录后未离开 /sign-in(账密错误或站点变更)", adapter=kind, stage="auth")
+            print("  nailao: account login OK", flush=True)
+        except Exception as exc:
+            return fail_result("auth_required", detail=f"nailao login error: {str(exc)[:80]}", adapter=kind, stage="auth")
+    else:
+        print("  nailao: no password form (maybe logged in)", flush=True)
+
+    await asyncio.sleep(2)
+    token = bearer_box.get("token", "")
+    if not token:
+        # 未捕获到页面请求的 token:可能已登录但 SPA 静默。触发一次客户端导航
+        # 让它发 API,再等一轮。
+        try:
+            await page.evaluate("() => { window.history.pushState({}, '', '/dashboard/overview'); window.dispatchEvent(new PopStateEvent('popstate')); }")
+            await asyncio.sleep(4)
+        except Exception:
+            pass
+        token = bearer_box.get("token", "")
+    if not token:
+        return fail_result("auth_required", detail="nailao: 未拦截到 Bearer token(会话未建立或站点再改版)", adapter=kind, stage="auth")
+
+    # 同页带 Bearer 调签到 API。quota 数字只回传格式化文本,token 绝不落日志。
+    checkin = await page.evaluate(
+        """async (t) => {
+            const r = await fetch('/api/user/checkin', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + t },
+                body: '{}',
+            });
+            let body = null; try { body = await r.json(); } catch (e) {}
+            const d = (body && body.data) || {};
+            return {
+                status: r.status,
+                success: !!(body && body.success === true),
+                message: (body && body.message) || '',
+                quota_awarded: typeof d.quota_awarded_display === 'number' ? d.quota_awarded_display : null,
+            };
+        }""",
+        token,
+    )
+    status = (checkin or {}).get("status")
+    message = str((checkin or {}).get("message", ""))[:80]
+    print(f"  nailao checkin api -> status={status} message={message}", flush=True)
+
+    if status == 401 or status == 403:
+        return fail_result("auth_required", detail=f"nailao checkin api 401 ({message})", adapter=kind, stage="auth")
+    if (checkin or {}).get("success"):
+        quota = (checkin or {}).get("quota_awarded")
+        detail = f"nailao 签到成功 (+{quota} 🧀)" if quota is not None else "nailao 签到成功"
+        action = ActionEvidence(
+            kind="api_post",
+            target="/api/user/checkin",
+            attempted_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        return ok_result(
+            "OK",
+            adapter=kind,
+            detail=detail,
+            action=action,
+            confirmation=dom_confirmation(f"签到成功 +{quota} 🧀" if quota is not None else "签到成功", done_state=True),
+            pre_state="PENDING",
+            post_state="DONE",
+            transition="PENDING_TO_DONE",
+            attribution="runner",
+        )
+    if re.search(r"今日已签到|今天已经签到|already", message, re.I):
+        return ok_result(
+            "ALREADY", adapter=kind, detail=f"nailao {message}",
+            action=ActionEvidence(kind="none"),
+            confirmation=dom_confirmation(message, done_state=True),
+            pre_state="DONE", post_state="DONE", transition="NONE", attribution="site",
+        )
+    return fail_result("no_grant", detail=f"nailao checkin api: {message}", adapter=kind, stage="confirm")
+
+
 def is_huaweicloud_site(site_url: str) -> bool:
     """developer.huaweicloud.com 华为云开发者成长中心判定."""
     u = (site_url or "").lower()
@@ -12378,6 +12568,8 @@ async def legacy_checkin_on_page(
             return await pool_checkin(page, adapter, browser=browser)
         if kind == "sub2api" or is_sub2api_site(site_url) or is_sub2api_name(adapter.name):
             return await sub2api_checkin(page, adapter, browser=browser)
+        if kind == "nailao" or is_nailao_site(site_url) or is_nailao_name(adapter.name):
+            return await nailao_checkin(page, adapter, browser=browser)
         if kind == "xmiaom" or is_xmiaom_site(site_url) or is_xmiaom_name(adapter.name):
             return await xmiaom_checkin(page, adapter, browser=browser)
         if kind == "jianzhile" or is_jianzhile_site(site_url) or is_jianzhile_name(adapter.name):
