@@ -1490,6 +1490,10 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     # LinuxDO OAuth 站(checkin_enabled=true/linuxdo_oauth=true),/profile
     # 「立即签到」+「今日已签到」通用接法。
     _N("azurekiln", "https://newapi.azurekiln.cn/profile", prefer_catalog_url=True),
+    # 灵境公益站(6661886.xyz)—— 2026-10-28 接入。标准 New API v1.0.0-rc.47,
+    # LinuxDO OAuth 登录(共享 9222 profile),签到 /profile「立即签到」+ 确认门,
+    # 奖励 $1/天,无 Turnstile。通用 newapi_profile 通道。
+    _N("lingjing", "https://6661886.xyz/profile", prefer_catalog_url=True),
 ]
 
 

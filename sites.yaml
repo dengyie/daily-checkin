@@ -1359,3 +1359,16 @@ sites:
     url: https://newapi.azurekiln.cn/profile
     kind: newapi_profile
     prefer_catalog_url: true
+  # lingjing(6661886.xyz / 灵境公益站)—— 2026-10-28 接入。
+  # 标准 New API 默认前端 v1.0.0-rc.47(/api/status 实测):
+  # checkin_enabled=true、linuxdo_oauth=true、github_oauth=true、
+  # password_login_enabled=true、turnstile_check=false。
+  # LinuxDO OAuth 站(共享 9222 profile 的 mango 会话,用户 ID 304 @mangoqwq),
+  # 不登记账密,会话失效时由 runner 的 LinuxDO SSO 兜底重新授权。
+  # 签到在 /profile「每日签到」卡片:未签「立即签到」→ 点击后卡片翻「已签到」,
+  # toast「签到成功！获得 $1」,POST /api/user/checkin 返回 quota_awarded。
+  # 奖励 $1/天(max_quota=min_quota=500000)。走标准 newapi_profile 流程。
+  - name: 'lingjing'
+    url: https://6661886.xyz/profile
+    kind: newapi_profile
+    prefer_catalog_url: true

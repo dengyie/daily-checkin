@@ -4830,6 +4830,38 @@ class TestSitesYaml(unittest.TestCase):
         # LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
         self.assertIsNone(get_account_credential("azurekiln"))
 
+    def test_yaml_registers_lingjing_entry(self):
+        """灵境公益站(6661886.xyz) 2026-10-28 接入:标准 LinuxDO+New API 站,
+        newapi_profile 通道,/profile,prefer_catalog_url,无自定义选择器。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "lingjing"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 lingjing 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://6661886.xyz/profile")
+        self.assertEqual(a.login_url, "")
+        # 标准 New API 默认前端:走通用「签到/已签到」判定,无需自定义选择器
+        self.assertIn("签到", " ".join(a.sign_selectors))
+        self.assertIn("已签到", " ".join(a.already_selectors))
+        self.assertTrue(a.prefer_catalog_url)
+        resolved = resolve_site("lingjing", "https://6661886.xyz/profile")
+        self.assertEqual(resolved.url, "https://6661886.xyz/profile")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "lingjing"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 lingjing")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://6661886.xyz/profile")
+        # LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
+        self.assertIsNone(get_account_credential("lingjing"))
+
     def test_yaml_registers_sub2api_entry(self):
         """sites.yaml 的 sub2api 条目解析为 sub2api,/custom/activity,prefer_catalog_url,且账密注册有效。"""
         import yaml
