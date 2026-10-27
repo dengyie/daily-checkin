@@ -205,6 +205,10 @@ sites:
   - name: 'ciallo'
     url: https://ioll.pp.ua/profile
     kind: newapi_profile
+  # 咕嘎咕嘎生图站 (ai.xmiaom.com):2026-10-27 起站点只接受「当天登录」的会话。
+  # 过期会话点击会被服务端静默拒绝(无请求/无确认)或页面不渲染「立即签到」
+  # (晨批 no_button)。xmiaom 专属流程每次签到前先做本站 /api/user/logout +
+  # LinuxDO SSO 重新登录, 再点 CTA。P0: 只清本站会话, 不清 9222 全量 Cookie。
   - name: '咕嘎咕嘎生图站'
     url: https://ai.xmiaom.com/dashboard/overview
     kind: xmiaom
@@ -219,6 +223,8 @@ sites:
       - 'text=签到成功'
     prefer_catalog_url: true
     login_url: https://ai.xmiaom.com/sign-in
+    # 强制重登录 + SSO 超时重试一次需要两轮授权预算, 批次默认 60s 不够。
+    site_timeout_s: 150
   - name: '靴貓公益站'
     url: https://api.ilovecat520.me/dashboard/overview
     kind: ilovecat
@@ -1338,3 +1344,16 @@ sites:
       - 'button[disabled]:has-text("正常签到")'
       - 'text=今日已签'
       - 'text=签到成功'
+  # azurekiln(newapi.azurekiln.cn / AzureKilnAPI)—— 2026-10-27 接入。
+  # 标准 New API 默认前端 v1.0.0-rc.45(/api/status 实测):
+  # checkin_enabled=true、linuxdo_oauth=true、password_login_enabled=false、
+  # turnstile_check=true。站方另有自定义 OAuth AzureKilnSSO(sso.azurekiln.cn),
+  # 不影响 LinuxDO SSO 主通道。纯 LinuxDO OAuth 站(共享 9222 profile 已登录),
+  # 不登记账密,会话失效时由 runner 的 LinuxDO SSO 兜底重新授权。
+  # 签到在 /profile「每日签到」卡片:未签「立即签到」→ 已签「今日已签到」。
+  # 签到接口挂 Turnstile(wait_turnstile_token 内置等待 token 就绪后才点 CTA)。
+  # 走标准 newapi_profile 流程:/profile → 点「立即签到」+ 确认门。
+  - name: 'azurekiln'
+    url: https://newapi.azurekiln.cn/profile
+    kind: newapi_profile
+    prefer_catalog_url: true

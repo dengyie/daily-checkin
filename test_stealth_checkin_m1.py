@@ -4040,6 +4040,19 @@ class TestSitesYamlCrashPaths(unittest.TestCase):
         self.assertEqual(adapters[0].name, "test站")
         self.assertEqual(adapters[0].ready_rounds, 15)
 
+    def test_bad_site_timeout_degrades_to_batch_default(self):
+        """Malformed or negative site_timeout_s degrades to 0 (use batch default)."""
+        for raw in ("abc", "-5"):
+            p = self._write_yaml(f"""sites:
+  - name: 咕嘎咕嘎生图站
+    url: https://ai.xmiaom.com/dashboard/overview
+    kind: xmiaom
+    site_timeout_s: {raw}
+""")
+            adapters = self.m.load_sites_from_yaml(p)
+            self.assertEqual(len(adapters), 1, raw)
+            self.assertEqual(adapters[0].site_timeout_s, 0.0, raw)
+
     def test_scalar_string_signs_normalized_to_single_list(self):
         """A scalar-string `signs` is normalized into a single-element list."""
         p = self._write_yaml("""sites:
@@ -4777,6 +4790,38 @@ class TestSitesYaml(unittest.TestCase):
         self.assertEqual(builtin_entry.kind, "newapi_profile")
         self.assertEqual(builtin_entry.url, "https://api.ssftt.vip/profile")
         self.assertEqual(builtin_entry.login_url, "https://api.ssftt.vip/login")
+
+    def test_yaml_registers_azurekiln_entry(self):
+        """sites.yaml 的 azurekiln 条目解析为 newapi_profile//profile,LinuxDO OAuth 无账密。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "azurekiln"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 azurekiln 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://newapi.azurekiln.cn/profile")
+        self.assertEqual(a.login_url, "")
+        # 标准 New API 默认前端:走通用「签到/已签到」判定,无需自定义选择器
+        self.assertIn("签到", " ".join(a.sign_selectors))
+        self.assertIn("已签到", " ".join(a.already_selectors))
+        # yaml 显式 prefer_catalog_url,避免任务行 URL 漂移
+        self.assertTrue(a.prefer_catalog_url)
+        resolved = resolve_site("azurekiln", "https://newapi.azurekiln.cn/profile")
+        self.assertEqual(resolved.url, "https://newapi.azurekiln.cn/profile")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "azurekiln"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 azurekiln")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://newapi.azurekiln.cn/profile")
+        # LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
+        self.assertIsNone(get_account_credential("azurekiln"))
 
     def test_yaml_registers_sub2api_entry(self):
         """sites.yaml 的 sub2api 条目解析为 sub2api,/custom/activity,prefer_catalog_url,且账密注册有效。"""
@@ -6637,8 +6682,8 @@ class TestXmiaomCheckin(unittest.TestCase):
 
     React SPA, 签到路径位于 /dashboard/overview (原 /profile 废弃).
     主 CTA 为 button:has-text("立即签到"), 签到后变为 button:has-text("已签到") (disabled).
-    当会话非当日活跃时,服务端返回 checkin_login_required / "签到需要当天登录的会话",
-    需自动 logout 并重新进行 LinuxDO SSO 登录刷新当日会话.
+    2026-10-27 起站点只接受「当天登录」的会话: 过期会话点击被静默拒绝或页面
+    根本不渲染 CTA。因此**每次签到前**强制本站 logout + LinuxDO SSO 重新登录。
     P0 红线: 绝不调用 clear_cookies / clear_localStorage / clear_all (全清 9222 其它域).
     """
 
@@ -6646,6 +6691,21 @@ class TestXmiaomCheckin(unittest.TestCase):
         self.m = load_mod(force=True)
         import asyncio as _aio
         self.asyncio = _aio
+        # 行为单测不跑真实 OAuth, 也不等真实轮询: 强制重登录路径打桩.
+        async def _fake_terms(page):
+            return 0
+        async def _fake_sso(page, origin_host="", browser=None):
+            return "OK"
+        async def _fake_ready(page, min_len=40, rounds=15):
+            return True
+        async def _fake_wait_any(page, selectors, total_s, **kw):
+            # 卡片水合等待在单测里不真等; 后续步骤仍走真实扫描逻辑.
+            return None, None
+        self.m.check_terms = _fake_terms
+        self.m.try_linuxdo_sso = _fake_sso
+        self.m.wait_text_ready = _fake_ready
+        self.m.wait_for_any_visible = _fake_wait_any
+        self.m.XMIAOM_SSO_RETRY_DELAY_S = 0
 
     def _adapter(self):
         return self.m.SiteAdapter(
@@ -6700,10 +6760,22 @@ class TestXmiaomCheckin(unittest.TestCase):
         self.assertEqual(a.url, "https://ai.xmiaom.com/dashboard/overview")
         self.assertTrue(a.prefer_catalog_url)
         self.assertEqual(a.login_url, "https://ai.xmiaom.com/sign-in")
+        # 每次签到强制 logout+SSO, 重试一次需要超过批次默认 60s 的预算
+        self.assertEqual(a.site_timeout_s, 150.0)
         joined_signs = " ".join(a.sign_selectors)
         self.assertIn("立即签到", joined_signs)
         joined_already = " ".join(a.already_selectors)
         self.assertIn("已签到", joined_already)
+
+    def test_resolve_site_keeps_site_timeout_override(self):
+        """任务行带 URL 时 resolve_site 会重建 adapter: 新字段不能丢。"""
+        a = self.m.resolve_site("咕嘎咕嘎生图站", "https://ai.xmiaom.com/dashboard/overview")
+        self.assertIsNotNone(a)
+        self.assertEqual(a.kind, "xmiaom")
+        self.assertEqual(a.site_timeout_s, 150.0,
+                         "带 note URL 重建 adapter 时必须保留站点级 wall clock")
+        b = self.m.resolve_site("咕嘎咕嘎生图站", "")
+        self.assertEqual(b.site_timeout_s, 150.0)
 
     def test_builtin_entry_xmiaom(self):
         """_BUILTIN_SITE_ADAPTERS 中的 咕嘎咕嘎生图站 为 xmiaom adapter。"""
@@ -6714,6 +6786,8 @@ class TestXmiaomCheckin(unittest.TestCase):
         self.assertEqual(builtin_entry.url, "https://ai.xmiaom.com/dashboard/overview")
         self.assertTrue(builtin_entry.prefer_catalog_url)
         self.assertEqual(builtin_entry.login_url, "https://ai.xmiaom.com/sign-in")
+        self.assertEqual(builtin_entry.site_timeout_s, 150.0,
+                         "内置回退也要带足两轮 SSO 的预算")
 
     def test_dispatch_contains_xmiaom_branch(self):
         src = TARGET.read_text(encoding="utf-8")
@@ -6721,13 +6795,424 @@ class TestXmiaomCheckin(unittest.TestCase):
         self.assertIn("return await xmiaom_checkin(page, adapter, browser=browser)", src)
 
     def test_p0_no_clear_cookies_in_xmiaom_path(self):
-        """xmiaom 专属流程不得调用 clear_cookies / clear_localstorage / 全清接口."""
+        """xmiaom 专属流程不得调用 clear_cookies / clear_localstorage / 全清接口.
+
+        同时禁掉具体清库 API: 单禁 "localstorage" 会误伤中文说明里的域名描述,
+        但要真的清 localStorage 必须落到这三个调用上。
+        """
         import inspect
         src = inspect.getsource(self.m.xmiaom_checkin)
         lower = src.lower()
         self.assertNotIn("clear_cookies", lower)
         self.assertNotIn("clear_localstorage", lower)
         self.assertNotIn("clear_all", lower)
+        self.assertNotIn("localstorage.clear", lower)
+        self.assertNotIn("localstorage.removeitem", lower)
+        self.assertNotIn("document.cookie", lower)
+        self.assertNotIn("indexeddb", lower)
+        self.assertNotIn("deleteallcookies", lower)
+
+    def test_xmiaom_forces_fresh_login_before_cta(self):
+        """每次签到前必须先本站 logout + 重新 SSO, 再扫描/点击 CTA。"""
+        m = self.m
+        order = []
+        state = {"checked": False}
+
+        async def fake_terms(page):
+            order.append("terms")
+            return 0
+
+        async def fake_sso(page, origin_host="", browser=None):
+            order.append("sso")
+            return "OK"
+
+        m.check_terms = fake_terms
+        m.try_linuxdo_sso = fake_sso
+
+        class FakeLocator:
+            def __init__(self, sel, visible=True, text=""):
+                self.sel = sel
+                self._visible = visible
+                self._text = text
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def inner_text(self):
+                return self._text
+            async def click(self, **kw):
+                order.append("click:" + self.sel)
+                if "立即签到" in self.sel:
+                    state["checked"] = True
+
+        class FakePage:
+            url = "https://ai.xmiaom.com/dashboard/overview"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k):
+                if "/api/user/logout" in expr:
+                    order.append("logout")
+                    return True
+                return ""
+            def locator(self, sel):
+                if "已签到" in sel:
+                    return FakeLocator(sel, visible=state["checked"], text="已签到")
+                if "立即签到" in sel:
+                    return FakeLocator(sel, visible=not state["checked"], text="立即签到")
+                return FakeLocator(sel, visible=False)
+
+        async def fake_page_text(p, limit=2000):
+            if state["checked"]:
+                return "签到成功\n已签到"
+            return "个人中心\n立即签到"
+
+        orig = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.xmiaom_checkin(FakePage(), self._adapter()))
+        finally:
+            m.page_text = orig
+
+        self.assertEqual(res.status, "OK")
+        self.assertIn("logout", order, "必须先调用站内 /api/user/logout")
+        self.assertIn("sso", order, "logout 后必须重新走 LinuxDO SSO")
+        self.assertLess(order.index("logout"), order.index("sso"))
+        cta_clicks = [i for i, o in enumerate(order)
+                      if o.startswith("click:") and "立即签到" in o]
+        self.assertTrue(cta_clicks, "重新登录后应点击「立即签到」")
+        self.assertLess(order.index("sso"), cta_clicks[0], "SSO 必须发生在点击之前")
+
+    def test_xmiaom_fresh_login_failure_returns_auth_failed(self):
+        """SSO 刷新失败 → 在扫描 CTA 之前返回 auth_failed, 不再点签到。"""
+        m = self.m
+        touched = []
+
+        async def fake_sso_timeout(page, origin_host="", browser=None):
+            return "TIMEOUT"
+
+        m.try_linuxdo_sso = fake_sso_timeout
+
+        class FakePage:
+            url = "https://ai.xmiaom.com/dashboard/overview"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k):
+                return True
+            def locator(self, sel):
+                touched.append(sel)
+                raise AssertionError(f"登录失败后不应访问 DOM: {sel}")
+
+        async def fake_page_text(p, limit=2000):
+            return "登录\n使用 LinuxDO 继续"
+
+        orig = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.xmiaom_checkin(FakePage(), self._adapter()))
+        finally:
+            m.page_text = orig
+
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "auth_failed")
+        self.assertIn("sso=TIMEOUT", res.detail)
+        self.assertEqual(touched, [], "登录失败时应立即返回, 不扫描签到按钮")
+
+    def test_xmiaom_logout_returns_to_site_origin_first(self):
+        """页面停在别的源(OAuth/CF)时先回站点根再注销, 保证 fetch 打对 origin。"""
+        m = self.m
+        order = []
+        state = {"checked": False, "offsite": True}
+
+        async def fake_sso(page, origin_host="", browser=None):
+            order.append("sso")
+            return "OK"
+
+        m.try_linuxdo_sso = fake_sso
+
+        class FakeLocator:
+            def __init__(self, sel, visible=True, text=""):
+                self.sel = sel
+                self._visible = visible
+                self._text = text
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def inner_text(self):
+                return self._text
+            async def click(self, **kw):
+                order.append("click:" + self.sel)
+                if "立即签到" in self.sel:
+                    state["checked"] = True
+
+        class FakePage:
+            def __init__(self):
+                self.url = "about:blank"
+            async def goto(self, url, *a, **k):
+                order.append("goto:" + url)
+                if "/dashboard/overview" in url and state["offsite"]:
+                    # 未登录被直送 LinuxDO 授权页: 页面不在站点源上
+                    state["offsite"] = False
+                    self.url = "https://connect.linux.do/oauth2/authorize"
+                else:
+                    self.url = url
+            async def evaluate(self, expr, *a, **k):
+                if "/api/user/logout" in expr:
+                    order.append("logout")
+                    return True
+                return ""
+            def locator(self, sel):
+                if "已签到" in sel:
+                    return FakeLocator(sel, visible=state["checked"], text="已签到")
+                if "立即签到" in sel:
+                    return FakeLocator(sel, visible=not state["checked"], text="立即签到")
+                return FakeLocator(sel, visible=False)
+
+        async def fake_page_text(p, limit=2000):
+            if state["checked"]:
+                return "签到成功\n已签到"
+            return "个人中心\n立即签到"
+
+        orig = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.xmiaom_checkin(FakePage(), self._adapter()))
+        finally:
+            m.page_text = orig
+
+        self.assertEqual(res.status, "OK")
+        root_goto = "goto:" + m.XMIAOM_ORIGIN + "/"
+        self.assertIn(root_goto, order, "注销前应先回到站点根")
+        self.assertLess(
+            order.index(root_goto), order.index("logout"),
+            "必须先在站点源上, 再发 /api/user/logout",
+        )
+
+    def test_xmiaom_sso_timeout_retries_then_fails_with_logout_state(self):
+        """SSO 两次 TIMEOUT → auth_failed, detail 里同时带 sso 与 logout 状态。"""
+        m = self.m
+        sso_calls = []
+        logout_calls = []
+
+        async def fake_sso(page, origin_host="", browser=None):
+            sso_calls.append(origin_host)
+            return "TIMEOUT"
+
+        m.try_linuxdo_sso = fake_sso
+
+        class FakePage:
+            url = "https://ai.xmiaom.com/dashboard/overview"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k):
+                if "/api/user/logout" in expr:
+                    logout_calls.append(1)
+                    return True
+                return ""
+            def locator(self, sel):
+                raise AssertionError("登录失败后不应访问 DOM")
+
+        async def fake_page_text(p, limit=2000):
+            return "登录\n使用 LinuxDO 继续"
+
+        orig = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.xmiaom_checkin(FakePage(), self._adapter()))
+        finally:
+            m.page_text = orig
+
+        self.assertEqual(len(logout_calls), 1, "每次签到只注销一次")
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "auth_failed")
+        self.assertIn("sso=TIMEOUT", res.detail)
+        self.assertIn("logout=ok", res.detail)
+        self.assertEqual(len(sso_calls), 2, "TIMEOUT 应重试一次")
+
+    def test_xmiaom_waits_for_card_hydration_before_scan(self):
+        """登录后必须等签到卡片挂载(SPA 外壳先到), 否则会误报 no_button。"""
+        m = self.m
+        waits = []
+
+        async def fake_wait_any(page, selectors, total_s, **kw):
+            waits.append((list(selectors), total_s, kw))
+            return None, None
+
+        m.wait_for_any_visible = fake_wait_any
+
+        class FakeLocator:
+            def __init__(self, sel, text="已签到", visible=True):
+                self.sel = sel
+                self._text = text
+                self._visible = visible
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def inner_text(self):
+                return self._text
+            async def click(self, **kw):
+                pass
+
+        class FakePage:
+            url = "https://ai.xmiaom.com/dashboard/overview"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k):
+                return True if "/api/user/logout" in expr else ""
+            def locator(self, sel):
+                if "已签到" in sel:
+                    return FakeLocator(sel, text="已签到", visible=True)
+                if "立即签到" in sel:
+                    return FakeLocator(sel, text="立即签到", visible=False)
+                return FakeLocator(sel, visible=False)
+
+        async def fake_page_text(p, limit=2000):
+            return "咕嘎咕嘎生图站\n个人中心\n已签到"
+
+        orig = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.xmiaom_checkin(FakePage(), self._adapter()))
+        finally:
+            m.page_text = orig
+
+        self.assertEqual(res.status, "ALREADY")
+        self.assertTrue(waits, "登录后应等待签到卡片挂载")
+        selectors, total_s, kwargs = waits[0]
+        self.assertTrue(any("立即签到" in s for s in selectors))
+        self.assertTrue(any("已签到" in s for s in selectors))
+        self.assertEqual(total_s, m.XMIAOM_CARD_WAIT_S)
+        self.assertTrue(kwargs.get("trusted_sign"), "显式选择器应跳过 CTA 推断")
+
+    def test_xmiaom_logout_not_on_site_skips_logout(self):
+        """页面回不到站点源时跳过 logout(不误打其它 origin), 但继续走 SSO。"""
+        m = self.m
+        order = []
+        state = {"checked": False}
+
+        async def fake_sso(page, origin_host="", browser=None):
+            order.append("sso")
+            return "OK"
+
+        m.try_linuxdo_sso = fake_sso
+
+        class FakeLocator:
+            def __init__(self, sel, visible=True, text=""):
+                self.sel = sel
+                self._visible = visible
+                self._text = text
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def inner_text(self):
+                return self._text
+            async def click(self, **kw):
+                order.append("click:" + self.sel)
+                if "立即签到" in self.sel:
+                    state["checked"] = True
+
+        class FakePage:
+            url = "https://connect.linux.do/oauth2/authorize"
+            async def goto(self, *a, **k):
+                # goto 始终留在授权页: 永远回不到站点源
+                pass
+            async def evaluate(self, expr, *a, **k):
+                if "/api/user/logout" in expr:
+                    order.append("logout")
+                    return True
+                return ""
+            def locator(self, sel):
+                if "已签到" in sel:
+                    return FakeLocator(sel, visible=state["checked"], text="已签到")
+                if "立即签到" in sel:
+                    return FakeLocator(sel, visible=not state["checked"], text="立即签到")
+                return FakeLocator(sel, visible=False)
+
+        async def fake_page_text(p, limit=2000):
+            if state["checked"]:
+                return "签到成功\n已签到"
+            return "个人中心\n立即签到"
+
+        orig = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.xmiaom_checkin(FakePage(), self._adapter()))
+        finally:
+            m.page_text = orig
+
+        self.assertEqual(res.status, "OK")
+        self.assertNotIn("logout", order, "不在站点源时绝不能发站点注销请求")
+        self.assertIn("sso", order, "logout 跳过不应阻断 SSO")
+
+    def test_xmiaom_sso_timeout_retries_once(self):
+        """SSO 偶发 TIMEOUT(授权页不回跳) → 原地重试一次成功。"""
+        m = self.m
+        state = {"checked": False}
+        sso_calls = []
+
+        async def flaky_sso(page, origin_host="", browser=None):
+            sso_calls.append(origin_host)
+            return "TIMEOUT" if len(sso_calls) == 1 else "OK"
+
+        m.try_linuxdo_sso = flaky_sso
+
+        class FakeLocator:
+            def __init__(self, sel, visible=True, text=""):
+                self.sel = sel
+                self._visible = visible
+                self._text = text
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._visible else 0
+            async def is_visible(self, timeout=800):
+                return self._visible
+            async def inner_text(self):
+                return self._text
+            async def click(self, **kw):
+                if "立即签到" in self.sel:
+                    state["checked"] = True
+
+        class FakePage:
+            url = "https://ai.xmiaom.com/dashboard/overview"
+            async def goto(self, *a, **k): pass
+            async def evaluate(self, expr, *a, **k):
+                if "/api/user/logout" in expr:
+                    return True
+                return ""
+            def locator(self, sel):
+                if "已签到" in sel:
+                    return FakeLocator(sel, visible=state["checked"], text="已签到")
+                if "立即签到" in sel:
+                    return FakeLocator(sel, visible=not state["checked"], text="立即签到")
+                return FakeLocator(sel, visible=False)
+
+        async def fake_page_text(p, limit=2000):
+            if state["checked"]:
+                return "签到成功\n已签到"
+            return "个人中心\n立即签到"
+
+        orig = m.page_text
+        m.page_text = fake_page_text
+        try:
+            res = self.asyncio.run(m.xmiaom_checkin(FakePage(), self._adapter()))
+        finally:
+            m.page_text = orig
+
+        self.assertEqual(res.status, "OK")
+        self.assertEqual(len(sso_calls), 2, "TIMEOUT 后应重试一次 SSO")
+        self.assertTrue(all(h == m.XMIAOM_HOST for h in sso_calls))
 
     def test_xmiaom_already_checked_in(self):
         """页面显示「已签到」时直接返回 ALREADY。"""

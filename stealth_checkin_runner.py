@@ -35,7 +35,7 @@ import re
 import ssl
 import time
 import urllib.request
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -564,6 +564,10 @@ class SiteAdapter:
     # /login→/sign-in 重定向所以不需要。_ensure_account_logged_in 用该值
     # override 派生 URL(缺省回退到 /login 派生)。
     login_url: str = ""
+    # Per-site wall clock override; 0 means "use the batch default (SITE_TIMEOUT_S)".
+    # 需要每次都强制重登录的站(xmiaom)必须留出两轮 SSO 的预算, 否则第一次
+    # 超时后的重试会被站点级计时器直接砍断。
+    site_timeout_s: float = 0.0
 
 
 def _A(
@@ -627,6 +631,7 @@ def _B(
     trust_cta_has_text: bool = False,
     kind: AdapterKind = "browser",
     login_url: str = "",
+    site_timeout_s: float = 0.0,
     ) -> SiteAdapter:
     return SiteAdapter(
         name=name,
@@ -655,6 +660,7 @@ def _B(
         signin_api_uid_header=signin_api_uid_header,
         trust_cta_has_text=trust_cta_has_text,
         login_url=login_url,
+        site_timeout_s=site_timeout_s,
     )
 
 
@@ -833,6 +839,7 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
         login_url="https://ai.xmiaom.com/sign-in",
         kind="xmiaom",
+        site_timeout_s=150.0,
     ),
     _B(
         "靴貓公益站",
@@ -1471,6 +1478,10 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         ],
         kind="browser",
     ),
+    # azurekiln(newapi.azurekiln.cn, AzureKilnAPI):标准 New API 默认前端,
+    # LinuxDO OAuth 站(checkin_enabled=true/linuxdo_oauth=true),/profile
+    # 「立即签到」+「今日已签到」通用接法。
+    _N("azurekiln", "https://newapi.azurekiln.cn/profile", prefer_catalog_url=True),
 ]
 
 
@@ -1497,6 +1508,13 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
         # of crashing the whole import at startup.
         print(f"  sites.yaml: bad ready_rounds for {name!r}; using default 15", flush=True)
         rr = 15
+    try:
+        site_timeout = float(entry.get("site_timeout_s", 0) or 0)
+        if site_timeout < 0:
+            site_timeout = 0.0
+    except (TypeError, ValueError):
+        print(f"  sites.yaml: bad site_timeout_s for {name!r}; using batch default", flush=True)
+        site_timeout = 0.0
 
     if kind == "bohe":
         return _A(name, url, list(signs or []), list(already or []), kind="bohe", ready_rounds=rr)
@@ -1683,6 +1701,7 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             prefer_catalog_url=True,
             login_url=str(entry.get("login_url", "") or "https://ai.xmiaom.com/sign-in"),
             kind="xmiaom",
+            site_timeout_s=site_timeout,
         )
     if kind == "jianzhile":
         return _B(
@@ -1775,6 +1794,7 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
         signin_api_uid_header=bool(entry.get("signin_api_uid_header", False)),
         trust_cta_has_text=bool(entry.get("trust_cta_has_text", False)),
         login_url=entry.get("login_url", ""),
+        site_timeout_s=site_timeout,
     )
 
 
@@ -9517,6 +9537,21 @@ async def mulink_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     return fail_result("no_confirm", detail=(wtext2[:80] if "额度池" not in wtext2 else wtext2[wtext2.find("额度池"):wtext2.find("额度池")+200]), adapter=kind)
 
 
+XMIAOM_HOST = "ai.xmiaom.com"
+XMIAOM_ORIGIN = f"https://{XMIAOM_HOST}"
+XMIAOM_DASHBOARD_URL = f"{XMIAOM_ORIGIN}/dashboard/overview"
+XMIAOM_SIGNIN_URL = f"{XMIAOM_ORIGIN}/sign-in?redirect=%2Fdashboard%2Foverview"
+# 2026-10-27 实测: /api/user/self 在**已登录**状态下也回 401(该部署要求
+# New-Api-User 头), 所以不能拿它当"会话是否失效"的证据。注销只认 fetch 成功。
+# 2026-10-27 实证: LinuxDO 授权页点了「允许」偶发不回跳(30s 超时), 隔 3s
+# 重跑同一流程即成功。重试窗口用来避免把站点级 wall clock 撑爆。
+XMIAOM_SSO_RETRY_DELAY_S = 3.0
+XMIAOM_SSO_RETRY_WINDOW_S = 60.0
+# 登录后 SPA 外壳先渲染(body 已有导航文本), 签到卡片还要再等几秒才挂载;
+# 只等 wait_text_ready 会在卡片出现前就扫描, 误报 no_button。
+XMIAOM_CARD_WAIT_S = 20.0
+
+
 def is_xmiaom_site(site_url: str) -> bool:
     """咕嘎咕嘎 (ai.xmiaom.com) 专属站判定."""
     u = (site_url or "").lower()
@@ -9529,6 +9564,14 @@ def is_xmiaom_name(name: str) -> bool:
     return "咕嘎" in n or "xmiaom" in n
 
 
+async def _xmiaom_on_site(page) -> bool:
+    """当前页面是否停在站点源上 (相对路径 fetch 只在这个源上有效)."""
+    try:
+        return urlparse(await page_url(page) or "").hostname == XMIAOM_HOST
+    except Exception:
+        return False
+
+
 async def xmiaom_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
     """咕嘎咕嘎生图站 (ai.xmiaom.com) 专用签到流程.
 
@@ -9536,31 +9579,96 @@ async def xmiaom_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     1. 签到页位于 /dashboard/overview (原 /profile 不再提供签到功能).
     2. 主 CTA 按钮: button:has-text("立即签到").
     3. 已签到态: button:has-text("已签到") (处于 disabled 状态) 或页面文本包含「已签到」.
-    4. 会话新鲜度要求 (checkin_login_required):
-       服务端 POST /api/user/daily-reward 强制校验当日前置会话:
-       若会话非当日登录 (或服务端返回 checkin_login_required / "签到需要当天登录的会话"),
-       需先通过 GET /api/user/logout 注销旧会话,再走 LinuxDO OAuth 重新登录获取新会话.
+    4. 会话新鲜度要求 (2026-10-27 起强制):
+       服务端 POST /api/user/daily-reward 只接受「当天登录」的会话。过期会话
+       即使页面仍显示登录态, 点击也会被静默拒绝(无请求/无确认)或页面直接
+       不渲染「立即签到」(no_button)。因此**每次签到前**先 GET /api/user/logout
+       (仅本站) 再走 LinuxDO OAuth 重新登录, 铸造当日会话; 注销前先确认页面
+       在 ai.xmiaom.com 源上(否则先回站点根), 注销后用 /api/user/self 的 401
+       确认会话真失效, SSO 超时则原地重试一次。
+       点击后若仍出现 checkin_login_required / "签到需要当天登录的会话", 再刷新一次。
     5. LinuxDO 登录要求:
        在 /sign-in 页面必须先勾选服务协议复选框 (span[role=checkbox]),再点击「使用 LinuxDO 继续」.
     """
     kind = adapter.kind or "xmiaom"
-    site_url = adapter.url or "https://ai.xmiaom.com/dashboard/overview"
+    site_url = adapter.url or XMIAOM_DASHBOARD_URL
     if "/profile" in site_url:
-        site_url = "https://ai.xmiaom.com/dashboard/overview"
+        site_url = XMIAOM_DASHBOARD_URL
 
     print(f"  xmiaom flow: {adapter.name} ({site_url})", flush=True)
 
     async def _ensure_sso():
         if "/sign-in" not in (page.url or ""):
             try:
-                await page.goto("https://ai.xmiaom.com/sign-in?redirect=%2Fdashboard%2Foverview", wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+                await page.goto(XMIAOM_SIGNIN_URL, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
                 await asyncio.sleep(1.0)
             except Exception:
                 pass
         await check_terms(page)
         await asyncio.sleep(0.3)
-        sso_status = await try_linuxdo_sso(page, origin_host="ai.xmiaom.com", browser=browser)
+        sso_status = await try_linuxdo_sso(page, origin_host=XMIAOM_HOST, browser=browser)
         return sso_status
+
+    async def _logout_site() -> str:
+        """Log this site out, from the site's own origin. Returns ok/not_on_site/failed.
+
+        相对路径 fetch 必须落在 ai.xmiaom.com 上。未登录被直送 connect.linux.do、
+        或初始 goto 落在 Cloudflare 挑战页时, 页面可能停在别的源, 此时注销会打到
+        错误的 origin 并静默失效, 后面仍拿旧会话去签到就会复现 no_button。
+        注销后无法用 API 复核(gemai 式 New-Api-User 头缺失时 /api/user/self 对
+        有效会话也回 401), 真正的验证是随后的 OAuth 往返 + 页面能渲染仪表盘。
+        P0: 只调站内 /api/user/logout, 绝不清 9222 其它域 Cookie/localStorage。
+        """
+        if not await _xmiaom_on_site(page):
+            try:
+                await page.goto(XMIAOM_ORIGIN + "/", wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+            except Exception:
+                pass
+            if not await _xmiaom_on_site(page):
+                print("  xmiaom: logout skipped, page not on site origin", flush=True)
+                return "not_on_site"
+        try:
+            ok = await page.evaluate(
+                """async () => {
+                    try {
+                        const r = await fetch('/api/user/logout');
+                        return !!r.ok;
+                    } catch (e) { return false; }
+                }"""
+            )
+        except Exception as e:
+            print(f"  xmiaom: logout call failed: {type(e).__name__}", flush=True)
+            return "failed"
+        if not ok:
+            print("  xmiaom: logout returned non-OK", flush=True)
+            return "failed"
+        return "ok"
+
+    async def _force_fresh_login() -> tuple[str, str]:
+        """Mint a new same-day session before checking in. Returns (sso_status, logout_state).
+
+        2026-10-27 起站点规则: /api/user/daily-reward 只接受当天创建的会话。
+        过期会话即使页面仍显示登录态, 点击后也会被服务端静默拒绝(无请求/无确认),
+        表现为 30s 后 no_confirm 或直接 no_button。因此每次先做本站 logout,
+        再走 LinuxDO SSO 重新登录。logout 失败不阻断: OAuth 往返本身会签发新
+        会话, 但失败状态会进日志和失败 detail, 便于事后定位。
+        SSO 偶发 TIMEOUT(授权页点了「允许」但没回跳): 窗口内重试一次。
+        """
+        print("  xmiaom: forcing fresh same-day login...", flush=True)
+        started = time.monotonic()
+        logout_state = await _logout_site()
+        await asyncio.sleep(0.5)
+        sso_status = await _ensure_sso()
+        if (
+            sso_status != "OK"
+            and sso_status == "TIMEOUT"
+            and time.monotonic() - started < XMIAOM_SSO_RETRY_WINDOW_S
+        ):
+            print("  xmiaom: SSO TIMEOUT, retrying once...", flush=True)
+            await asyncio.sleep(XMIAOM_SSO_RETRY_DELAY_S)
+            sso_status = await _ensure_sso()
+        print(f"  xmiaom: fresh login state logout={logout_state} sso={sso_status}", flush=True)
+        return sso_status, logout_state
 
     # 1. 访问 /dashboard/overview
     try:
@@ -9570,14 +9678,28 @@ async def xmiaom_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     await bypass_chrome_interstitial_if_needed(page)
     await wait_text_ready(page, 30, adapter.ready_rounds)
 
+    # 2. 每次签到前强制重新登录(站点只认当天会话), 再回到签到页
+    fresh_status, logout_state = await _force_fresh_login()
+    if fresh_status != "OK":
+        return fail_result(
+            "auth_failed",
+            detail=f"fresh login: sso={fresh_status} logout={logout_state}",
+            adapter=kind,
+        )
+    try:
+        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+        await wait_text_ready(page, 30, adapter.ready_rounds)
+    except Exception:
+        pass
+
     cur_url = await page_url(page)
     cur_text = await page_text(page, 600)
 
-    # 2. 检查未登录态 (落到 /sign-in 或页面出现登录特征)
+    # 3. 兜底: 刷新会话后仍落在登录页/登出态, 再走一次 SSO
     if is_auth_page_url(cur_url) or looks_logged_out(cur_text):
-        print("  xmiaom: unauthenticated, performing LinuxDO SSO...", flush=True)
+        print("  xmiaom: still unauthenticated after fresh login, retrying SSO...", flush=True)
         sso_res = await _ensure_sso()
-        if sso_res not in ("OK", "ALREADY"):
+        if sso_res != "OK":
             return fail_result("auth_failed", detail=f"SSO: {sso_res}", adapter=kind)
         try:
             await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
@@ -9585,7 +9707,16 @@ async def xmiaom_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
         except Exception:
             pass
 
-    # 3. 检查是否今日已签 (幂等性判断)
+    # 3.5 等签到卡片挂载: SPA 外壳先到(body 已有导航文本), 卡片常晚 2-10s。
+    # 只靠 wait_text_ready 会在卡片出现前就扫描, 误报 no_button。
+    await wait_for_any_visible(
+        page,
+        ['button:has-text("立即签到")', 'button:has-text("已签到")'],
+        XMIAOM_CARD_WAIT_S,
+        trusted_sign=True,
+    )
+
+    # 4. 检查是否今日已签 (幂等性判断)
     done_btn = page.locator('button:has-text("已签到"), button[data-disabled]:has-text("签到")').first
     if await done_btn.count() > 0 and await done_btn.is_visible(timeout=1000):
         btn_txt = (await done_btn.inner_text()).strip()
@@ -9600,7 +9731,7 @@ async def xmiaom_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
         print(f"  xmiaom: already checked in ({already_sig})", flush=True)
         return confirmed_done_result(already_sig, adapter=kind)
 
-    # 4. 查找立即签到 CTA
+    # 5. 查找立即签到 CTA
     cta_btn = page.locator('button:has-text("立即签到")').first
     if await cta_btn.count() == 0 or not await cta_btn.is_visible(timeout=3000):
         text_now = await page_text(page, 500)
@@ -9614,7 +9745,7 @@ async def xmiaom_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
         attempted_at=datetime.now().isoformat(timespec="seconds"),
     )
 
-    # 5. 点击立即签到
+    # 6. 点击立即签到
     print("  xmiaom: clicking 立即签到...", flush=True)
     try:
         await cta_btn.click(timeout=3000)
@@ -9625,22 +9756,17 @@ async def xmiaom_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     await asyncio.sleep(1.0)
     await handle_post_click_dialogs_if_needed(page)
 
-    # 6. 轮询签到确认及当日前置会话异常 (checkin_login_required)
+    # 7. 轮询签到确认及当日前置会话异常 (checkin_login_required)
     for _ in range(12):
         await asyncio.sleep(0.8)
         text_poll = await page_text(page, 900)
 
-        # 6.1 检查当日前置会话校验失败 (checkin_login_required)
+        # 7.1 检查当日前置会话校验失败 (checkin_login_required)
         if "签到需要当天登录的会话" in text_poll or "checkin_login_required" in text_poll:
             print("  xmiaom: stale session detected (checkin_login_required), re-authenticating...", flush=True)
-            try:
-                await page.evaluate("""async () => {
-                    try { await fetch('/api/user/logout'); } catch (e) {}
-                }""")
-            except Exception:
-                pass
+            await _logout_site()
             sso_res = await _ensure_sso()
-            if sso_res not in ("OK", "ALREADY"):
+            if sso_res != "OK":
                 return fail_result("auth_failed", detail=f"SSO refresh: {sso_res}", adapter=kind, action=action)
             try:
                 await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
@@ -9653,7 +9779,7 @@ async def xmiaom_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
                 await asyncio.sleep(1.0)
                 await handle_post_click_dialogs_if_needed(page)
 
-        # 6.2 检查成功标志
+        # 7.2 检查成功标志
         if is_valid_checkin_confirm(text_poll):
             sig = confirm_signal(text_poll) or "签到成功"
             print(f"  xmiaom confirm: {sig}", flush=True)
@@ -14002,25 +14128,9 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
                     flush=True,
                 )
             if url != a.url or url_from_note:
-                return SiteAdapter(
-                    name=a.name,
-                    url=url,
-                    kind=a.kind,
-                    sign_selectors=list(a.sign_selectors),
-                    already_selectors=list(a.already_selectors),
-                    ready_rounds=a.ready_rounds,
-                    prefer_cta_before_auth=a.prefer_cta_before_auth,
-                    use_native_click=a.use_native_click,
-                    use_overlay_zapper=a.use_overlay_zapper,
-                    trusted_sign_selectors=a.trusted_sign_selectors,
-                    trusted_already_selectors=a.trusted_already_selectors,
-                    prefer_catalog_url=a.prefer_catalog_url,
-                    feature_unavailable_reason=a.feature_unavailable_reason,
-                    signin_api=a.signin_api,
-                    signin_api_uid_header=a.signin_api_uid_header,
-                    trust_cta_has_text=a.trust_cta_has_text,
-                    login_url=a.login_url,
-                )
+                # replace() 而不是逐字段拷贝: 后者每次给 SiteAdapter 加字段都会
+                # 悄悄丢一个(xmiaom 的 site_timeout_s 就曾因此退回批次默认值)。
+                return replace(a, url=url)
             return a
     if url_from_note:
         if is_bohe_site(url_from_note):
@@ -14179,6 +14289,7 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
                 trusted_already_selectors=True,
                 prefer_catalog_url=True,
                 login_url="https://ai.xmiaom.com/sign-in",
+                site_timeout_s=150.0,
             )
         if is_jianzhile_site(url_from_note) or is_jianzhile_name(name):
             # 简直了 (jianzhile.vip): 带图形验证码的新型个人中心签到
@@ -14253,25 +14364,7 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
             if match:
                 if match.name == name:
                     return match
-                return SiteAdapter(
-                    name=name,
-                    url=match.url,
-                    kind=match.kind,
-                    sign_selectors=list(match.sign_selectors),
-                    already_selectors=list(match.already_selectors),
-                    ready_rounds=match.ready_rounds,
-                    prefer_cta_before_auth=match.prefer_cta_before_auth,
-                    use_native_click=match.use_native_click,
-                    use_overlay_zapper=match.use_overlay_zapper,
-                    trusted_sign_selectors=match.trusted_sign_selectors,
-                    trusted_already_selectors=match.trusted_already_selectors,
-                    prefer_catalog_url=match.prefer_catalog_url,
-                    feature_unavailable_reason=match.feature_unavailable_reason,
-                    signin_api=match.signin_api,
-                    signin_api_uid_header=match.signin_api_uid_header,
-                    trust_cta_has_text=match.trust_cta_has_text,
-                    login_url=match.login_url,
-                )
+                return replace(match, name=name)
         u = (url_from_note or "").lower()
         if any(x in u for x in ("/profile", "/console/personal", "/check-in", "/checkin")):
             return _N(name, url_from_note)
@@ -14965,8 +15058,11 @@ async def run(argv: list[str] | None = None) -> int:
                     hard_error = (2, f"batch_timeout:{batch_timeout:.0f}s")
                     abort_remaining(adapter_index, hard_error[1])
                     break
+                # 站点可在 yaml 里申请更长的 wall clock (0 = 用批次默认值):
+                # xmiaom 每次签到都要 logout+SSO, 失败重试一次需要两轮 SSO 预算。
+                site_budget = float(getattr(adapter, "site_timeout_s", 0) or 0) or site_timeout
                 effective_site_timeout = min(
-                    site_timeout, max(1.0, remaining - BATCH_CLEANUP_RESERVE_S)
+                    site_budget, max(1.0, remaining - BATCH_CLEANUP_RESERVE_S)
                 )
                 name = adapter.name
                 print(f"Running {name} [{adapter.kind}]...", flush=True)
@@ -15012,7 +15108,7 @@ async def run(argv: list[str] | None = None) -> int:
                                 site=name,
                                 adapter=adapter.kind,
                             )
-                            if effective_site_timeout < site_timeout:
+                            if effective_site_timeout < site_budget:
                                 result.reason = "batch_timeout"
                                 result.detail = f"batch deadline {batch_timeout:.0f}s"
                                 hard_error = (2, result.detail)
