@@ -1283,20 +1283,22 @@ sites:
   #   看不到该卡片(面板 display:none),且导航 tab「签到与账本」按钮文案含「签到」会
   #   被宽松的 button:has-text("签到") 误命中。runner 侧 _activate_404api_checkin_tab
   #   会在扫 CTA 前先切到该 tab;选择器改用精确文本 text-is 双保险。
-  # 下半部分「每日签到」卡片(需先切到「签到与账本」tab):
+  # 再改版(2026-10-28):URL 支持 #checkin hash 直接激活「签到与账本」tab(签到页
+  #   直达);概览页新增裸「签到」导航快捷键(点击仅跳 hash,不发 checkin POST),
+  #   旧兜底选择器 button:text-is("签到") 会命中它 → FAIL:no_confirm。故 URL 改为
+  #   /hb/me#checkin,并删除裸按钮兜底,sign/already 全部限定在每日签到卡片内。
+  # 下半部分「每日签到」卡片(需先切到「签到与账本」tab,或 URL 带 #checkin):
   # 未签 .card:has-text("每日签到") button:text-is("签到") -> POST /hb/api/v1/checkin
   # 已签 button 变为「今天已签到」(disabled) 且展示「本次 +X 分，已计入余额 / 签到成功，+X 分」。
   # 资产单位为 分 (POINTS), 可直接读取 /hb/api/v1/me。
   - name: '404api'
-    url: https://wb.404-found.uk/hb/me
+    url: https://wb.404-found.uk/hb/me#checkin
     kind: browser
     prefer_catalog_url: true
     signs:
       - '.card:has-text("每日签到") button:text-is("签到")'
-      - 'button:text-is("签到")'
     already:
       - '.card:has-text("每日签到") button:has-text("今天已签到")'
-      - 'button:has-text("今天已签到")'
       - 'text=今天已签到'
       - 'text=今天已经签过'
       - 'text=签到成功'

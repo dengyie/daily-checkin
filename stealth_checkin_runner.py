@@ -1434,16 +1434,18 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
         kind="browser",
     ),
+    # 404api 改版(2026-10-28 实证):URL 带 #checkin hash 直接激活「签到与账本」
+    # tab;概览页新增的裸「签到」按钮只是导航快捷键(点击仅跳 hash,不触发
+    # checkin POST),故 sign/already 选择器全部限定在 .card:has-text("每日签到")
+    # 卡片内,禁止裸 button:text-is("签到") 兜底命中导航键。
     _B(
         "404api",
-        "https://wb.404-found.uk/hb/me",
+        "https://wb.404-found.uk/hb/me#checkin",
         signs=[
             '.card:has-text("每日签到") button:text-is("签到")',
-            'button:text-is("签到")',
         ],
         already=[
             '.card:has-text("每日签到") button:has-text("今天已签到")',
-            'button:has-text("今天已签到")',
             'text=今天已签到',
             'text=今天已经签过',
             'text=签到成功',
@@ -12006,7 +12008,12 @@ async def _activate_404api_checkin_tab(page) -> bool:
     → 稳定 FAIL:no_confirm(而站点自身完全正常,同 tab 手动点击即签到成功)。
 
     此处在扫描 CTA 前先把「签到与账本」tab 切到前台,使签到按钮真正可见可点。
-    幂等:页面若已存在可见的「签到 / 立即签到」按钮则直接返回,不抢站点的默认 tab。
+    幂等:页面若已存在「每日签到」卡片内可见的「签到 / 立即签到」按钮则直接返回,
+    不抢站点的默认 tab。注意 2026-10-28 再改版:概览页新增一个裸「签到」导航快捷
+    键(点击只跳 #checkin hash,不发 checkin POST),它不在 .card 内——判定可见
+    CTA 时必须用 closest('.card:has-text(每日签到)') 限定,否则该快捷键会令此
+    函数误判「CTA 已可见」而跳过切 tab,通用扫描又命中快捷键 → FAIL:no_confirm。
+    另:URL 直接带 #checkin hash 时站点自行激活该 tab,本函数自然无事可做。
     返回 True 表示本次执行了 tab 切换。dismiss_obstructing_dialogs 在 post_load /
     pre_already / pre_cta 三处都会被调用,水合未完成时拿不到 tab 也会在后续阶段重试。
     """
@@ -12019,10 +12026,14 @@ async def _activate_404api_checkin_tab(page) -> bool:
                     const r = el.getBoundingClientRect();
                     return r.width > 0 && r.height > 0;
                 };
-                // 已有可见的签到 CTA -> 站点已把按钮摆在当前页,无需切 tab。
+                // 已有「每日签到」卡片内可见的签到 CTA -> 真按钮已就位,无需切 tab。
+                // 概览页的裸「签到」导航快捷键不在 .card 内,不得算数。
                 for (const b of document.querySelectorAll('button')) {
                     const t = (b.innerText || '').trim();
-                    if ((t === '签到' || t === '立即签到') && laid_out(b)) return false;
+                    if ((t === '签到' || t === '立即签到') && laid_out(b)
+                        && b.closest('.card') && (b.closest('.card').innerText || '').includes('每日签到')) {
+                        return false;
+                    }
                 }
                 // 「签到与账本」tab:优先精确文案,其次「签到」+「账本」双词兜底。
                 const cands = [...document.querySelectorAll('button, a, [role="tab"], [role="link"]')];

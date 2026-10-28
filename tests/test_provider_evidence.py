@@ -551,6 +551,43 @@ class ProviderEvidenceTests(unittest.TestCase):
         self.assertFalse(module.is_sign_cta_text("签到与账本"))
         self.assertTrue(module.is_sign_cta_text("签到"))
 
+    def test_404api_url_hash_and_no_bare_sign_fallback(self):
+        """404api 2026-10-28 再改版回归:URL 带 #checkin hash 直达「签到与账本」
+        tab;概览页新增裸「签到」导航快捷键(点击只跳 hash,不发 checkin POST)。
+        builtin 与 yaml 都必须:URL 含 #checkin、sign 选择器限定每日签到卡片内、
+        且不得保留裸 button:text-is("签到") 兜底(它命中的就是那个快捷键)。"""
+        import os
+        import yaml as _yaml
+        module = load_runner("provider_runner_404api_hash_test")
+        adapter = next(a for a in module._BUILTIN_SITE_ADAPTERS if a.name == "404api")
+        self.assertIn("#checkin", adapter.url)
+        self.assertEqual(adapter.sign_selectors, ['.card:has-text("每日签到") button:text-is("签到")'])
+        yaml_path = os.environ.get(
+            "DAILY_CHECKIN_SITES_YAML",
+            os.path.join(os.path.dirname(module.__file__), "sites.yaml"),
+        )
+        with open(yaml_path, encoding="utf-8") as fh:
+            entries = _yaml.safe_load(fh).get("sites") or []
+        entry = next(e for e in entries if e.get("name") == "404api")
+        self.assertIn("#checkin", entry.get("url", ""))
+        for sel in entry.get("signs") or []:
+            self.assertIn('.card:has-text("每日签到")', sel)
+            self.assertNotEqual(sel, 'button:text-is("签到")')
+
+    def test_404api_tab_switch_ignores_overview_shortcut(self):
+        """_activate_404api_checkin_tab 的可见 CTA 短路判定必须限定在
+        「每日签到」卡片内:概览页裸「签到」快捷键不在 .card 中,若被当作
+        已可见 CTA 会导致跳过切 tab → 通用扫描命中快捷键 → FAIL:no_confirm
+        (2026-10-28 根因)。用 jsdom 风格 DOM 无法直接跑,这里以源码契约校验:
+        短路分支必须同时校验 closest('.card') 与卡片文本含「每日签到」。"""
+        import inspect
+        module = load_runner("provider_runner_404api_tab_card_test")
+        src = inspect.getsource(module._activate_404api_checkin_tab)
+        self.assertIn("closest('.card')", src)
+        self.assertIn("每日签到", src)
+        # 切 tab 的兜底查找仍需保留「签到与账本」精确/双词匹配。
+        self.assertIn("签到与账本", src)
+
     def test_extract_leileihog_balance_parses_usd_and_reward(self):
         """leileihog extractor converts New-API quota to USD and captures lottery prize."""
         module = load_runner("provider_runner_leileihog_balance_test")
