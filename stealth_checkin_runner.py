@@ -14218,7 +14218,11 @@ def validate_task_projection_sink(
         return f"task_projection_unavailable:{type(exc).__name__}"
 
     if target_names:
-        rows = {name for name, _url in parse_open_tasks(content)}
+        # 投影行可能已被勾选(该站已完成/手动确认),这仍是一行可用投影:
+        # 重跑时 apply_task_success 只需清除 #auto-fail,不必再翻 checkbox。
+        # 只认「未勾选」行会让 --only 重跑已完成站(含 Web 面板单站重跑)恒被判
+        # task_projection_missing 而拒绝运行(2026-10-29 nailao 实测)。
+        rows = {name for name, _url, _done in parse_all_daily_tasks(content)}
         missing = [name for name in target_names if name not in rows]
         if missing:
             return f"task_projection_missing:{missing[0]}"

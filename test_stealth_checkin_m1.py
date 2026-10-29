@@ -103,6 +103,23 @@ class TestMarkTaskDone(unittest.TestCase):
             )
             self.assertFalse((Path(td) / "daily.md.projection-preflight.tmp").exists())
 
+    def test_projection_sink_preflight_accepts_already_checked_row(self):
+        """已勾选的投影行同样是可用投影:重跑已完成站(--only / Web 面板单站重跑)
+        时 apply_task_success 只需清 #auto-fail,不必再翻 checkbox。
+        2026-10-29 nailao 实测:该行已 [x](手动确认),预检却只认未勾选行 →
+        恒 task_projection_missing → 拒绝运行。"""
+        with tempfile.TemporaryDirectory() as td:
+            fp = Path(td) / "daily.md"
+            content = "- [x] #task #日常 [A](https://a.example)\n"
+            fp.write_text(content, encoding="utf-8")
+            self.assertIsNone(
+                self.m.validate_task_projection_sink(str(fp), content, ["A"])
+            )
+            self.assertEqual(
+                self.m.validate_task_projection_sink(str(fp), content, ["B"]),
+                "task_projection_missing:B",
+            )
+
     def test_projection_sink_preflight_missing_is_fail_closed_reason(self):
         with tempfile.TemporaryDirectory() as td:
             reason = self.m.validate_task_projection_sink(
