@@ -561,6 +561,9 @@ sites:
   - name: '简直了'
     url: https://jianzhile.vip/console/personal
     kind: jianzhile
+    # 安全验证弹窗最多 3 次重试(每次视觉识别上限 16s)+ 提交后确认轮询,
+    # 批次默认 60s 会被卡在临界点;给足完整重试预算。
+    site_timeout_s: 150
   - name: '无名'
     url: https://welfare.0xpsyche.me/profile
     kind: newapi_profile

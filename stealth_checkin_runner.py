@@ -1743,6 +1743,7 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             prefer_catalog_url=True,
             login_url=str(entry.get("login_url", "") or "https://jianzhile.vip/login"),
             kind="jianzhile",
+            site_timeout_s=site_timeout,
         )
     if kind == "glados":
         # glados.rocks/console/checkin 专属 glados_checkin 流程:
@@ -10064,15 +10065,53 @@ def extract_captcha_token(raw_text: str) -> str:
     return cleaned[:6] if cleaned else ""
 
 
-def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 12.0) -> str:
-    """Use system-level vision LLM (glm-5.3-flash via new-api) to solve alphanumeric CAPTCHA.
+def _vision_models() -> list[str]:
+    """Resolve the ordered vision-model chain (primary first, then fallbacks).
+
+    Why a chain: the mangoqwq gateway's multimodal route for `glm-5.3-flash` /
+    `glm-5.3` intermittently hangs for 60s+ (2026-10-29 实证: 3/3 attempts timed out,
+    jianzhile 验证码环境全线失败), while `gemini-3.8-flash` answers the same image
+    in ~4s. Falling back keeps captcha sites alive when a single upstream degrades.
+    """
+    primary = os.getenv("DAILY_CHECKIN_VISION_MODEL", "gemini-3.8-flash").strip()
+    fallback_raw = os.getenv(
+        "DAILY_CHECKIN_VISION_FALLBACK_MODELS",
+        "sensenova-6.8-flash-lite,grok-4.7",
+    )
+    chain: list[str] = []
+    for m in [primary, *fallback_raw.split(",")]:
+        m = m.strip()
+        if m and m not in chain:
+            chain.append(m)
+    return chain or ["gemini-3.8-flash"]
+
+
+def _vision_call_deadline() -> float:
+    """Wall-clock budget for ONE captcha recognition (whole model chain).
+
+    Must stay well under the site budget: jianzhile 有 3 次弹窗重试, 站点默认 60s
+    (SITE_TIMEOUT_S), 若单次识别能用满 60s, 3 次重试就永远跑不完 —— 2026-10-29
+    改用 3 模型链后首跑 69.3s 失败正是这个原因。健康响应实测 ADD: 3.5-6.9s,
+    故默认 16s 足够容纳「一个模型卡死 + 下一个正常返回」。
+    """
+    try:
+        return max(3.0, float(os.getenv("DAILY_CHECKIN_VISION_CALL_DEADLINE", "16")))
+    except Exception:
+        return 16.0
+
+
+def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 10.0) -> str:
+    """Use system-level vision LLM (gemini-3.8-flash via new-api) to solve alphanumeric CAPTCHA.
 
     Notes & Configuration:
     - Host: configurable via DAILY_CHECKIN_VISION_API_BASE or system_config
     - Key: configurable via DAILY_CHECKIN_VISION_API_KEY or system_config('vision_api_key')
-    - Model: glm-5.3-flash (configurable via DAILY_CHECKIN_VISION_MODEL)
+    - Model: gemini-3.8-flash (configurable via DAILY_CHECKIN_VISION_MODEL)
+    - Fallbacks: configurable via DAILY_CHECKIN_VISION_FALLBACK_MODELS
+    - Total budget: DAILY_CHECKIN_VISION_CALL_DEADLINE (default 16s) bounds the whole
+      chain so the caller's own captcha retry loop still fits inside the site timeout.
     - Cloudflare 1010 block: requires browser-like User-Agent.
-    - GLM reasoning tokens: max_tokens >= 1024 to prevent empty answers.
+    - max_tokens >= 1024 to prevent empty answers on reasoning models.
     - SSL: explicit cafile handling for macOS/Linux environments.
     """
     if not image_bytes:
@@ -10098,31 +10137,7 @@ def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 12.0) -> str:
         print("  [vision captcha] error: DAILY_CHECKIN_VISION_API_KEY not configured", flush=True)
         return ""
 
-    model = os.getenv("DAILY_CHECKIN_VISION_MODEL", "glm-5.3-flash")
-
     img_b64 = base64.b64encode(image_bytes).decode("ascii")
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "This is an alphanumeric CAPTCHA image. Output ONLY the exact characters shown in the image, without any explanations, spaces, or formatting.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{img_b64}",
-                        },
-                    },
-                ],
-            }
-        ],
-        "max_tokens": 1024,
-        "temperature": 0.1,
-    }
 
     ctx = ssl.create_default_context()
     for ca in ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"):
@@ -10133,24 +10148,56 @@ def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 12.0) -> str:
             except Exception:
                 pass
 
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        },
-    )
-
-    try:
-        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            raw = data["choices"][0]["message"].get("content", "").strip()
-            return extract_captcha_token(raw)
-    except Exception as e:
-        print(f"  [vision captcha] error: {e}", flush=True)
-        return ""
+    deadline = time.monotonic() + _vision_call_deadline()
+    for model in _vision_models():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.5:
+            print("  [vision captcha] call deadline reached, giving up", flush=True)
+            break
+        # Per-model timeout never exceeds what's left of the whole-call budget.
+        model_timeout = max(1.0, min(timeout, remaining))
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "This is an alphanumeric CAPTCHA image. Output ONLY the exact characters shown in the image, without any explanations, spaces, or formatting.",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img_b64}",
+                            },
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": 1024,
+            "temperature": 0.1,
+        }
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=model_timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                raw = data["choices"][0]["message"].get("content", "").strip()
+                token = extract_captcha_token(raw)
+                if token:
+                    return token
+                print(f"  [vision captcha] {model}: empty/unparsable answer {raw[:40]!r}, trying next", flush=True)
+        except Exception as e:
+            print(f"  [vision captcha] {model} error: {e}", flush=True)
+    return ""
 
 
 def is_jianzhile_site(site_url: str) -> bool:
