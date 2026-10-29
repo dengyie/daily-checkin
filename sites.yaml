@@ -115,17 +115,17 @@ sites:
     url: https://happycoding.xyz/profile
     kind: newapi_profile
     prefer_catalog_url: true
-  # nailao(nailao.biz, 奶酪公益站)—— 2026-10-27 改版后走专用 nailao_checkin。
-  # 会话改为纯 Bearer access_token(SPA 内存持有),整页 reload 即丢;refresh cookie
-  # 被单会话策略吊销(AUTH_SESSION_REVOKED),「登录 OK → goto /profile」必回登录页。
-  # UI 无签到 CTA,真入口 POST /api/user/checkin(需 Bearer)。专用流程:
-  # 同一 page 内 登录 → 拦截页面自身请求的 Bearer → 带 token fetch 签到。
+  # nailao(nailao.biz, 奶酪公益站)—— 2026-10-27 曾改版为纯 Bearer 会话(无 UI CTA),
+  # 当时走专用 nailao_checkin API 流程。2026-10-29 实证站点又改回标准 New API 形态:
+  # /sign-in 在会话有效时直接跳 /dashboard/overview,refresh cookie 恢复有效;
+  # /profile 恢复「每日签到」卡片(未签 button「立即签到」→ POST /api/user/checkin
+  # → 翻「已签到」(disabled) + 「今天 +🧀 N」)。故回退标准 newapi_profile 通道,
+  # runner 的 nailao 专用 dispatch 已移除(保留 nailao_checkin 函数与 kind 映射后备)。
   # 账密登录站(在 签到公益站账密.md 注册)。严格遵守 P0: 禁止全清 Cookie。
   - name: 'nailao'
-    url: https://nailao.biz/sign-in
-    kind: nailao
+    url: https://nailao.biz/profile
+    kind: newapi_profile
     prefer_catalog_url: true
-    login_url: https://nailao.biz/sign-in
   # abnt(api.abnt.it New API 站):LinuxDo OAuth 登录(linuxdo_oauth2=true,
   # checkin_enabled=true,无 turnstile),走尊属 abnt_checkin:
   # /sign-in → LinuxDo SSO(OAuth 回跳落新 tab,适配器接管带登录态 /profile)

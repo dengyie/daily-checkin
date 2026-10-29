@@ -4558,10 +4558,13 @@ class TestSitesYaml(unittest.TestCase):
         self.assertTrue(builtin_entry.prefer_catalog_url)
 
     def test_yaml_registers_nailao_entry(self):
-        """sites.yaml 的 nailao 条目解析为 nailao 专用流程,/sign-in,prefer_catalog_url。
+        """sites.yaml 的 nailao 条目解析为标准 newapi_profile 通道,/profile。
 
-        2026-10-27 改版后 UI 无签到 CTA,真入口是 POST /api/user/checkin,
-        不再走 newapi_profile 的 /profile「立即签到」通用通道。
+        2026-10-29 实证站点改回标准 New API 形态:/sign-in 会话有效时直接跳
+        /dashboard/overview,refresh cookie 恢复有效,/profile 恢复「每日签到」
+        卡片(立即签到 → POST /api/user/checkin → 已签到 disabled + 今天 +🧀 N)。
+        2026-10-27 版纯 Bearer 专用流程已非必要,回退通用通道;专用 dispatch 仅在
+        显式 kind=nailao 时触发(域名/名称劫持已移除,否则标准通道永远进不去)。
         """
         import yaml
         yaml_path = ROOT / "sites.yaml"
@@ -4572,22 +4575,33 @@ class TestSitesYaml(unittest.TestCase):
         self.assertIsNotNone(entry, "sites.yaml 应有 nailao 条目")
         from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS
         a = _adapter_from_yaml_entry(entry)
-        self.assertEqual(a.kind, "nailao")
-        self.assertEqual(a.url, "https://nailao.biz/sign-in")
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://nailao.biz/profile")
         self.assertTrue(a.prefer_catalog_url)
-        self.assertEqual(a.login_url, "https://nailao.biz/sign-in")
-        # 任务行仍是旧 /profile 时,prefer_catalog_url 必须钉住 catalog 的 /sign-in,
-        # 否则晨批会导航到改版后不再承载签到的 /profile。
-        resolved = resolve_site("nailao", "https://nailao.biz/profile")
-        self.assertEqual(resolved.kind, "nailao")
-        self.assertEqual(resolved.url, "https://nailao.biz/sign-in")
-        self.assertEqual(resolved.login_url, "https://nailao.biz/sign-in")
+        resolved = resolve_site("nailao", None)
+        self.assertEqual(resolved.kind, "newapi_profile")
+        self.assertEqual(resolved.url, "https://nailao.biz/profile")
         builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "nailao"), None)
         self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 nailao")
-        self.assertEqual(builtin_entry.kind, "nailao")
-        self.assertEqual(builtin_entry.url, "https://nailao.biz/sign-in")
-        self.assertEqual(builtin_entry.login_url, "https://nailao.biz/sign-in")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://nailao.biz/profile")
         self.assertTrue(builtin_entry.prefer_catalog_url)
+
+    def test_nailao_domain_does_not_hijack_standard_flow(self):
+        """nailao 回退标准通道的根因回归:legacy dispatch 不得再按域名/名称把
+        nailao.biz 劫持进专用 nailao_checkin——2026-10-29 晨批 root cause 即
+        「kind=newapi_profile 但 is_nailao_site(site_url) 命中 → 专用流程拦截器
+        只盯 /api/user/*,refresh cookie 恢复后 Bearer 出现在 /api/status 等请求
+        → 抓不到 token → 恒 auth_required」。只有显式 kind=nailao 才走后备。"""
+        import inspect
+        import stealth_checkin_runner as m
+        src = inspect.getsource(m.legacy_checkin_on_page)
+        needle = 'if kind == "nailao":'
+        self.assertIn(needle, src)
+        idx = src.index(needle)
+        window = src[idx:idx + 200]
+        self.assertNotIn("is_nailao_site", window)
+        self.assertNotIn("is_nailao_name", window)
 
     def test_yaml_registers_hcnsec_entry(self):
         """sites.yaml 的 hcnsec 条目解析为 newapi_profile,/profile,prefer_catalog_url,且账密注册有效。"""

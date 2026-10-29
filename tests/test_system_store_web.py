@@ -1572,6 +1572,14 @@ class FrontendStaticAssetIntegrityTests(unittest.TestCase):
         self.assertIn("function renderTasksView(", self.app_js)
         self.assertIn("function renderManualView()", self.app_js)
 
+    def test_pending_count_excludes_suppressed_sites(self):
+        """待办计数必须和列表过滤同一口径：熔断中的 pending 不能让芯片显示数字、格子却为空。"""
+        self.assertIn("function isPendingTask(task)", self.app_js)
+        self.assertIn("list = list.filter(isPendingTask);", self.app_js)
+        counter = self.app_js.split("autoTasks.forEach((task) => {", 1)[1].split("});", 1)[0]
+        self.assertIn("else if (isPendingTask(task)) counts.pending++;", counter)
+        self.assertNotIn("else counts.pending++;", counter)
+
     def test_clean_custom_elements_and_no_phantom_definitions(self):
         """Ensure valid custom elements exist and phantom unrendered classes are removed."""
         self.assertIn('customElements.define("ui-icon"', self.app_js)

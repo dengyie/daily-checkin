@@ -708,19 +708,16 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         "https://happycoding.xyz/profile",
         prefer_catalog_url=True,
     ),
-    # nailao(nailao.biz 奶酪公益站)—— 2026-10-27 改版后走专用 nailao_checkin。
-    # 改版要点:会话是纯 Bearer access_token(SPA 内存持有),整页 reload 即丢;
-    # refresh cookie(new_api_refresh)被服务端单会话策略反复吊销
-    # (AUTH_SESSION_REVOKED),跨页跳转不可依赖。UI 登录后无签到 CTA,
-    # 真入口是 POST /api/user/checkin(需 Authorization: Bearer)。
-    # 专用流程:同一 page 内 登录→拦截 Bearer→带 token fetch 签到,
-    # token 不出页面、不进日志。账密在 签到公益站账密.md。
-    _B(
+    # nailao(nailao.biz 奶酪公益站)—— 2026-10-29 实证站点改回标准 New API 形态:
+    # /sign-in 会话有效时直接跳 /dashboard/overview(refresh cookie 恢复有效),
+    # /profile 恢复「每日签到」卡片(立即签到 → POST /api/user/checkin → 已签到
+    # disabled + 「今天 +🧀 N」)。回退标准 newapi_profile 通道;2026-10-27 版纯
+    # Bearer 专用 nailao_checkin(kind=nailao)保留为后备流程,域名/名称 dispatch
+    # 已移除。账密在 签到公益站账密.md。
+    _N(
         "nailao",
-        "https://nailao.biz/sign-in",
-        kind="nailao",
+        "https://nailao.biz/profile",
         prefer_catalog_url=True,
-        login_url="https://nailao.biz/sign-in",
     ),
     # sub2api(sub2api.0api.me Sub2API 站)—— 2026-09-25 接入。
     # 纯账密站(在 签到公益站账密.md 注册),签到位于 /custom/activity 的 iframe 中。
@@ -12583,7 +12580,11 @@ async def legacy_checkin_on_page(
             return await pool_checkin(page, adapter, browser=browser)
         if kind == "sub2api" or is_sub2api_site(site_url) or is_sub2api_name(adapter.name):
             return await sub2api_checkin(page, adapter, browser=browser)
-        if kind == "nailao" or is_nailao_site(site_url) or is_nailao_name(adapter.name):
+        # nailao 2026-10-29 改回标准 New API 卡片形态,回退 newapi_profile 通用流程;
+        # 仅显式 kind == "nailao"(yaml 指定)才走 2026-10-27 版纯 Bearer 后备流程,
+        # 域名/名称 dispatch 已移除——否则标准通道永远进不去,refresh cookie 恢复后
+        # 专用拦截器(只盯 /api/user/*)抓不到 Bearer → 恒 auth_required。
+        if kind == "nailao":
             return await nailao_checkin(page, adapter, browser=browser)
         if kind == "xmiaom" or is_xmiaom_site(site_url) or is_xmiaom_name(adapter.name):
             return await xmiaom_checkin(page, adapter, browser=browser)

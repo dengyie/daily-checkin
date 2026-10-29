@@ -319,6 +319,24 @@ function isManualTask(task) {
   return tagsSet.includes("manual");
 }
 
+function isDoneTask(task) {
+  return task.status === "done" || task.status === "OK" || task.status === "ALREADY";
+}
+
+function isFailedTask(task) {
+  return task.status === "failed" || task.status === "FAIL";
+}
+
+function isSuppressedTask(task) {
+  return task.site_health_status === "suppressed";
+}
+
+// 待办与列表过滤共用同一口径：未完成、未失败、且未熔断。
+// 熔断站点只出现在「熔断」筛选和健康诊断里，避免计数有数、列表为空。
+function isPendingTask(task) {
+  return !isDoneTask(task) && !isFailedTask(task) && !isSuppressedTask(task);
+}
+
 function applyCredentialKindRules({ kind, accountRow, accountInput, secretLabel, secretInput, storageDesc = "macOS Keychain" }) {
   if (kind === "password") {
     if (accountRow) accountRow.classList.remove("is-hidden");
@@ -685,9 +703,9 @@ function openSiteDetailDrawer(siteName) {
   if (!task) return;
 
   const cred = (state.credentials || []).find((c) => c.site === siteName);
-  const isDone = task.status === "done" || task.status === "OK" || task.status === "ALREADY";
-  const isFail = task.status === "failed" || task.status === "FAIL";
-  const isSupp = task.site_health_status === "suppressed";
+  const isDone = isDoneTask(task);
+  const isFail = isFailedTask(task);
+  const isSupp = isSuppressedTask(task);
   const pillClass = isSupp ? "is-suppressed" : isDone ? "is-ok" : isFail ? "is-fail" : "is-pending";
   const pillText = isSupp ? "熔断" : isDone ? "已打卡" : isFail ? "失败" : "待办";
   const category = categorizeSite(task);
@@ -1631,13 +1649,13 @@ function getManualTasks() {
 function getFilteredTasks() {
   let list = (state.tasks || []).filter((t) => !isManualTask(t));
   if (currentFilter === "待办") {
-    list = list.filter((t) => t.status !== "done" && t.status !== "OK" && t.status !== "ALREADY" && t.site_health_status !== "suppressed");
+    list = list.filter(isPendingTask);
   } else if (currentFilter === "已完成") {
-    list = list.filter((t) => t.status === "done" || t.status === "OK" || t.status === "ALREADY");
+    list = list.filter(isDoneTask);
   } else if (currentFilter === "失败") {
-    list = list.filter((t) => (t.status === "failed" || t.status === "FAIL") && t.site_health_status !== "suppressed");
+    list = list.filter((t) => isFailedTask(t) && !isSuppressedTask(t));
   } else if (currentFilter === "确定性失败抑制" || currentFilter === "熔断") {
-    list = list.filter((t) => t.site_health_status === "suppressed");
+    list = list.filter(isSuppressedTask);
   } else if (currentFilter === "含资产") {
     list = list.filter((t) => t.last_balance != null || (t.last_balance_text && t.last_balance_text.trim() !== ""));
   } else if (currentFilter !== "全部") {
@@ -1717,9 +1735,9 @@ function getFilteredTasks() {
 }
 
 function renderTile(task, showAction = true) {
-  const isDone = task.status === "done" || task.status === "OK" || task.status === "ALREADY";
-  const isFail = task.status === "failed" || task.status === "FAIL";
-  const isSupp = task.site_health_status === "suppressed";
+  const isDone = isDoneTask(task);
+  const isFail = isFailedTask(task);
+  const isSupp = isSuppressedTask(task);
   const isManual = isManualTask(task);
   const tileClass = isSupp ? "is-suppressed" : isDone ? "is-ok" : isFail ? "is-fail" : "is-pending";
   const pillClass = isSupp ? "is-suppressed" : isDone ? "is-ok" : isFail ? "is-fail" : "is-pending";
@@ -1918,10 +1936,10 @@ function computeTaskStats() {
   });
 
   autoTasks.forEach((task) => {
-    if (task.site_health_status === "suppressed") counts.suppressed++;
-    if (task.status === "done" || task.status === "OK" || task.status === "ALREADY") counts.done++;
-    else if (task.status === "failed" || task.status === "FAIL") counts.failed++;
-    else counts.pending++;
+    if (isSuppressedTask(task)) counts.suppressed++;
+    if (isDoneTask(task)) counts.done++;
+    else if (isFailedTask(task) && !isSuppressedTask(task)) counts.failed++;
+    else if (isPendingTask(task)) counts.pending++;
   });
   const successRate = totalTasks ? Math.round((counts.done / totalTasks) * 100) : 0;
   const totalAllSites = (state.tasks || []).length;
