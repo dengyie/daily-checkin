@@ -4906,7 +4906,10 @@ class TestSitesYaml(unittest.TestCase):
             data = yaml.safe_load(fh)
         entry = next((e for e in data.get("sites", []) if e.get("name") == "loxo"), None)
         self.assertIsNotNone(entry, "sites.yaml 应有 loxo 条目")
-        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, get_account_credential,
+        )
         a = _adapter_from_yaml_entry(entry)
         self.assertEqual(a.kind, "browser")
         self.assertEqual(a.url, "https://loxo.cc/check-in")
@@ -4917,9 +4920,16 @@ class TestSitesYaml(unittest.TestCase):
         joined = " ".join(a.sign_selectors + a.already_selectors)
         self.assertNotIn("立即签到", joined)
         self.assertNotIn("今日已签到", joined)
+        # 显式给出 signs/already 才会把选择器标为可信;不可信时 already_done 会按
+        # 中文白名单过滤,data-testid 直接失效(英文 UI 下静默漏判已签)。
+        self.assertTrue(a.trusted_sign_selectors, "loxo 选择器必须标记为可信")
+        self.assertTrue(a.trusted_already_selectors, "loxo 已签选择器必须标记为可信")
         resolved = resolve_site("loxo", "https://loxo.cc/check-in")
         self.assertEqual(resolved.kind, "browser")
         self.assertEqual(resolved.url, "https://loxo.cc/check-in")
+        self.assertTrue(resolved.trusted_already_selectors)
+        # 纯 LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
+        self.assertIsNone(get_account_credential("loxo"))
 
     def test_yaml_registers_mohua_entry(self):
         """墨华Mo(api.mohuaai.cn) 2026-10-29 接入:标准 LinuxDO+New API 站,
@@ -5921,7 +5931,8 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertNotIn("clear_localstorage", lower)
         self.assertNotIn("clear_all", lower)
 
-    def _run_handler(self, fake_locators_by, page_text="", page_text_after=None, click_error=None, adapter=None):
+    def _run_handler(self, fake_locators_by, page_text="", page_text_after=None, click_error=None, adapter=None,
+                     repay_grace_s=0.0):
         """Run relayfor_checkin against a controllable FakePage.
 
         fake_locators_by: dict mapping selector-substring -> {"is_visible": bool, "disabled": bool}.
@@ -5931,6 +5942,8 @@ class TestRelayForLoanCycle(unittest.TestCase):
           when None the text stays constant. This lets tests exercise the before/after delta
           confirmation in _relayfor_confirm_after.
         click_error: optional exception to raise from the click, to exercise the no_click path.
+        repay_grace_s: 覆盖「只见借款时等还款」的宽限窗口;默认 0.0 让既有用例保持快跑,
+          只有显式测宽限行为的用例才传正值。
         Returns (res, clicks).
         """
         m = self.m
@@ -5943,20 +5956,31 @@ class TestRelayForLoanCycle(unittest.TestCase):
 
         clicks = []
         state = {"text": page_text}
+        polls = {}
 
         class FakeLocator:
             def __init__(self, sel):
                 self.sel = sel
+                self.sub = None
                 self.cfg = None
                 for sub, c in fake_locators_by.items():
                     if sub in sel:
+                        self.sub = sub
                         self.cfg = c
                         break
             @property
             def first(self):
                 return self
             async def is_visible(self, timeout=800):
-                return bool(self.cfg is not None and self.cfg.get("is_visible"))
+                if self.cfg is None:
+                    return False
+                # enable_after_polls: 模拟按钮晚一拍挂载/解禁——第 N 次可见性
+                # 探测后才变成可用,用来验证「只见借款时先等还款」的宽限。
+                if self.cfg.get("enable_after_polls") is not None:
+                    polls[self.sub] = polls.get(self.sub, 0) + 1
+                    if polls[self.sub] >= int(self.cfg["enable_after_polls"]):
+                        self.cfg = {**self.cfg, "disabled": False}
+                return bool(self.cfg.get("is_visible"))
             async def is_disabled(self):
                 if self.cfg is None:
                     return False
@@ -5991,7 +6015,8 @@ class TestRelayForLoanCycle(unittest.TestCase):
         with mock.patch.object(m, "wait_text_ready", fake_wait), \
              mock.patch.object(m, "wait_out_cloudflare", fake_cf), \
              mock.patch.object(m, "dismiss_obstructing_dialogs", fake_dis), \
-             mock.patch.object(m, "page_text", fake_page_text):
+             mock.patch.object(m, "page_text", fake_page_text), \
+             mock.patch.object(m, "RELAYFOR_REPAY_GRACE_S", repay_grace_s):
             res = self.asyncio.run(m.relayfor_checkin(page, adapter or self._adapter(), browser=None))
         return res, clicks
 
@@ -6033,6 +6058,28 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertEqual(res.status, "OK", res.detail)
         self.assertTrue(any("今日签到还款" in c for c in clicks), "应点击 今日签到还款")
         self.assertFalse(any("确认借款" in c for c in clicks), "不得抢跑点击 确认借款")
+
+    def test_borrow_waits_grace_for_late_repay_before_borrowing(self):
+        """只见「确认借款」时先给还款一个短宽限:还款晚一拍挂载也不抢跑借款.
+
+        待还未结清期间站点可能同时/先后放出「确认借款」(下周期预告)与
+        「今日签到还款」;若只凭第一眼没看到还款就借款,会多开一个周期。
+        """
+        res, clicks = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+                # 还款按钮晚一拍解禁:第 2 次可见性探测后才可用。
+                'button:has-text("今日签到还款")': {
+                    "is_visible": True, "disabled": True, "enable_after_polls": 2,
+                },
+            },
+            page_text='当前待还\n$1.00\n今日签到还款',
+            page_text_after='当前待还\n$0.72\n今日已签到',
+            repay_grace_s=0.05,
+        )
+        self.assertEqual(res.status, "OK", res.detail)
+        self.assertTrue(any("今日签到还款" in c for c in clicks), "宽限内等到还款后应点还款")
+        self.assertFalse(any("确认借款" in c for c in clicks), "还款晚到也不得抢跑借款")
 
     def test_borrow_without_repay_button_fails_instead_of_false_ok(self):
         """借出成功但还款按钮始终不出现 → FAIL(不再假报 OK)."""

@@ -7408,6 +7408,10 @@ RELAYFOR_DONE_INDICATORS = ("已还清", "今日已处理", "已提完")
 # 借出后「今日签到还款」按钮挂载/可用的最长等待,以及还款落账确认窗口。
 RELAYFOR_REPAY_READY_WAIT_S = 10.0
 REPAY_CONFIRM_WAIT_S = 6.0
+# 选按钮阶段只见「确认借款」时,先给「今日签到还款」的短宽限:待还未结清时站点
+# 也可能放出「确认借款」(下周期预告),两者可能同屏或先后挂载,宽限内等到还款
+# 就不借(2026-10-30 残留竞态)。
+RELAYFOR_REPAY_GRACE_S = 2.5
 
 # 限时签到活动卡片状态探测(单一来源,避免 _relayfor_today_done 与 _relayfor_done_state 各自复制)。
 # 返回 '' 表示仍存在可见可点的活动签到/领奖按钮(未签);否则返回 'campaign:<文案>'。
@@ -7529,12 +7533,16 @@ async def _relayfor_available_button(page, selectors: list[str]) -> str | None:
     return None
 
 
-async def _wait_relayfor_repay_button(page) -> str | None:
-    """借出后轮询等待「今日签到还款」可用;超时返回 None。
+async def _wait_relayfor_repay_button(page, timeout_s: float | None = None) -> str | None:
+    """轮询等待「今日签到还款」可用;超时返回 None。
+
+    timeout_s 省略时用 RELAYFOR_REPAY_READY_WAIT_S(借出后等按钮挂载/解禁);
+    选按钮阶段传 RELAYFOR_REPAY_GRACE_S,只在点借款前多等一拍。
 
     还款按钮在借出请求落账后才挂载/解禁,固定 sleep 会漏点(2026-10-30)。
     """
-    deadline = time.monotonic() + RELAYFOR_REPAY_READY_WAIT_S
+    window = RELAYFOR_REPAY_READY_WAIT_S if timeout_s is None else timeout_s
+    deadline = time.monotonic() + window
     while True:
         sel = await _relayfor_available_button(page, RELAYFOR_REPAY_SELECTORS)
         if sel:
@@ -7765,6 +7773,10 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
             # 还款优先:词元贷的「每日签到」就是还款,借款只开出新周期。
             # 待还未结清期间站点也可能放出「确认借款」(下一周期预告),先点借款
             # 会把当天的签到漏掉(2026-10-30 事故)。
+            if borrow and not repay:
+                # 只见借款不代表该借:本轮的「今日签到还款」可能晚一拍挂载,
+                # 先给它一个短宽限,等到还款就不借(2026-10-30 残留竞态)。
+                repay = await _wait_relayfor_repay_button(page, RELAYFOR_REPAY_GRACE_S)
             action_sel = repay or borrow
 
         if campaign_sel or action_sel:
@@ -7841,6 +7853,8 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
         borrow = await _relayfor_available_button(page, RELAYFOR_BORROW_SELECTORS)
         repay = await _relayfor_available_button(page, RELAYFOR_REPAY_SELECTORS)
         if borrow or repay:
+            if borrow and not repay:
+                repay = await _wait_relayfor_repay_button(page, RELAYFOR_REPAY_GRACE_S)
             action_sel = repay or borrow
 
     # 7. 执行词元贷借款 / 还款
