@@ -5,10 +5,10 @@ Pure unit tests for stealth_checkin_runner M1 + full-opt guards (no CDP / no net
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import inspect
 import json
-import py_compile
 import os
 import py_compile
 import re
@@ -672,14 +672,10 @@ class TestSuccessGate(unittest.TestCase):
         self.assertTrue(any("授权" in sel for sel in auth))
         self.assertFalse(any("确认" in sel for sel in auth))
         self.assertFalse(any("继续" in sel or "Continue" in sel for sel in auth))
-        # CAPTCHA_WAIT_S 默认 40s;生产 env.sh 会压到 30s。断言默认值必须先摘 env,
-        # 否则 source env.sh 后跑全量会假失败(与 _NoCdpEnvMixin 同一个坑)。
-        saved = os.environ.pop("CAPTCHA_WAIT_S", None)
-        try:
+        # CAPTCHA_WAIT_S 默认 40s;生产 env.sh 会压到 30s。断言默认值必须摘掉 env,
+        # 否则 source env.sh 后跑全量会假失败(与 _CleanEnvMixin 同一个坑)。
+        with clean_env():
             self.assertEqual(load_mod(force=True).CAPTCHA_WAIT_S, 40.0)
-        finally:
-            if saved is not None:
-                os.environ["CAPTCHA_WAIT_S"] = saved
         src = TARGET.read_text(encoding="utf-8")
         self.assertIn("async def wait_out_cloudflare", src)
         self.assertIn("try_click_challenge_widgets(page)", src)
@@ -1578,30 +1574,49 @@ class TestExitAndResolve(unittest.TestCase):
 
 
 
-class _NoCdpEnvMixin:
-    """用例内屏蔽 CDP_HTTP / CDP_PORT。
+# 生产 env.sh 导出的调参 knob。它们会覆盖模块默认值/短路自动发现,断言「默认
+# 行为」的用例必须在干净环境里跑,否则 source env.sh 后跑全量会凭空多出假失败。
+_ENV_KNOBS = (
+    "CDP_HTTP", "CDP_PORT",
+    "CAPTCHA_WAIT_S", "CF_WAIT_S", "SSO_TIMEOUT_S", "SITE_TIMEOUT_S",
+    "CONNECT_RETRIES", "CONNECT_TIMEOUT_S", "CONNECT_RETRY_BACKOFF_S",
+    "BATCH_TIMEOUT_S", "BATCH_CLEANUP_RESERVE_S",
+)
 
-    这两个 env 是「显式端点」,会在自动发现里短路(env_CDP_HTTP / env_CDP_PORT),
-    而生产 shell 的 env.sh 正好 export 了它们。断言自动发现行为的用例必须在干净
-    环境里跑,否则 source env.sh 后跑全量会凭空多出 5 个假失败。
-    """
 
-    def setUp(self):
-        super().setUp()
-        self._cdp_env_saved = {
-            k: os.environ.pop(k, None) for k in ("CDP_HTTP", "CDP_PORT")
-        }
-
-    def tearDown(self):
-        for k, v in self._cdp_env_saved.items():
+@contextlib.contextmanager
+def clean_env():
+    """临时摘掉 env.sh 的调参 knob,退出时原样还原。"""
+    saved = {k: os.environ.pop(k, None) for k in _ENV_KNOBS}
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+class _CleanEnvMixin:
+    """用例内屏蔽 env.sh 的调参 knob(见 _ENV_KNOBS)。
+
+    典型:CDP_HTTP / CDP_PORT 是「显式端点」,会在自动发现里短路
+    (env_CDP_HTTP / env_CDP_PORT);CAPTCHA_WAIT_S 等默认值断言也同理。
+    新增断言默认值的用例类直接继承本 mixin,不要各自手写 pop/restore。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._env_ctx = clean_env()
+        self._env_ctx.__enter__()
+
+    def tearDown(self):
+        self._env_ctx.__exit__(None, None, None)
         super().tearDown()
 
 
-class TestCdpDiscover(_NoCdpEnvMixin, unittest.TestCase):
+class TestCdpDiscover(_CleanEnvMixin, unittest.TestCase):
     """CDP auto-discover: ranking, headless refuse, strict prefer (no live Chrome required)."""
 
     def test_set_cdp_http_normalizes(self):
@@ -1750,7 +1765,7 @@ class TestCdpDiscover(_NoCdpEnvMixin, unittest.TestCase):
         self.assertEqual(e["port"], 9224)
 
 
-class TestRobustnessAdditions(_NoCdpEnvMixin, unittest.TestCase):
+class TestRobustnessAdditions(_CleanEnvMixin, unittest.TestCase):
     """P1 hardening: connect retry, mid-batch reconnect, per-site timeout, last-run status."""
 
     def setUp(self):
@@ -5993,7 +6008,7 @@ class TestRelayForLoanCycle(unittest.TestCase):
         self.assertNotIn("clear_all", lower)
 
     def _run_handler(self, fake_locators_by, page_text="", page_text_after=None, click_error=None, adapter=None,
-                     repay_grace_s=0.0):
+                     repay_grace_s=0.0, click_error_after=None):
         """Run relayfor_checkin against a controllable FakePage.
 
         fake_locators_by: dict mapping selector-substring -> {"is_visible": bool, "disabled": bool}.
@@ -6003,6 +6018,8 @@ class TestRelayForLoanCycle(unittest.TestCase):
           when None the text stays constant. This lets tests exercise the before/after delta
           confirmation in _relayfor_confirm_after.
         click_error: optional exception to raise from the click, to exercise the no_click path.
+        click_error_after: 从第 N 次点击(1-based)开始抛 click_error;None = 每次点击都抛。
+          用来测「借款点成功、补点还款失败」这类多步动作的中途失败。
         repay_grace_s: 覆盖「只见借款时等还款」的宽限窗口;默认 0.0 让既有用例保持快跑,
           只有显式测宽限行为的用例才传正值。
         Returns (res, clicks).
@@ -6050,7 +6067,9 @@ class TestRelayForLoanCycle(unittest.TestCase):
                     return False
                 return bool(self.cfg.get("disabled"))
             async def click(self, **kw):
-                if click_error is not None:
+                if click_error is not None and (
+                    click_error_after is None or len(clicks) + 1 >= click_error_after
+                ):
                     raise click_error
                 clicks.append(self.sel)
                 if page_text_after is not None:
@@ -6125,22 +6144,141 @@ class TestRelayForLoanCycle(unittest.TestCase):
 
         待还未结清期间站点可能同时/先后放出「确认借款」(下周期预告)与
         「今日签到还款」;若只凭第一眼没看到还款就借款,会多开一个周期。
+        第 3 次探测才解禁 → 宽限必须真的「轮询过时间」才等得到,而不是只多探一次。
         """
-        res, clicks = self._run_handler(
-            {
-                'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
-                # 还款按钮晚一拍解禁:第 2 次可见性探测后才可用。
-                'button:has-text("今日签到还款")': {
-                    "is_visible": True, "disabled": True, "enable_after_polls": 2,
+        m = self.m
+        with mock.patch.object(m, "RELAYFOR_REPAY_POLL_S", 0.01):
+            res, clicks = self._run_handler(
+                {
+                    'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+                    # 还款按钮晚两拍解禁:覆盖「首次探测 + 宽限内首次探测」之后才可用。
+                    'button:has-text("今日签到还款")': {
+                        "is_visible": True, "disabled": True, "enable_after_polls": 3,
+                    },
                 },
-            },
-            page_text='当前待还\n$1.00\n今日签到还款',
-            page_text_after='当前待还\n$0.72\n今日已签到',
-            repay_grace_s=0.05,
-        )
+                page_text='当前待还\n$1.00\n今日签到还款',
+                page_text_after='当前待还\n$0.72\n今日已签到',
+                repay_grace_s=0.05,
+            )
         self.assertEqual(res.status, "OK", res.detail)
         self.assertTrue(any("今日签到还款" in c for c in clicks), "宽限内等到还款后应点还款")
         self.assertFalse(any("确认借款" in c for c in clicks), "还款晚到也不得抢跑借款")
+
+    def test_wait_repay_button_honours_timeout_window(self):
+        """等还款按钮严格守窗口:window=0 只探一次,window>0 才会轮询到解禁。
+
+        2026-10-30 评审 P3:旧循环在 deadline 检查后才 sleep,window=0 也会多等
+        一个轮询周期,宽限测试因此可以「零窗口也通过」。
+        """
+        calls = {"n": 0}
+
+        async def fake_available(page, selectors):
+            calls["n"] += 1
+            return "button[data-token-loan-checkin]" if calls["n"] >= 3 else None
+
+        async def run(window):
+            calls["n"] = 0
+            with mock.patch.object(self.m, "_relayfor_available_button", fake_available):
+                return await self.m._wait_relayfor_repay_button(object(), window)
+
+        with mock.patch.object(self.m, "RELAYFOR_REPAY_POLL_S", 0.01):
+            self.assertIsNone(self.asyncio.run(run(0.0)), "零窗口不应继续轮询")
+            self.assertEqual(
+                self.asyncio.run(run(0.05)), "button[data-token-loan-checkin]",
+                "窗口内轮询到解禁应返回还款 selector",
+            )
+
+    def test_borrow_rechecks_repay_before_clicking_borrow(self):
+        """评审 P1:第 2 步锁了借款,更晚才挂载的还款必须在点借款前被复查到.
+
+        活动签到/慢渲染会再耗数秒;若点借款前不复查,待还未结清时点「确认借款」
+        (下周期预告)会多开周期,甚至被站点吞掉导致当天漏签。
+        """
+        m = self.m
+        with mock.patch.object(m, "RELAYFOR_REPAY_POLL_S", 0.01):
+            res, clicks = self._run_handler(
+                {
+                    'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+                    # 还款在宽限窗口内始终不可用(超过第 2 步宽限),直到第 7 步复查才解锁。
+                    'button:has-text("今日签到还款")': {
+                        "is_visible": True, "disabled": True, "enable_after_polls": 6,
+                    },
+                },
+                page_text='当前待还\n$1.00\n今日签到还款',
+                page_text_after='当前待还\n$0.72\n今日已签到',
+                repay_grace_s=0.02,
+            )
+        self.assertEqual(res.status, "OK", res.detail)
+        self.assertFalse(any("确认借款" in c for c in clicks), "复查命中还款时不得再点借款")
+        self.assertTrue(any("今日签到还款" in c for c in clicks), "应直接点还款")
+
+    def test_pending_loan_waits_full_mount_window_before_borrowing(self):
+        """待还未结清时「确认借款」只是下周期预告:点借款前按完整挂载窗口等还款.
+
+        短宽限只够覆盖「晚一拍」;页面已有未结清金额时,还款按钮可能挂载更久,
+        必须用 RELAYFOR_REPAY_READY_WAIT_S 等满,否则仍会抢跑借款。
+        """
+        m = self.m
+        with mock.patch.object(m, "RELAYFOR_REPAY_POLL_S", 0.01), \
+             mock.patch.object(m, "RELAYFOR_REPAY_READY_WAIT_S", 0.1):
+            res, clicks = self._run_handler(
+                {
+                    'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+                    'button:has-text("今日签到还款")': {
+                        "is_visible": True, "disabled": True, "enable_after_polls": 8,
+                    },
+                },
+                page_text='当前待还\n$1.00\n今日签到还款',
+                page_text_after='当前待还\n$0.72\n今日已签到',
+                repay_grace_s=0.02,
+            )
+        self.assertEqual(res.status, "OK", res.detail)
+        self.assertFalse(any("确认借款" in c for c in clicks), "待还未清时不得抢跑借款")
+        self.assertTrue(any("今日签到还款" in c for c in clicks))
+
+    def test_borrow_then_repay_click_error_is_fail_no_click(self):
+        """借出成功、补点还款时点击抛异常 → FAIL:no_click,detail 指明借款后还款失败."""
+        m = self.m
+        fake_locators_by = {
+            'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+            'button:has-text("今日签到还款")': {
+                "is_visible": True, "disabled": True, "enable_after_click": True,
+            },
+        }
+        res, clicks = self._run_handler(
+            fake_locators_by,
+            page_text='已还清\n可再借',
+            page_text_after='当前待还 $1.00\n今日签到还款',
+            click_error=RuntimeError("boom"),
+            click_error_after=2,  # 第 1 次(借款)成功,第 2 次(还款)抛错
+        )
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_click")
+        self.assertIn("借款后点击还款失败", res.detail)
+        self.assertTrue(any("确认借款" in c for c in clicks))
+
+    def test_borrow_then_repay_no_confirm_is_fail(self):
+        """借出成功、点还款后待还金额不变 → FAIL:no_confirm,不得假报 OK."""
+        m = self.m
+        fake_locators_by = {
+            'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+            'button:has-text("今日签到还款")': {
+                "is_visible": True, "disabled": True, "enable_after_click": True,
+            },
+        }
+        with mock.patch.object(m, "RELAYFOR_REPAY_CONFIRM_WAIT_S", 0.0):
+            res, clicks = self._run_handler(
+                fake_locators_by,
+                page_text='已还清\n可再借',
+                page_text_after=[
+                    '当前待还 $1.00\n今日签到还款',  # 借款落账
+                    '当前待还 $1.00\n今日签到还款',  # 还款点击无效,页面纹丝不动
+                ],
+            )
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_confirm")
+        self.assertIn("今日还款未落账", res.detail)
+        self.assertTrue(any("今日签到还款" in c for c in clicks))
 
     def test_borrow_without_repay_button_fails_instead_of_false_ok(self):
         """借出成功但还款按钮始终不出现 → FAIL(不再假报 OK)."""

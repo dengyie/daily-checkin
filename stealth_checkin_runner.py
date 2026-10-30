@@ -7428,10 +7428,14 @@ RELAYFOR_CAMPAIGN_SELECTORS = [
 # 已处理 / 完结态专属文案(严格排除全页宽泛的「已签到/签到成功」,避免活动等卡片污染词元贷状态)
 RELAYFOR_DONE_INDICATORS = ("已还清", "今日已处理", "已提完")
 
-# 借/还点击后的落账确认窗口;借出后等「今日签到还款」按钮挂载/解禁的上限。
+# 借/还点击后的落账确认窗口。
 RELAYFOR_ACTION_CONFIRM_WAIT_S = 4.0
+# 借出后等「今日签到还款」按钮挂载/解禁的上限。
 RELAYFOR_REPAY_READY_WAIT_S = 10.0
+# 借款已落账、补点还款后的确认窗口(还款有后台结算延迟,比普通动作更宽)。
 RELAYFOR_REPAY_CONFIRM_WAIT_S = 6.0
+# 等还款按钮时的轮询间隔(也被测试用来压缩等待)。
+RELAYFOR_REPAY_POLL_S = 0.6
 # 选按钮阶段只见「确认借款」时,先给「今日签到还款」的短宽限:待还未结清时站点
 # 也可能放出「确认借款」(下周期预告),两者可能同屏或先后挂载,宽限内等到还款
 # 就不借(2026-10-30 残留竞态)。
@@ -7571,9 +7575,12 @@ async def _wait_relayfor_repay_button(page, timeout_s: float | None = None) -> s
         sel = await _relayfor_available_button(page, RELAYFOR_REPAY_SELECTORS)
         if sel:
             return sel
-        if time.monotonic() >= deadline:
+        # 严格守窗口:sleep 不能越过 deadline,否则 window=0 也会多等一个轮询周期,
+        # 调用方(和测试)对宽限的预期就不成立了。
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             return None
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(min(RELAYFOR_REPAY_POLL_S, remaining))
 
 
 async def _relayfor_click_and_confirm(page, sel: str, which: str, *, wait_s: float,
@@ -7914,6 +7921,22 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
     # 7. 执行词元贷借款 / 还款
     if not today_done and action_sel:
         is_borrow = any(bs in action_sel for bs in RELAYFOR_BORROW_SELECTORS)
+        if is_borrow:
+            # 点借款前最后一次复查还款(评审 P1):动作在第 2 步就锁定,而活动签到/
+            # 慢渲染可能再耗数秒,期间「今日签到还款」才挂载/解禁。待还未结清时
+            # 「确认借款」只是下周期预告,点下去要么多开一个周期,要么被站点吞掉
+            # (no_confirm)反而漏掉当天签到。
+            repay_wait = RELAYFOR_REPAY_GRACE_S
+            pending_amt = _relayfor_pending_amount(
+                await _try_page_text(page, RELAYFOR_TEXT_WINDOW)
+            )
+            if (pending_amt or 0.0) > 0:
+                # 页面已有未结清金额 → 借款只是预告,等满还款按钮的挂载窗口;
+                # 真正的新周期(待还=0/无)只给短宽限,不白白拖慢借款日。
+                repay_wait = RELAYFOR_REPAY_READY_WAIT_S
+            late_repay = await _wait_relayfor_repay_button(page, repay_wait)
+            if late_repay:
+                action_sel, is_borrow = late_repay, False
         which = "借款" if is_borrow else "还款"
         reason, err, action = await _relayfor_click_and_confirm(
             page, action_sel, which,
