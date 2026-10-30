@@ -1214,6 +1214,19 @@ class CloudflareDetectionTests(unittest.TestCase):
     def test_cloudflare_hosted_url_blocked(self):
         self.assertTrue(self._lc("https://challenges.cloudflare.com/cdn-cgi/cf-challenge", ""))
 
+    def test_site_hostname_containing_cloudflare_not_blocked(self):
+        """cloudflare.pigeonw.com is the site's own host, not an interstitial."""
+        self.assertFalse(self._lc(
+            "https://cloudflare.pigeonw.com/#/dashboard",
+            "Cloudflare solver\n每日签到\n签到领取\n今日已签到 · 每日 00:00 重置",
+        ))
+
+    def test_cf_challenge_platform_path_blocked(self):
+        self.assertTrue(self._lc(
+            "https://cloudflare.pigeonw.com/cdn-cgi/challenge-platform/h/b/orchestrate/jsch/v1",
+            "",
+        ))
+
     def test_cf_challenge_text_blocked(self):
         self.assertTrue(self._lc("https://a.example/", "cf-challenge"))
 

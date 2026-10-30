@@ -1377,3 +1377,69 @@ sites:
     url: https://6661886.xyz/profile
     kind: newapi_profile
     prefer_catalog_url: true
+  # mohua(api.mohuaai.cn / 墨华Mo)—— 2026-10-29 接入。
+  # 标准 New API 默认前端 v1.0.0-rc.47(/api/status 实测):
+  # checkin_enabled=true、linuxdo_oauth=true、github_oauth=false、
+  # password_login_enabled=true、turnstile_check=false。
+  # LinuxDO OAuth 站(共享 9222 profile 的 mango 会话,用户 ID 10 @mangoqwq),
+  # 不登记账密,会话失效时由 runner 的 LinuxDO SSO 兜底重新授权。
+  # 签到在 /profile「每日签到」卡片:未签「立即签到」→ 点击后卡片翻「已签到」,
+  # POST /api/user/checkin 返回随机额度奖励。
+  # 常驻说明「每日仅可签到一次，请勿重复签到」绝不能当已签(同 bxacc/techmob)。
+  # 走标准 newapi_profile 流程。
+  - name: 'mohua'
+    url: https://api.mohuaai.cn/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # akmusi(ai.akmusi.online / New API)—— 2026-10-29 接入。
+  # 标准 New API 默认前端 v1.0.0-rc.47(/api/status 实测):
+  # checkin_enabled=true、linuxdo_oauth=true、github_oauth=false、
+  # password_login_enabled=true、turnstile_check=false。
+  # LinuxDO OAuth 站(共享 9222 profile 的 mango 会话,用户 ID 287 @mangoqwq),
+  # 不登记账密,会话失效时由 runner 的 LinuxDO SSO 兜底重新授权。
+  # 签到在 /profile「每日签到」卡片:未签「立即签到」→ 点击后卡片翻「已签到」,
+  # POST /api/user/checkin 返回随机额度奖励(站点货币 CNY)。
+  # 常驻说明「每日仅可签到一次，请勿重复签到」绝不能当已签(同 bxacc/techmob)。
+  # 走标准 newapi_profile 流程。
+  - name: 'akmusi'
+    url: https://ai.akmusi.online/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # pigeonw-cf(cloudflare.pigeonw.com / 白鸽打码平台,标题 Cloudflare solver)——
+  # 2026-10-30 接入。自研 Vue 3 SPA(非 New API:/api/status 404;
+  # /api/public/settings 实测 registration_enabled=false、linuxdo_oauth_enabled=true),
+  # 纯 LinuxDO OAuth 建号/登录,不登记账密,会话失效由 runner 的 LinuxDO SSO 兜底。
+  # 登录页是同域 SPA 内的 <a href="/api/auth/linuxdo/start">使用 Linux DO 登录</a>。
+  # 签到在 #/dashboard「每日签到」卡片:未签 button「签到领取」→ 点击后浏览器内
+  # 先跑 PoW(SHA-256,difficulty=18,通常 1-3s)再 POST /api/checkin →
+  # badge「今日已签到」+「今日已领取 N 次额度，明天再来」。无 turnstile/滑块。
+  # 走通用 browser 流程,选择器限定卡片主按钮以免误点顶部导航。
+  - name: 'pigeonw-cf'
+    url: 'https://cloudflare.pigeonw.com/#/dashboard'
+    kind: browser
+    prefer_catalog_url: true
+    ready_rounds: 20
+    signs:
+      - 'button.btn-primary:has-text("签到领取")'
+      - 'button:has-text("签到领取")'
+    already:
+      - 'text=今日已签到'
+      - 'text=今日已领取'
+  # loxo(loxo.cc / lOXO AI API 网关)—— 2026-10-30 接入。
+  # Vite 构建的 Vue 3 SPA(非 New API:/api/status 404),前端 API 基址 /api/v1。
+  # 纯 LinuxDO OAuth 登录(public settings 实测 linuxdo_oauth_enabled=true),
+  # 不登记账密;会话失效由 runner 的 LinuxDO SSO 兜底。
+  # 签到在 /check-in:未签 button[data-testid="check-in-button"]「立即签到」→
+  # 点击 POST /api/v1/user/check-in 发随机余额(2026-10-30 实测 +$0.8518),
+  # 成功后按钮消失、出现 [data-testid="check-in-today-done"]
+  # 「今日已签到 · 明天 00:00 再来」,日历当天格子加 data-signed="true"。
+  # UI 支持中/英切换,两态都锁 data-testid,不用文案选择器。无 turnstile/滑块。
+  - name: 'loxo'
+    url: 'https://loxo.cc/check-in'
+    kind: browser
+    prefer_catalog_url: true
+    ready_rounds: 20
+    signs:
+      - 'button[data-testid="check-in-button"]'
+    already:
+      - '[data-testid="check-in-today-done"]'

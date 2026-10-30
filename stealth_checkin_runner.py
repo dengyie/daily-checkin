@@ -1493,6 +1493,14 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     # LinuxDO OAuth 登录(共享 9222 profile),签到 /profile「立即签到」+ 确认门,
     # 奖励 $1/天,无 Turnstile。通用 newapi_profile 通道。
     _N("lingjing", "https://6661886.xyz/profile", prefer_catalog_url=True),
+    # 墨华Mo(api.mohuaai.cn)—— 2026-10-29 接入。标准 New API v1.0.0-rc.47,
+    # LinuxDO OAuth 登录(共享 9222 profile),签到 /profile「立即签到」+ 确认门,
+    # 无 Turnstile。通用 newapi_profile 通道。
+    _N("mohua", "https://api.mohuaai.cn/profile", prefer_catalog_url=True),
+    # New API(ai.akmusi.online)—— 2026-10-29 接入。标准 New API v1.0.0-rc.47,
+    # LinuxDO OAuth 登录(共享 9222 profile),签到 /profile「立即签到」+ 确认门,
+    # 无 Turnstile。通用 newapi_profile 通道。
+    _N("akmusi", "https://ai.akmusi.online/profile", prefer_catalog_url=True),
 ]
 
 
@@ -2880,7 +2888,20 @@ async def page_url(page) -> str:
 def is_cloudflare(url: str, text: str) -> bool:
     u = (url or "").lower()
     t = (text or "").lower()
-    cf_hosted = "cloudflare" in u or "challenges.cloudflare.com" in u
+    # Only real challenge URLs count. A site's own hostname may legitimately
+    # contain "cloudflare" (cloudflare.pigeonw.com, 2026-10-30) and must not be
+    # mistaken for an interstitial — the old substring test burned the whole
+    # CF_WAIT_S window and failed the site as FAIL:cloudflare every run.
+    try:
+        host = urlparse(u).netloc
+    except Exception:
+        host = ""
+    cf_hosted = (
+        host == "challenges.cloudflare.com"
+        or host.endswith(".challenges.cloudflare.com")
+        or "/cdn-cgi/challenge-platform/" in u
+        or "/cdn-cgi/l/chk_" in u
+    )
     challenge_text = (
         "cf-challenge" in t
         or "checking your browser" in t
@@ -7384,6 +7405,10 @@ RELAYFOR_CAMPAIGN_SELECTORS = [
 # 已处理 / 完结态专属文案(严格排除全页宽泛的「已签到/签到成功」,避免活动等卡片污染词元贷状态)
 RELAYFOR_DONE_INDICATORS = ("已还清", "今日已处理", "已提完")
 
+# 借出后「今日签到还款」按钮挂载/可用的最长等待,以及还款落账确认窗口。
+RELAYFOR_REPAY_READY_WAIT_S = 10.0
+REPAY_CONFIRM_WAIT_S = 6.0
+
 # 限时签到活动卡片状态探测(单一来源,避免 _relayfor_today_done 与 _relayfor_done_state 各自复制)。
 # 返回 '' 表示仍存在可见可点的活动签到/领奖按钮(未签);否则返回 'campaign:<文案>'。
 _RELAYFOR_CLAIM_ATTR_JS = ", ".join(f"{s}:not([disabled])" for s in RELAYFOR_CLAIM_ATTR_SELECTORS)
@@ -7502,6 +7527,21 @@ async def _relayfor_available_button(page, selectors: list[str]) -> str | None:
                 logged_error = True
             continue
     return None
+
+
+async def _wait_relayfor_repay_button(page) -> str | None:
+    """借出后轮询等待「今日签到还款」可用;超时返回 None。
+
+    还款按钮在借出请求落账后才挂载/解禁,固定 sleep 会漏点(2026-10-30)。
+    """
+    deadline = time.monotonic() + RELAYFOR_REPAY_READY_WAIT_S
+    while True:
+        sel = await _relayfor_available_button(page, RELAYFOR_REPAY_SELECTORS)
+        if sel:
+            return sel
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(0.6)
 
 
 async def _relayfor_today_done(page) -> bool:
@@ -7722,7 +7762,10 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
         borrow = await _relayfor_available_button(page, RELAYFOR_BORROW_SELECTORS)
         repay = await _relayfor_available_button(page, RELAYFOR_REPAY_SELECTORS)
         if borrow or repay:
-            action_sel = borrow or repay
+            # 还款优先:词元贷的「每日签到」就是还款,借款只开出新周期。
+            # 待还未结清期间站点也可能放出「确认借款」(下一周期预告),先点借款
+            # 会把当天的签到漏掉(2026-10-30 事故)。
+            action_sel = repay or borrow
 
         if campaign_sel or action_sel:
             break
@@ -7798,7 +7841,7 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
         borrow = await _relayfor_available_button(page, RELAYFOR_BORROW_SELECTORS)
         repay = await _relayfor_available_button(page, RELAYFOR_REPAY_SELECTORS)
         if borrow or repay:
-            action_sel = borrow or repay
+            action_sel = repay or borrow
 
     # 7. 执行词元贷借款 / 还款
     if not today_done and action_sel:
@@ -7836,6 +7879,54 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
             )
         actions_executed.append(f"{which}成功")
         action_evidence = action
+
+        # 借款只开出本周期;词元贷的「每日签到」是还款,借出当天必须再还一次,
+        # 否则当天没有签到记录(2026-10-30 事故:08:18 借出 $1.00 就返回 OK,
+        # 页面仍是待还 $1.00 / 签到进度 0/7,直到人工点「今日签到还款」才落账)。
+        if is_borrow:
+            repay_sel = await _wait_relayfor_repay_button(page)
+            if not repay_sel:
+                return fail_result(
+                    "no_button",
+                    detail="relayfor 借款成功但未出现今日签到还款按钮",
+                    adapter=kind,
+                    action=action,
+                )
+            repay_action = ActionEvidence(
+                kind="native_click" if adapter.use_native_click else "dom_click",
+                target=repay_sel,
+                attempted_at=datetime.now().isoformat(timespec="seconds"),
+            )
+            before_repay = await page_text(page, RELAYFOR_TEXT_WINDOW)
+            try:
+                repay_loc = await _relayfor_pick_visible(page, repay_sel)
+                if repay_loc is None:
+                    repay_loc = page.locator(repay_sel).first
+                await repay_loc.click(timeout=5000, force=True)
+            except Exception as exc:
+                return fail_result(
+                    "no_click",
+                    detail=f"relayfor 借款后点击还款失败: {exc}",
+                    adapter=kind,
+                    action=repay_action,
+                )
+            repay_confirmed = False
+            repay_deadline = time.monotonic() + REPAY_CONFIRM_WAIT_S
+            while time.monotonic() < repay_deadline:
+                await asyncio.sleep(0.8)
+                after_repay = await _try_page_text(page, RELAYFOR_TEXT_WINDOW)
+                if _relayfor_confirm_after("还款", before_repay, after_repay):
+                    repay_confirmed = True
+                    break
+            if not repay_confirmed:
+                return fail_result(
+                    "no_confirm",
+                    detail="relayfor 借款成功但今日还款未落账",
+                    adapter=kind,
+                    action=repay_action,
+                )
+            actions_executed.append("还款成功")
+            action_evidence = repay_action
 
     # 7. 若执行了任何动作，直接返回 OK
     if actions_executed:

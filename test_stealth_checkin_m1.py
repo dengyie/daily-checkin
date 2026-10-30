@@ -4893,6 +4893,100 @@ class TestSitesYaml(unittest.TestCase):
         # LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
         self.assertIsNone(get_account_credential("lingjing"))
 
+    def test_yaml_registers_loxo_entry(self):
+        """loxo(loxo.cc) 2026-10-30 接入:自研 Vue SPA + 纯 LinuxDO OAuth。
+
+        签到两态锁 data-testid(check-in-button / check-in-today-done),
+        UI 可切中英文,不能用文案选择器。
+        """
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "loxo"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 loxo 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, resolve_site
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://loxo.cc/check-in")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertIn('button[data-testid="check-in-button"]', a.sign_selectors)
+        self.assertIn('[data-testid="check-in-today-done"]', a.already_selectors)
+        # 选择器必须语言无关:不得出现中文文案
+        joined = " ".join(a.sign_selectors + a.already_selectors)
+        self.assertNotIn("立即签到", joined)
+        self.assertNotIn("今日已签到", joined)
+        resolved = resolve_site("loxo", "https://loxo.cc/check-in")
+        self.assertEqual(resolved.kind, "browser")
+        self.assertEqual(resolved.url, "https://loxo.cc/check-in")
+
+    def test_yaml_registers_mohua_entry(self):
+        """墨华Mo(api.mohuaai.cn) 2026-10-29 接入:标准 LinuxDO+New API 站,
+        newapi_profile 通道,/profile,prefer_catalog_url,无自定义选择器。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "mohua"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 mohua 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://api.mohuaai.cn/profile")
+        self.assertEqual(a.login_url, "")
+        # 标准 New API 默认前端:走通用「签到/已签到」判定,无需自定义选择器
+        self.assertIn("签到", " ".join(a.sign_selectors))
+        self.assertIn("已签到", " ".join(a.already_selectors))
+        self.assertTrue(a.prefer_catalog_url)
+        resolved = resolve_site("mohua", "https://api.mohuaai.cn/profile")
+        self.assertEqual(resolved.url, "https://api.mohuaai.cn/profile")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "mohua"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 mohua")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://api.mohuaai.cn/profile")
+        # LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
+        self.assertIsNone(get_account_credential("mohua"))
+
+
+    def test_yaml_registers_akmusi_entry(self):
+        """New API(ai.akmusi.online) 2026-10-29 接入:标准 LinuxDO+New API 站,
+        newapi_profile 通道,/profile,prefer_catalog_url,无自定义选择器。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "akmusi"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 akmusi 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://ai.akmusi.online/profile")
+        self.assertEqual(a.login_url, "")
+        # 标准 New API 默认前端:走通用「签到/已签到」判定,无需自定义选择器
+        self.assertIn("签到", " ".join(a.sign_selectors))
+        self.assertIn("已签到", " ".join(a.already_selectors))
+        self.assertTrue(a.prefer_catalog_url)
+        resolved = resolve_site("akmusi", "https://ai.akmusi.online/profile")
+        self.assertEqual(resolved.url, "https://ai.akmusi.online/profile")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "akmusi"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 akmusi")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://ai.akmusi.online/profile")
+        # LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
+        self.assertIsNone(get_account_credential("akmusi"))
+
+
     def test_yaml_registers_sub2api_entry(self):
         """sites.yaml 的 sub2api 条目解析为 sub2api,/custom/activity,prefer_catalog_url,且账密注册有效。"""
         import yaml
@@ -5864,13 +5958,23 @@ class TestRelayForLoanCycle(unittest.TestCase):
             async def is_visible(self, timeout=800):
                 return bool(self.cfg is not None and self.cfg.get("is_visible"))
             async def is_disabled(self):
-                return bool(self.cfg is not None and self.cfg.get("disabled"))
+                if self.cfg is None:
+                    return False
+                # enable_after_click: 借出落账后站点才解禁「今日签到还款」。
+                if self.cfg.get("enable_after_click") and clicks:
+                    return False
+                return bool(self.cfg.get("disabled"))
             async def click(self, **kw):
                 if click_error is not None:
                     raise click_error
                 clicks.append(self.sel)
                 if page_text_after is not None:
-                    state["text"] = page_text_after
+                    # list/tuple 支持多步动作:第 N 次点击后用第 N 段文案。
+                    if isinstance(page_text_after, (list, tuple)):
+                        idx = min(len(clicks) - 1, len(page_text_after) - 1)
+                        state["text"] = page_text_after[idx]
+                    else:
+                        state["text"] = page_text_after
 
         class FakePage:
             async def goto(self, url, **kw):
@@ -5891,22 +5995,61 @@ class TestRelayForLoanCycle(unittest.TestCase):
             res = self.asyncio.run(m.relayfor_checkin(page, adapter or self._adapter(), browser=None))
         return res, clicks
 
-    def test_borrow_day_clicks_confirm_loan(self):
-        """确认借款可用 → 优先点确认借款并落账(待还金额出现)→ OK(借款)."""
+    def test_borrow_day_clicks_confirm_loan_then_repays_same_day(self):
+        """借出当天必须接着点「今日签到还款」:借款只开出周期,还款才是当日签到.
+
+        2026-10-30 事故:08:18 借出 $1.00 后直接返回 OK,页面仍是待还 $1.00 /
+        签到进度 0/7,当天实际没有签到。
+        """
         fake_locators_by = {
             'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
-            'button:has-text("今日签到还款")': {"is_visible": True, "disabled": True},
+            'button:has-text("今日签到还款")': {"is_visible": True, "disabled": True, "enable_after_click": True},
         }
         res, clicks = self._run_handler(
             fake_locators_by,
             page_text='已还清\n可再借',
-            page_text_after='当前待还 $1.00\n今日签到还款',
+            page_text_after=[
+                '当前待还 $1.00\n今日签到还款',            # 借款落账
+                '当前待还 $0.72\n签到进度\n1 / 7 次\n今日已签到\n今日签到还款完成',
+            ],
         )
-        self.assertEqual(res.status, "OK")
+        self.assertEqual(res.status, "OK", res.detail)
         self.assertIn("借款", res.detail)
-        self.assertTrue(any("确认借款" in c for c in clicks), "今日应点击 确认借款")
-        self.assertIsNotNone(res.action)
-        self.assertNotEqual(res.action.kind, "none")
+        self.assertIn("还款", res.detail)
+        self.assertTrue(any("确认借款" in c for c in clicks), "应先点击 确认借款")
+        self.assertTrue(any("今日签到还款" in c for c in clicks), "借出后必须补点 今日签到还款")
+        self.assertEqual(clicks[-1].count("今日签到还款"), 1, "最后一步应为还款")
+
+    def test_repay_preferred_when_borrow_also_visible(self):
+        """借/还同时可见时先还款:还款才是签到,借款按钮可能只是下周期预告."""
+        res, clicks = self._run_handler(
+            {
+                'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+                'button:has-text("今日签到还款")': {"is_visible": True, "disabled": False},
+            },
+            page_text='当前待还\n$1.00\n今日签到还款',
+            page_text_after='当前待还\n$0.72\n今日已签到',
+        )
+        self.assertEqual(res.status, "OK", res.detail)
+        self.assertTrue(any("今日签到还款" in c for c in clicks), "应点击 今日签到还款")
+        self.assertFalse(any("确认借款" in c for c in clicks), "不得抢跑点击 确认借款")
+
+    def test_borrow_without_repay_button_fails_instead_of_false_ok(self):
+        """借出成功但还款按钮始终不出现 → FAIL(不再假报 OK)."""
+        m = self.m
+        fake_locators_by = {
+            'button:has-text("确认借款")': {"is_visible": True, "disabled": False},
+            'button:has-text("今日签到还款")': {"is_visible": False},
+        }
+        with mock.patch.object(m, "RELAYFOR_REPAY_READY_WAIT_S", 0.0):
+            res, clicks = self._run_handler(
+                fake_locators_by,
+                page_text='已还清\n可再借',
+                page_text_after='当前待还 $1.00',
+            )
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_button")
+        self.assertTrue(any("确认借款" in c for c in clicks))
 
     def test_repay_day_clicks_repay_when_borrow_unavailable(self):
         """确认借款不可用、今日签到还款可用 → 点还款,落账为已还清 → OK."""
