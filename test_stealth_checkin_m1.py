@@ -672,7 +672,14 @@ class TestSuccessGate(unittest.TestCase):
         self.assertTrue(any("授权" in sel for sel in auth))
         self.assertFalse(any("确认" in sel for sel in auth))
         self.assertFalse(any("继续" in sel or "Continue" in sel for sel in auth))
-        self.assertEqual(self.m.CAPTCHA_WAIT_S, 40.0)
+        # CAPTCHA_WAIT_S 默认 40s;生产 env.sh 会压到 30s。断言默认值必须先摘 env,
+        # 否则 source env.sh 后跑全量会假失败(与 _NoCdpEnvMixin 同一个坑)。
+        saved = os.environ.pop("CAPTCHA_WAIT_S", None)
+        try:
+            self.assertEqual(load_mod(force=True).CAPTCHA_WAIT_S, 40.0)
+        finally:
+            if saved is not None:
+                os.environ["CAPTCHA_WAIT_S"] = saved
         src = TARGET.read_text(encoding="utf-8")
         self.assertIn("async def wait_out_cloudflare", src)
         self.assertIn("try_click_challenge_widgets(page)", src)
@@ -1571,7 +1578,30 @@ class TestExitAndResolve(unittest.TestCase):
 
 
 
-class TestCdpDiscover(unittest.TestCase):
+class _NoCdpEnvMixin:
+    """用例内屏蔽 CDP_HTTP / CDP_PORT。
+
+    这两个 env 是「显式端点」,会在自动发现里短路(env_CDP_HTTP / env_CDP_PORT),
+    而生产 shell 的 env.sh 正好 export 了它们。断言自动发现行为的用例必须在干净
+    环境里跑,否则 source env.sh 后跑全量会凭空多出 5 个假失败。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._cdp_env_saved = {
+            k: os.environ.pop(k, None) for k in ("CDP_HTTP", "CDP_PORT")
+        }
+
+    def tearDown(self):
+        for k, v in self._cdp_env_saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        super().tearDown()
+
+
+class TestCdpDiscover(_NoCdpEnvMixin, unittest.TestCase):
     """CDP auto-discover: ranking, headless refuse, strict prefer (no live Chrome required)."""
 
     def test_set_cdp_http_normalizes(self):
@@ -1720,10 +1750,11 @@ class TestCdpDiscover(unittest.TestCase):
         self.assertEqual(e["port"], 9224)
 
 
-class TestRobustnessAdditions(unittest.TestCase):
+class TestRobustnessAdditions(_NoCdpEnvMixin, unittest.TestCase):
     """P1 hardening: connect retry, mid-batch reconnect, per-site timeout, last-run status."""
 
     def setUp(self):
+        super().setUp()
         self.m = load_mod()
 
     def test_contants_have_env_defaults(self):
@@ -4909,6 +4940,7 @@ class TestSitesYaml(unittest.TestCase):
         self._patch_accounts_fixture()
         from stealth_checkin_runner import (
             _adapter_from_yaml_entry, resolve_site, get_account_credential,
+            _BUILTIN_SITE_ADAPTERS,
         )
         a = _adapter_from_yaml_entry(entry)
         self.assertEqual(a.kind, "browser")
@@ -4930,6 +4962,35 @@ class TestSitesYaml(unittest.TestCase):
         self.assertTrue(resolved.trusted_already_selectors)
         # 纯 LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
         self.assertIsNone(get_account_credential("loxo"))
+        # builtin 兜底也要有:yaml 读不到时不能静默丢站
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "loxo"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 loxo")
+        self.assertEqual(builtin_entry.kind, "browser")
+        self.assertEqual(builtin_entry.url, "https://loxo.cc/check-in")
+        self.assertTrue(builtin_entry.trusted_already_selectors)
+
+    def test_yaml_registers_pigeonw_cf_entry(self):
+        """pigeonw-cf(cloudflare.pigeonw.com) 2026-10-30 接入:自研 Vue 3 SPA +
+        纯 LinuxDO OAuth,签到按钮「签到领取」,浏览器内跑 PoW;builtin 兜底同 loxo。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "pigeonw-cf"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 pigeonw-cf 条目")
+        from stealth_checkin_runner import _adapter_from_yaml_entry, _BUILTIN_SITE_ADAPTERS
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://cloudflare.pigeonw.com/#/dashboard")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertTrue(a.trusted_sign_selectors)
+        self.assertTrue(a.trusted_already_selectors)
+        joined = " ".join(a.sign_selectors)
+        self.assertIn("签到领取", joined)
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "pigeonw-cf"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 pigeonw-cf")
+        self.assertEqual(builtin_entry.url, "https://cloudflare.pigeonw.com/#/dashboard")
 
     def test_yaml_registers_mohua_entry(self):
         """墨华Mo(api.mohuaai.cn) 2026-10-29 接入:标准 LinuxDO+New API 站,

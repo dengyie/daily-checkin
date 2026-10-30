@@ -1501,6 +1501,29 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     # LinuxDO OAuth 登录(共享 9222 profile),签到 /profile「立即签到」+ 确认门,
     # 无 Turnstile。通用 newapi_profile 通道。
     _N("akmusi", "https://ai.akmusi.online/profile", prefer_catalog_url=True),
+    # pigeonw-cf(cloudflare.pigeonw.com / 白鸽打码平台)—— 2026-10-30 接入。
+    # 自研 Vue 3 SPA + 纯 LinuxDO OAuth;签到 /#/dashboard「签到领取」,浏览器内
+    # 先跑 PoW 再落账。保留在 builtin,避免 sites.yaml 读不到时静默丢站。
+    _B(
+        "pigeonw-cf",
+        "https://cloudflare.pigeonw.com/#/dashboard",
+        signs=['button.btn-primary:has-text("签到领取")', 'button:has-text("签到领取")'],
+        already=['text=今日已签到', 'text=今日已领取'],
+        ready_rounds=20,
+        prefer_catalog_url=True,
+        kind="browser",
+    ),
+    # loxo(loxo.cc / lOXO AI API 网关)—— 2026-10-30 接入。Vite 构建的 Vue 3 SPA +
+    # 纯 LinuxDO OAuth;两态锁 data-testid,中英文 UI 都能识别。
+    _B(
+        "loxo",
+        "https://loxo.cc/check-in",
+        signs=['button[data-testid="check-in-button"]'],
+        already=['[data-testid="check-in-today-done"]'],
+        ready_rounds=20,
+        prefer_catalog_url=True,
+        kind="browser",
+    ),
 ]
 
 
@@ -7405,9 +7428,10 @@ RELAYFOR_CAMPAIGN_SELECTORS = [
 # 已处理 / 完结态专属文案(严格排除全页宽泛的「已签到/签到成功」,避免活动等卡片污染词元贷状态)
 RELAYFOR_DONE_INDICATORS = ("已还清", "今日已处理", "已提完")
 
-# 借出后「今日签到还款」按钮挂载/可用的最长等待,以及还款落账确认窗口。
+# 借/还点击后的落账确认窗口;借出后等「今日签到还款」按钮挂载/解禁的上限。
+RELAYFOR_ACTION_CONFIRM_WAIT_S = 4.0
 RELAYFOR_REPAY_READY_WAIT_S = 10.0
-REPAY_CONFIRM_WAIT_S = 6.0
+RELAYFOR_REPAY_CONFIRM_WAIT_S = 6.0
 # 选按钮阶段只见「确认借款」时,先给「今日签到还款」的短宽限:待还未结清时站点
 # 也可能放出「确认借款」(下周期预告),两者可能同屏或先后挂载,宽限内等到还款
 # 就不借(2026-10-30 残留竞态)。
@@ -7550,6 +7574,36 @@ async def _wait_relayfor_repay_button(page, timeout_s: float | None = None) -> s
         if time.monotonic() >= deadline:
             return None
         await asyncio.sleep(0.6)
+
+
+async def _relayfor_click_and_confirm(page, sel: str, which: str, *, wait_s: float,
+                                      evidence_native_click: bool = False) -> tuple[str, str, ActionEvidence]:
+    """点击借/还按钮并等落账。成功返回 ("", "", ActionEvidence)。
+
+    失败返回 ("no_click" | "no_confirm", 异常文本, ActionEvidence),提示语由调用方
+    决定(借出当天的补还款要说明「借款成功但还款失败」)。按钮在 SPA 里可能有隐藏
+    实例,先挑可见者再 force click。
+    """
+    action = ActionEvidence(
+        kind="native_click" if evidence_native_click else "dom_click",
+        target=sel,
+        attempted_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    before = await page_text(page, RELAYFOR_TEXT_WINDOW)
+    try:
+        loc = await _relayfor_pick_visible(page, sel)
+        if loc is None:
+            loc = page.locator(sel).first
+        await loc.click(timeout=5000, force=True)
+    except Exception as exc:
+        return "no_click", str(exc), action
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.8)
+        after = await _try_page_text(page, RELAYFOR_TEXT_WINDOW)
+        if _relayfor_confirm_after(which, before, after):
+            return "", "", action
+    return "no_confirm", "", action
 
 
 async def _relayfor_today_done(page) -> bool:
@@ -7861,30 +7915,14 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
     if not today_done and action_sel:
         is_borrow = any(bs in action_sel for bs in RELAYFOR_BORROW_SELECTORS)
         which = "借款" if is_borrow else "还款"
-        action = ActionEvidence(
-            kind="native_click" if adapter.use_native_click else "dom_click",
-            target=action_sel,
-            attempted_at=datetime.now().isoformat(timespec="seconds"),
+        reason, err, action = await _relayfor_click_and_confirm(
+            page, action_sel, which,
+            wait_s=RELAYFOR_ACTION_CONFIRM_WAIT_S,
+            evidence_native_click=adapter.use_native_click,
         )
-        before = await page_text(page, RELAYFOR_TEXT_WINDOW)
-
-        try:
-            target_loc = await _relayfor_pick_visible(page, action_sel)
-            if target_loc is None:
-                target_loc = page.locator(action_sel).first
-            await target_loc.click(timeout=5000, force=True)
-        except Exception as exc:
-            return fail_result("no_click", detail=f"relayfor 点击{which}失败: {exc}", adapter=kind, action=action)
-
-        confirm_deadline = time.monotonic() + 4.0
-        confirmed = False
-        while time.monotonic() < confirm_deadline:
-            await asyncio.sleep(0.8)
-            after = await _try_page_text(page, RELAYFOR_TEXT_WINDOW)
-            if _relayfor_confirm_after(which, before, after):
-                confirmed = True
-                break
-        if not confirmed:
+        if reason == "no_click":
+            return fail_result("no_click", detail=f"relayfor 点击{which}失败: {err}", adapter=kind, action=action)
+        if reason == "no_confirm":
             return fail_result(
                 "no_confirm",
                 detail=f"relayfor 点击{which}后未见落账变化",
@@ -7902,37 +7940,23 @@ async def relayfor_checkin(page, adapter, browser=None) -> CheckinResult:
             if not repay_sel:
                 return fail_result(
                     "no_button",
-                    detail="relayfor 借款成功但未出现今日签到还款按钮",
+                    detail=f"relayfor 借款成功但 {RELAYFOR_REPAY_READY_WAIT_S:.0f}s 内未见今日签到还款按钮",
                     adapter=kind,
                     action=action,
                 )
-            repay_action = ActionEvidence(
-                kind="native_click" if adapter.use_native_click else "dom_click",
-                target=repay_sel,
-                attempted_at=datetime.now().isoformat(timespec="seconds"),
+            reason, err, repay_action = await _relayfor_click_and_confirm(
+                page, repay_sel, "还款",
+                wait_s=RELAYFOR_REPAY_CONFIRM_WAIT_S,
+                evidence_native_click=adapter.use_native_click,
             )
-            before_repay = await page_text(page, RELAYFOR_TEXT_WINDOW)
-            try:
-                repay_loc = await _relayfor_pick_visible(page, repay_sel)
-                if repay_loc is None:
-                    repay_loc = page.locator(repay_sel).first
-                await repay_loc.click(timeout=5000, force=True)
-            except Exception as exc:
+            if reason == "no_click":
                 return fail_result(
                     "no_click",
-                    detail=f"relayfor 借款后点击还款失败: {exc}",
+                    detail=f"relayfor 借款后点击还款失败: {err}",
                     adapter=kind,
                     action=repay_action,
                 )
-            repay_confirmed = False
-            repay_deadline = time.monotonic() + REPAY_CONFIRM_WAIT_S
-            while time.monotonic() < repay_deadline:
-                await asyncio.sleep(0.8)
-                after_repay = await _try_page_text(page, RELAYFOR_TEXT_WINDOW)
-                if _relayfor_confirm_after("还款", before_repay, after_repay):
-                    repay_confirmed = True
-                    break
-            if not repay_confirmed:
+            if reason == "no_confirm":
                 return fail_result(
                     "no_confirm",
                     detail="relayfor 借款成功但今日还款未落账",
