@@ -14,6 +14,8 @@ venv/
 
 # OS / editor
 .DS_Store
+# macOS AppleDouble 残留（Windows 侧看到的 ._xxx 文件）
+._*
 .idea/
 .vscode/
 
@@ -25,6 +27,9 @@ venv/
 !docs/assets/
 !docs/assets/*.png
 runtime/
+# 运行时目录：含 csrf.token / web.token / credentials.json / system.db 等运行时
+# 产物与密钥，禁止入库
+data/
 
 # Secrets
 *.pem

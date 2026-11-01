@@ -50,6 +50,7 @@ def selected_endpoint(argv: list[str]) -> dict | None:
         raw = argv[index + 1].strip()
     allow_headless = "--allow-headless" in argv
     if raw:
+        # 显式指定的端点只 attach，绝不代启（端口不对/端点非 9222 时不得碰共享浏览器）
         if raw.isdigit():
             return discover_cdp_endpoint(
                 prefer_port=int(raw), strict_prefer=True,
@@ -59,7 +60,8 @@ def selected_endpoint(argv: list[str]) -> dict | None:
             prefer_http=raw, strict_prefer=True,
             allow_headless=allow_headless,
         )
-    return discover_cdp_endpoint(allow_headless=allow_headless)
+    # 未显式指定：允许在 9222 端口真空态代启共享浏览器（三项体检全过才准启动）
+    return discover_cdp_endpoint(allow_headless=allow_headless, allow_launch=True)
 
 
 def fixed_runner_args(argv: list[str], endpoint: dict | None) -> list[str]:
@@ -97,7 +99,11 @@ def main(argv: list[str] | None = None) -> int:
     ), redirect_stderr(Tee(sys.stderr, log)):
         print(f"==== {datetime.now().astimezone():%Y-%m-%d %H:%M:%S %Z} daily-checkin L2 start ====")
         print(f"runner={ROOT / 'stealth_checkin_runner.py'}")
-        print("policy=reuse_existing_cdp_fixed_after_preflight (no launch; headless opt-in only)")
+        print(
+            "policy=reuse_existing_cdp_fixed_after_preflight "
+            "(launch only when 9222 is fully vacant: no listener + no chrome.exe + "
+            "no profile Singleton lock; running instance is attach-only, never kill)"
+        )
         try:
             endpoint = selected_endpoint(argv)
         except Exception as exc:

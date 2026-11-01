@@ -3,8 +3,11 @@
 Bulletproof daily check-in on an EXISTING Chrome with remote debugging.
 
 Rules (user-facing):
-- connect_over_cdp only — never launch / kill Chrome
-- NEVER open a new browser window/process
+- connect_over_cdp only — never kill/restart Chrome, never launch a duplicate instance
+- EXCEPTION (2026-10-30 用户定调): 9222 端口**真空态**允许代启共享浏览器
+  （三项体检：无监听 + 无 Chrome 进程 + profile 无 Singleton 锁），见 cdp_launch.py
+  与 [[Note/Infra/本机 Windows 常驻进程与内存清理]]
+- NEVER open a new browser window/process beyond that single vacant-state recovery
 - Discover live CDP endpoints (do not hardcode only :9222); prefer newest headed Chrome
 - silent temp tab: HTTP CDP /json/new → work → /json/close ONLY after full flow returns
 - bind page by CDP target id — never fall back to last/arbitrary page
@@ -42,6 +45,14 @@ from typing import Any, Literal
 from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import async_playwright
+
+# cdp_launch 与本文件同目录；测试用 spec_from_file_location 加载本模块时仓库根
+# 未必在 sys.path，故显式把本文件所在目录加进去再导入。
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+import cdp_launch
 
 from checkin_core.models import (
     ActionEvidence,
@@ -2363,20 +2374,73 @@ def _probe_cdp(port: int, timeout: float = 0.8) -> dict[str, Any] | None:
     return _probe_cdp_http(f"http://127.0.0.1:{port}", timeout=timeout)
 
 
+def ensure_shared_cdp_endpoint(
+    port: int = cdp_launch.SHARED_CDP_PORT,
+    profile: Path | str = cdp_launch.DEFAULT_SHARED_PROFILE,
+    allow_headless: bool = False,
+    launch: bool = True,
+) -> dict[str, Any]:
+    """保证 9222 共享浏览器可用：能 attach 就 attach，真空态才代启。
+
+    契约（2026-10-30 用户定调，见 [[Note/Infra/本机 Windows 常驻进程与内存清理]]）：
+      - **运行中实例**：attach-only，绝不 kill / 绝不重启 / 绝不拉第二个实例。
+      - **端口真空态**（无监听 + 无 Chrome 进程 + profile 无 Singleton 锁）：
+        允许代启，启动 = 恢复，必须带 ``--restore-last-session`` 保住登录态。
+    """
+    info = _probe_cdp(port)
+    if info:
+        if info.get("headless") and not allow_headless:
+            raise RuntimeError(
+                f"CDP :{port} is headless; pass --allow-headless explicitly"
+            )
+        info.setdefault("reason", "attached")
+        return info
+
+    if not launch:
+        raise RuntimeError(
+            f"No live Chrome CDP on :{port}. Port is vacant but launch was disabled."
+        )
+
+    state = cdp_launch.inspect_state(port=port, profile=profile)
+    if not state.is_vacant:
+        raise RuntimeError(
+            f"CDP :{port} is not reachable but NOT in a vacant state ({state.describe()}); "
+            "refusing to launch or kill it — attach to the running instance instead"
+        )
+    print(
+        f"CDP :{port} vacant ({state.describe()}) — launching shared Chrome "
+        f"(profile={profile}, --restore-last-session)",
+        flush=True,
+    )
+    cdp_launch.launch_shared_browser(port=port, profile=profile)
+    info = _probe_cdp(port)
+    if not info:
+        raise RuntimeError(f"shared Chrome CDP launched but :{port} still unreachable")
+    info.setdefault("reason", "launched")
+    return info
+
+
 def discover_cdp_endpoint(
     prefer_port: int | None = None,
     prefer_http: str | None = None,
     allow_headless: bool = False,
     strict_prefer: bool = False,
+    allow_launch: bool = False,
 ) -> dict[str, Any]:
     """
-    Find best existing Chrome CDP endpoint. Never launches a browser.
+    Find best existing Chrome CDP endpoint. Never launches a browser unless
+    ``allow_launch`` is set AND the shared 9222 port is in a fully vacant state.
 
     Preference:
       1) env CDP_HTTP / CDP_PORT (must be reachable)
       2) prefer_http / prefer_port if given (strict_prefer → fail if down)
       3) live endpoints ranked: headed > dedicated check-in profile > more pages > newer start time
     Default: refuse pure-headless-only (exit path for caller) unless allow_headless.
+
+    ``allow_launch`` only applies to the shared 9222 browser and only when no
+    live endpoint was found at all (three-item preflight must pass; see
+    [[Note/Infra/本机 Windows 常驻进程与内存清理]]). A running instance is
+    never killed, restarted, or duplicated.
     """
     def accept_explicit(info: dict[str, Any], source: str, score: int) -> dict[str, Any]:
         if info.get("headless") and not allow_headless:
@@ -2498,6 +2562,13 @@ def discover_cdp_endpoint(
         candidates.append(info)
 
     if not candidates:
+        if allow_launch:
+            # 端口真空态才允许代启共享 9222（运行中实例绝不 kill/重启/重复拉起）
+            return ensure_shared_cdp_endpoint(
+                port=cdp_launch.SHARED_CDP_PORT,
+                profile=cdp_launch.DEFAULT_SHARED_PROFILE,
+                allow_headless=allow_headless,
+            )
         raise RuntimeError(
             "No live Chrome CDP found. Open remote debugging on an existing headed "
             "Chrome (any port). Do not launch a new browser from this script."
@@ -15771,7 +15842,8 @@ async def run(argv: list[str] | None = None) -> int:
         print(f"  - {a.name} [{a.kind}] {a.url}", flush=True)
 
 
-    # Discover existing Chrome CDP (prefer newest headed). Never launch.
+    # Discover existing Chrome CDP (prefer newest headed). Running instance is
+    # attach-only; the shared 9222 may only be launched when fully vacant.
     try:
         if args.cdp:
             raw = args.cdp.strip()
@@ -15783,7 +15855,15 @@ async def run(argv: list[str] | None = None) -> int:
             )
             info = _probe_cdp_http(http)
             if not info:
-                raise RuntimeError(f"explicit --cdp {http} not reachable")
+                # 显式指向共享 9222 时，允许在端口真空态代启恢复；三项体检不过即拒绝。
+                if urlparse(http).port == cdp_launch.SHARED_CDP_PORT:
+                    info = ensure_shared_cdp_endpoint(
+                        port=cdp_launch.SHARED_CDP_PORT,
+                        profile=cdp_launch.DEFAULT_SHARED_PROFILE,
+                        allow_headless=bool(getattr(args, "allow_headless", False)),
+                    )
+                else:
+                    raise RuntimeError(f"explicit --cdp {http} not reachable")
             if info.get("headless") and not getattr(args, "allow_headless", False):
                 raise RuntimeError(
                     f"explicit --cdp {http} is headless; pass --allow-headless"
@@ -15791,7 +15871,10 @@ async def run(argv: list[str] | None = None) -> int:
             info.setdefault("reason", "explicit_cdp")
             endpoint = info
         else:
-            endpoint = discover_cdp_endpoint(allow_headless=bool(getattr(args, "allow_headless", False)))
+            endpoint = discover_cdp_endpoint(
+                allow_headless=bool(getattr(args, "allow_headless", False)),
+                allow_launch=True,
+            )
         cdp_url = set_cdp_http(endpoint["http"])
         print(
             f"CDP selected: {cdp_url} headless={endpoint.get('headless')} "
