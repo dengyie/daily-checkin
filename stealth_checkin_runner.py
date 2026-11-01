@@ -198,6 +198,10 @@ PMCAT_DONE_SELECTORS = [
     'button[data-action="checkin"][disabled]',
     'text=今日已签到',
 ]
+# 纯 LINUX DO OAuth,站内没有账密入口:会话过期只能重走这个入口。
+# 未登录 GET 会 303 到 connect.linux.do/oauth2/authorize(实测 2026-11-01)。
+PMCAT_LOGIN_URL = "https://plan.pmcat.top/v1/oauth/login"
+PMCAT_HOST = "plan.pmcat.top"
 PMCAT_CAPTCHA_MAX_TRIES = 3
 
 
@@ -10861,7 +10865,8 @@ async def glados_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
 #   4. POST /api/checkin {captcha_token} → 落账。
 # 写操作需要 CSRF 头 `X-PMPlan-CSRF: 1`(前端 api() 对非 GET 一律加,服务端只校验存在性)。
 # 登录态 = LINUX DO Connect OAuth 的 pmplan_session Cookie(30 天,httpOnly,同 9222 profile),
-# 过期后只能人工重新 LINUX DO 登录 → 返回 auth_required。
+# 过期后走站点自己的 /v1/oauth/login 重授权(见 _pmcat_ensure_sso):共享 profile 里
+# connect.linux.do 的会话通常仍在,自动点「允许」即可自愈;linux.do 也掉登录才返回 auth_required。
 # 缺口求法:在背景上滑一个 slider_w 宽窗口,取带内行/列隔点亮度均值最小的位置(缺口是暗块)。
 # 选择器常量定义在文件顶部(PMCAT_* 与 NEWAPI_* 同处),因为内置兜底表在 import 期求值。
 
@@ -10923,6 +10928,57 @@ def _pmcat_month(day: str) -> int:
         return 0
 
 
+async def _pmcat_ensure_sso(page, browser=None) -> str:
+    """会话失效后走站点自己的 LINUX DO OAuth 入口重授权.
+
+    plan.pmcat.top 只有 OAuth、没有账密入口,所以不能像 nailao 那样填表登录。
+    共享 9222 profile 里 connect.linux.do 的登录态通常仍在(30 天),此时
+    整条链路只是「点一次允许」;真掉到 linux.do 的登录页则返回 AUTH_REQUIRED
+    让操作者人工登一次。
+
+    P0:只导航 + 点授权页按钮,绝不 clear_cookies / 绝不碰其它域 Cookie。
+    返回 "OK" / "ALREADY" / "AUTH_REQUIRED" / "CLOUDFLARE" / "TIMEOUT"。
+    """
+    try:
+        await page.goto(PMCAT_LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception as e:
+        print(f"  pmcat sso goto warning (continuing): {e}", flush=True)
+
+    # 站点 wall-clock 默认 60s:SSO 段不能把后面的签到预算吃光,封顶 30s。
+    deadline = time.monotonic() + max(12.0, min(float(SSO_TIMEOUT_S), 30.0))
+    approved = False
+    while time.monotonic() < deadline:
+        await asyncio.sleep(1.0)
+        try:
+            url = await page_url(page)
+        except Exception:
+            continue
+        if is_linuxdo_authorize_url(url):
+            # 只点一次:授权成功后回调在途时 URL 仍可能是 authorize 页,
+            # 重复点会重复发 grant(无害但浪费 4s/次)。
+            if not approved:
+                used = await _approve_linuxdo_authorize(page)
+                if used:
+                    approved = True
+                    print(f"  pmcat linuxdo 授权: {used}", flush=True)
+                elif looks_logged_out(await page_text(page, 600)):
+                    # 授权页要你先登录 linux.do → 人工介入,别空转到超时。
+                    return "AUTH_REQUIRED"
+            continue
+        # linux.do 自己的登录页:profile 里 linux.do 会话也过期了,只能人工。
+        if "linux.do" in url and not is_linuxdo_authorize_url(url):
+            text = await page_text(page, 500)
+            if looks_logged_out(text) or "login" in url.lower() or "sign" in url.lower():
+                return "AUTH_REQUIRED"
+        if PMCAT_HOST in url:
+            me_resp = await _pmcat_api(page, "/api/me")
+            if me_resp.get("_http_status") == 200:
+                return "OK" if approved else "ALREADY"
+            if is_cloudflare(url, await page_text(page, 400)):
+                return "CLOUDFLARE"
+    return "TIMEOUT"
+
+
 async def pmcat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
     """PM-Plan(plan.pmcat.top) 滑块验证码签到流程."""
     kind = adapter.kind or "pmcat"
@@ -10944,12 +11000,32 @@ async def pmcat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResu
     me_resp = await _pmcat_api(page, "/api/me")
     status_code = me_resp.get("_http_status")
     if status_code in (401, 403):
-        return fail_result(
-            "auth_required",
-            detail=f"/api/me HTTP {status_code}(LINUX DO 会话失效)",
-            adapter=kind,
-            stage="auth",
-        )
+        # 会话过期(2026-11-01 实测 401):先尝试站内 OAuth 自愈,再决定是否要人工。
+        # pmplan_session 30 天到期后,若 connect.linux.do 的会话仍在,这里只是一次
+        # 「点允许」的往返;linux.do 也掉登录才落到 auth_required。
+        print(f"  pmcat: /api/me HTTP {status_code}, trying LINUX DO re-auth", flush=True)
+        try:
+            sso = await _pmcat_ensure_sso(page, browser=browser)
+        except Exception as e:
+            # 自愈失败不能把整站打成异常:退回可诊断的 auth_required。
+            sso = f"ERROR:{type(e).__name__}"
+        print(f"  pmcat: re-auth -> {sso}", flush=True)
+        if sso in ("OK", "ALREADY"):
+            try:
+                await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+            except Exception:
+                pass
+            await bypass_chrome_interstitial_if_needed(page)
+            await wait_text_ready(page, 30, adapter.ready_rounds)
+            me_resp = await _pmcat_api(page, "/api/me")
+            status_code = me_resp.get("_http_status")
+        if status_code in (401, 403):
+            return fail_result(
+                "auth_required",
+                detail=f"/api/me HTTP {status_code}(LINUX DO 会话失效,重授权 {sso})",
+                adapter=kind,
+                stage="auth",
+            )
     if status_code != 200:
         text = (await page_text(page, 300) or "").replace("\n", " ")
         return fail_result("api_unavailable", detail=f"/api/me HTTP {status_code} {text[:80]}", adapter=kind, stage="precheck")

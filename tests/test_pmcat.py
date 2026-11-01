@@ -65,8 +65,8 @@ class PmcatFlowTest(AsyncioTest):
             ready_rounds=30,
         )
 
-    def _run(self, m, page, api, evaluate=None):
-        """跑一次 pmcat_checkin,把页面侧 API/验证码交互替换为桩."""
+    def _run(self, m, page, api, evaluate=None, sso=None):
+        """跑一次 pmcat_checkin,把页面侧 API/验证码/SSO 交互替换为桩."""
         adapter = self._adapter(m)
         originals = {
             name: getattr(m, name)
@@ -76,6 +76,7 @@ class PmcatFlowTest(AsyncioTest):
                 "bypass_chrome_interstitial_if_needed",
                 "page_text",
                 "_pmcat_api",
+                "_pmcat_ensure_sso",
             )
         }
 
@@ -91,11 +92,15 @@ class PmcatFlowTest(AsyncioTest):
         async def fake_api(pg, path, method="GET", payload=None):
             return api(path, method, payload)
 
+        async def fake_sso(*a, **k):
+            return sso or "TIMEOUT"
+
         m.wait_text_ready = noop
         m.wait_out_cloudflare = no_cf
         m.bypass_chrome_interstitial_if_needed = noop
         m.page_text = page_text
         m._pmcat_api = fake_api
+        m._pmcat_ensure_sso = fake_sso
         if evaluate is not None:
             page.evaluate = evaluate
         try:
@@ -105,16 +110,52 @@ class PmcatFlowTest(AsyncioTest):
                 setattr(m, name, value)
 
     def test_auth_required_when_session_expired(self):
+        """重授权也拿不回会话(linux.do 自己掉登录)才报 auth_required."""
         m = load_runner("pmcat_auth")
 
         class Page:
             async def goto(self, *a, **k):
                 return None
 
-        result = self._run(m, Page(), lambda path, method, payload: {"_http_status": 401})
+        result = self._run(
+            m, Page(), lambda path, method, payload: {"_http_status": 401}, sso="AUTH_REQUIRED"
+        )
         self.assertEqual(result.status, "FAIL")
         self.assertEqual(result.reason, "auth_required")
         self.assertIn("/api/me", result.detail)
+
+    def test_expired_session_self_heals_via_oauth(self):
+        """401 后走站内 OAuth 重授权成功:继续签到,不把单次失效当业务失败."""
+        m = load_runner("pmcat_sso")
+        state = {"me_calls": 0}
+
+        class Page:
+            async def goto(self, *a, **k):
+                return None
+
+        def api(path, method, payload):
+            if path == "/api/me":
+                state["me_calls"] += 1
+                if state["me_calls"] == 1:
+                    return {"_http_status": 401}
+                return {
+                    "_http_status": 200,
+                    "body": {
+                        "user": {"username": "mangoqwq"},
+                        "checkin": {
+                            "checked_in_today": True,
+                            "can_checkin": False,
+                            "streak": 1,
+                            "today": "2026-11-01",
+                        },
+                    },
+                }
+            raise AssertionError(f"unexpected api path {path}")
+
+        result = self._run(m, Page(), api, sso="OK")
+        self.assertEqual(result.status, "ALREADY")
+        self.assertEqual(state["me_calls"], 2)
+        self.assertEqual(m.apply_attribution(result).status, "ALREADY")
 
     def test_already_when_checked_in_today(self):
         m = load_runner("pmcat_already")
