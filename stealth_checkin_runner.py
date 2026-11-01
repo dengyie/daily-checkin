@@ -11252,6 +11252,9 @@ async def pmcat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResu
             if not await _pmcat_open(page, site_url, adapter):
                 # 自愈回来被 CF 挡住:归因 cloudflare,别落到 auth_required
                 return fail_result("cloudflare", adapter=kind)
+            # 会话已刷新:清掉旧轮的 401/403,否则「已自愈的历史」会让后续
+            # 纯滑块失败也被兜底判成 auth_required(把运维引去无谓重登)。
+            all_tries.clear()
         solved = await page.evaluate(
             """async () => {
                 const apicall = async (path, opt) => {

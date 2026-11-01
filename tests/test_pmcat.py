@@ -522,6 +522,50 @@ class PmcatFlowTest(AsyncioTest):
         self.assertEqual(result.reason, "cloudflare")
         self.assertIn("530", result.detail)
 
+    def test_auth_heals_then_captcha_fails_is_captcha_not_auth_required(self):
+        """自愈成功后的纯滑块失败应归因 captcha_failed,
+        不能被 old 401 污染成 auth_required(运维会去无谓重登)."""
+        m = load_runner("pmcat_auth_heal_then_captcha")
+        state = {"sso": 0, "slider": 0, "me": 0}
+
+        class Page:
+            async def goto(self, *a, **k):
+                return None
+
+        def api(path, method, payload):
+            state["me"] += 1
+            # precheck 与各轮落账复查都保持「未签」,目的就是走完循环后兜底复检
+            return {
+                "_http_status": 200,
+                "body": {
+                    "checkin": {"checked_in_today": False, "can_checkin": True, "today": "2026-11-01"},
+                },
+            }
+
+        async def evaluate(script, arg=None):
+            state["slider"] += 1
+            if state["slider"] == 1:
+                return {
+                    "ok": False,
+                    "tries": [{"stage": "verify", "status": 401, "x": 210}],
+                }
+            return {
+                "ok": False,
+                "tries": [
+                    {"stage": "verify", "status": 200, "x": 210, "reason": "bot_behavior"}
+                ],
+            }
+
+        async def counting_sso(*a, **k):
+            state["sso"] += 1
+            return "OK"
+
+        result = self._run(m, Page(), api, evaluate, sso=counting_sso)
+        self.assertEqual(result.status, "FAIL", msg=result.detail)
+        self.assertEqual(result.reason, "captcha_failed")
+        self.assertEqual(state["sso"], 1)
+        self.assertEqual(state["slider"], 3)
+
 
 class EnsureSsoTest(AsyncioTest):
     """P2-3:_pmcat_ensure_sso 本体 —— 唯一会真实点击授权按钮的代码,
@@ -534,11 +578,13 @@ class EnsureSsoTest(AsyncioTest):
         urls: 每次 page_url 弹出一个,耗尽后重复最后一个;
         approve_results: _approve_linuxdo_authorize 的按序返回(缺省恒有按钮)。
         """
-        state = {"approve_calls": 0, "urls": list(urls), "api_calls": 0}
+        state = {"approve_calls": 0, "urls": list(urls), "api_calls": 0, "last_url": None}
         approves = list(approve_results) if approve_results is not None else [True]
 
         async def fake_url(p):
-            return state["urls"][-1] if not state["urls"] else state["urls"].pop(0)
+            if state["urls"]:
+                state["last_url"] = state["urls"].pop(0)
+            return state["last_url"]
 
         async def fake_approve(p):
             state["approve_calls"] += 1
