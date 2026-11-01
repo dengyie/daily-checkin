@@ -757,8 +757,11 @@ sites:
     prefer_cta_before_auth: true
     use_native_click: true
     use_overlay_zapper: false
+  # llmpm(api.llm.pm,New API 网关)—— 2026-11-01 站方下线旧 /checkin 路由(实测整页
+  # 404「页面未找到」,晨批 FAIL:dead_url),签到卡片回到标准 /profile。9222 会话实测
+  # /profile 渲染「每日签到」卡片 + 「立即签到」按钮(未签态)。
   - name: 'llmpm'
-    url: https://api.llm.pm/checkin
+    url: https://api.llm.pm/profile
     kind: browser
     prefer_cta_before_auth: true
     signs:

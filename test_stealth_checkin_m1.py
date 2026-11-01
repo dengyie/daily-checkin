@@ -391,11 +391,13 @@ class TestSuccessGate(unittest.TestCase):
         self.assertTrue(nodeseek.trusted_sign_selectors)
         self.assertTrue(nodeseek.trusted_already_selectors)
 
-        llmpm = self.m.resolve_site("llmpm", "https://api.llm.pm/checkin")
+        llmpm = self.m.resolve_site("llmpm", "https://api.llm.pm/profile")
         self.assertIsNotNone(llmpm)
         assert llmpm is not None
         self.assertEqual(llmpm.sign_selectors[0], 'button:has-text("立即签到")')
         self.assertEqual(llmpm.ready_rounds, 30)
+        # 2026-11-01 站方下线 /checkin(404),catalog 与 note URL 都必须指向 /profile
+        self.assertEqual(llmpm.url, "https://api.llm.pm/profile")
 
         lucky = self.m.resolve_site(
             "lucky0625 fuli", "https://fuli.lucky0625.qzz.io/"

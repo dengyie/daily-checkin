@@ -1196,9 +1196,11 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         use_native_click=True,
         use_overlay_zapper=False,
     ),
+    # llmpm(api.llm.pm): 2026-11-01 站方下线旧 /checkin 路由(整页 404 → dead_url),
+    # 签到卡片回到标准 /profile(9222 会话实测有「每日签到」+「立即签到」)。
     _B(
         "llmpm",
-        "https://api.llm.pm/checkin",
+        "https://api.llm.pm/profile",
         signs=['button:has-text("立即签到")', '[role="button"]:has-text("立即签到")'],
         already=[
             'text=今日已签到',
