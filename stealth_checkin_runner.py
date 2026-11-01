@@ -214,6 +214,9 @@ PMCAT_DONE_SELECTORS = [
 PMCAT_LOGIN_URL = "https://plan.pmcat.top/v1/oauth/login"
 PMCAT_HOST = "plan.pmcat.top"
 PMCAT_CAPTCHA_MAX_TRIES = 3
+# SSO 段与签到共用站点 wall clock(staging 60s):入口导航单独压到 8s,
+# 避免 login 页挂起时 30s goto 就把签到预算吃光(见 _pmcat_ensure_sso)。
+PMCAT_SSO_GOTO_TIMEOUT_MS = 8000
 
 
 OVERLAY_ZAPPER_JS = """
@@ -10947,11 +10950,11 @@ def is_pmcat_site(site_url: str) -> bool:
 
     只认 plan 子域:dygyz.pmcat.top / pap.pmcat.top 是同家族但完全不同的站
     (dygyz 的 is_dygyz_site 用宽匹配 "pmcat.top"),宽匹配会把它们误路由进
-    pmcat_checkin。
+    pmcat_checkin。裸域 pmcat.top 同样不认 —— 站点只在 plan 子域提供签到。
     """
     u = (site_url or "").lower()
     host = u.split("://", 1)[-1].split("/", 1)[0].split("#", 1)[0]
-    return host in ("plan.pmcat.top", "pmcat.top")
+    return host == "plan.pmcat.top"
 
 
 async def _pmcat_api(page, path: str, method: str = "GET", payload=None) -> dict:
@@ -10999,7 +11002,98 @@ def _pmcat_month(day: str) -> int:
         return 0
 
 
-async def _pmcat_ensure_sso(page, browser=None) -> str:
+def _pmcat_streak_text(checkin: dict) -> str:
+    """streak 缺失/非整数时不渲染成「连续 None 天」。"""
+    streak = checkin.get("streak")
+    return f"连续 {streak} 天" if isinstance(streak, int) else ""
+
+
+def _pmcat_already_result(kind: str, me: dict) -> CheckinResult:
+    """今日已签(或落账复查确认已签)的 ALREADY 结果.
+
+    只由 /api/me 判定;必须自带 confirming evidence,否则无 action 的
+    ALREADY 会被 apply_attribution 判成 unattributed_success。
+    """
+    checkin = me.get("checkin") if isinstance(me.get("checkin"), dict) else {}
+    user = me.get("user") if isinstance(me.get("user"), dict) else {}
+    who = user.get("username") or user.get("display_name") or ""
+    streak_txt = _pmcat_streak_text(checkin)
+    detail = "今日已签到"
+    if streak_txt:
+        detail += f"({streak_txt})"
+    if who:
+        detail += f" {who}"
+    return ok_result(
+        "ALREADY",
+        adapter=kind,
+        detail=detail,
+        confirmation=dom_confirmation(
+            "/api/me checked_in_today=true" + (f" ({streak_txt})" if streak_txt else ""),
+            done_state=True,
+        ),
+        pre_state="DONE",
+        post_state="DONE",
+        transition="NONE",
+        attribution="precheck",
+        business_status="already",
+        business_reason="checked_in_today",
+    )
+
+
+def _pmcat_tries_detail(tries) -> str:
+    """把一轮 tries 压成一行诊断(结构化字段,不猜文案)."""
+    parts = []
+    for t in tries or []:
+        if not isinstance(t, dict):
+            continue
+        s = str(t.get("stage") or "step")
+        if t.get("status") is not None:
+            s += f" HTTP {t.get('status')}"
+        if t.get("x") is not None:
+            s += f" x={t.get('x')}"
+        if t.get("reason"):
+            s += f" reason={t.get('reason')}"
+        parts.append(s)
+    return "; ".join(parts)[:180]
+
+
+def _pmcat_auth_lost(tries) -> bool:
+    """会话在签到途中失效(401/403):按状态码判定,不靠文案里有没有 auth."""
+    return any(
+        isinstance(t, dict) and t.get("status") in (401, 403) for t in tries or []
+    )
+
+
+def _pmcat_cf_edge_error(status_code, text: str) -> bool:
+    """Cloudflare 边缘错误页(实测 530/Error 1033 隧道不可达)→ 归因 cloudflare.
+
+    这是站点源站/隧道故障,不是登录或签到问题;与可等待的 CF 挑战页不同,
+    等也没用,直接记 cloudflare 让日志一望即知,而不是含糊的 api_unavailable。
+    """
+    if status_code in (520, 521, 522, 523, 524, 525, 526, 527, 530):
+        return True
+    t = (text or "").lower()
+    return ("error code:" in t and "1033" in t) or (
+        "ray id:" in t and "cloudflare" in t
+    )
+
+
+async def _pmcat_open(page, site_url: str, adapter: SiteAdapter) -> bool:
+    """打开站点并等到可交互;False = 被 Cloudflare 挡住.
+
+    首屏与 OAuth 回调后共用:自愈回来也可能是 CF 挑战页,不统一判定会把
+    cloudflare 错报成 api_unavailable,失败归因就漂了。
+    """
+    try:
+        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception as e:
+        print(f"  pmcat goto warning (continuing): {e}", flush=True)
+    await bypass_chrome_interstitial_if_needed(page)
+    await wait_text_ready(page, 30, adapter.ready_rounds)
+    return not await wait_out_cloudflare(page, CF_WAIT_S)
+
+
+async def _pmcat_ensure_sso(page) -> str:
     """会话失效后走站点自己的 LINUX DO OAuth 入口重授权.
 
     plan.pmcat.top 只有 OAuth、没有账密入口,所以不能像 nailao 那样填表登录。
@@ -11010,13 +11104,18 @@ async def _pmcat_ensure_sso(page, browser=None) -> str:
     P0:只导航 + 点授权页按钮,绝不 clear_cookies / 绝不碰其它域 Cookie。
     返回 "OK" / "ALREADY" / "AUTH_REQUIRED" / "CLOUDFLARE" / "TIMEOUT"。
     """
+    # 入口导航与轮询共用同一份预算:站点 wall clock 60s 时 SSO 段封顶 30s,
+    # 且 goto 单独压到 8s —— 只有轮询封顶的话,login 页挂起就能单吃 30s。
+    deadline = time.monotonic() + max(12.0, min(float(SSO_TIMEOUT_S), 30.0))
     try:
-        await page.goto(PMCAT_LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+        await page.goto(
+            PMCAT_LOGIN_URL,
+            wait_until="commit",
+            timeout=PMCAT_SSO_GOTO_TIMEOUT_MS,
+        )
     except Exception as e:
         print(f"  pmcat sso goto warning (continuing): {e}", flush=True)
 
-    # 站点 wall-clock 默认 60s:SSO 段不能把后面的签到预算吃光,封顶 30s。
-    deadline = time.monotonic() + max(12.0, min(float(SSO_TIMEOUT_S), 30.0))
     approved = False
     while time.monotonic() < deadline:
         await asyncio.sleep(1.0)
@@ -11056,40 +11155,32 @@ async def pmcat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResu
     site_url = adapter.url or "https://plan.pmcat.top/#/"
     print(f"  pmcat flow: {adapter.name} -> {site_url}", flush=True)
 
-    try:
-        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
-    except Exception as e:
-        print(f"  pmcat goto warning (continuing): {e}", flush=True)
-    await bypass_chrome_interstitial_if_needed(page)
-    await wait_text_ready(page, 30, adapter.ready_rounds)
-
-    cf = await wait_out_cloudflare(page, CF_WAIT_S)
-    if cf:
+    if not await _pmcat_open(page, site_url, adapter):
         return fail_result("cloudflare", adapter=kind)
 
     # 登录态 + 今日状态(/api/me 是唯一可靠来源:签到卡片文案依赖它)
     me_resp = await _pmcat_api(page, "/api/me")
     status_code = me_resp.get("_http_status")
+    api_err = str(me_resp.get("_err") or "")
+    sso = ""
+
     if status_code in (401, 403):
         # 会话过期(2026-11-01 实测 401):先尝试站内 OAuth 自愈,再决定是否要人工。
         # pmplan_session 30 天到期后,若 connect.linux.do 的会话仍在,这里只是一次
         # 「点允许」的往返;linux.do 也掉登录才落到 auth_required。
         print(f"  pmcat: /api/me HTTP {status_code}, trying LINUX DO re-auth", flush=True)
         try:
-            sso = await _pmcat_ensure_sso(page, browser=browser)
+            sso = await _pmcat_ensure_sso(page)
         except Exception as e:
             # 自愈失败不能把整站打成异常:退回可诊断的 auth_required。
             sso = f"ERROR:{type(e).__name__}"
         print(f"  pmcat: re-auth -> {sso}", flush=True)
         if sso in ("OK", "ALREADY"):
-            try:
-                await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
-            except Exception:
-                pass
-            await bypass_chrome_interstitial_if_needed(page)
-            await wait_text_ready(page, 30, adapter.ready_rounds)
+            if not await _pmcat_open(page, site_url, adapter):
+                return fail_result("cloudflare", adapter=kind)
             me_resp = await _pmcat_api(page, "/api/me")
             status_code = me_resp.get("_http_status")
+            api_err = str(me_resp.get("_err") or "")
         if status_code in (401, 403):
             return fail_result(
                 "auth_required",
@@ -11097,32 +11188,41 @@ async def pmcat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResu
                 adapter=kind,
                 stage="auth",
             )
+
+    if status_code is None:
+        # fetch 自己抛错时没有状态码,真因在 _err 里 —— 别再报成 "HTTP None"
+        page_txt = (await page_text(page, 300) or "").replace("\n", " ")
+        if is_cloudflare(await page_url(page), page_txt) or _pmcat_cf_edge_error(
+            None, page_txt
+        ):
+            return fail_result("cloudflare", adapter=kind)
+        return fail_result(
+            "api_unavailable",
+            detail=f"/api/me 请求失败:{(api_err or page_txt or 'unknown')[:100]}",
+            adapter=kind,
+            stage="precheck",
+        )
     if status_code != 200:
         text = (await page_text(page, 300) or "").replace("\n", " ")
-        return fail_result("api_unavailable", detail=f"/api/me HTTP {status_code} {text[:80]}", adapter=kind, stage="precheck")
+        # 530/52x 是 CF 边缘错误页(源站/隧道故障),不是站点业务失败
+        if _pmcat_cf_edge_error(status_code, text):
+            return fail_result(
+                "cloudflare",
+                detail=f"/api/me HTTP {status_code} {text[:70]}".strip(),
+                adapter=kind,
+                stage="precheck",
+            )
+        return fail_result(
+            "api_unavailable",
+            detail=f"/api/me HTTP {status_code}{api_err} {text[:70]}".strip(),
+            adapter=kind,
+            stage="precheck",
+        )
 
     me = _pmcat_payload(me_resp)
     checkin = me.get("checkin") if isinstance(me.get("checkin"), dict) else {}
-    user = me.get("user") if isinstance(me.get("user"), dict) else {}
-    who = user.get("username") or user.get("display_name") or ""
     if checkin.get("checked_in_today"):
-        streak = checkin.get("streak")
-        return ok_result(
-            "ALREADY",
-            adapter=kind,
-            detail=f"今日已签到(连续 {streak} 天){' ' + who if who else ''}",
-            # ALREADY 走无 action 的 precheck 分支时,必须带 confirming evidence,
-            # 否则被归因门判 unattributed_success。
-            confirmation=dom_confirmation(
-                f"/api/me checked_in_today=true (连续 {streak} 天)", done_state=True
-            ),
-            pre_state="DONE",
-            post_state="DONE",
-            transition="NONE",
-            attribution="precheck",
-            business_status="already",
-            business_reason="checked_in_today",
-        )
+        return _pmcat_already_result(kind, me)
     if checkin.get("can_checkin") is False:
         return pending_result(
             "not_ready",
@@ -11132,9 +11232,28 @@ async def pmcat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResu
         )
 
     last_err = ""
+    all_tries = []
+    need_reauth = False
     for attempt in range(1, PMCAT_CAPTCHA_MAX_TRIES + 1):
+        # 上一轮 challenge/verify 撞到 401:先补授权再继续这一轮,而不是把
+        # 「会话中途失效」直接记成 captcha_failed。
+        if need_reauth:
+            need_reauth = False
+            print("  pmcat: auth lost mid-flow, retrying LINUX DO re-auth", flush=True)
+            try:
+                sso = await _pmcat_ensure_sso(page)
+            except Exception as e:
+                sso = f"ERROR:{type(e).__name__}"
+            print(f"  pmcat: re-auth -> {sso}", flush=True)
+            if sso not in ("OK", "ALREADY"):
+                if sso == "CLOUDFLARE":
+                    return fail_result("cloudflare", adapter=kind)
+                break
+            if not await _pmcat_open(page, site_url, adapter):
+                # 自愈回来被 CF 挡住:归因 cloudflare,别落到 auth_required
+                return fail_result("cloudflare", adapter=kind)
         solved = await page.evaluate(
-            """async ([maxTries]) => {
+            """async () => {
                 const apicall = async (path, opt) => {
                     const headers = { Accept: 'application/json' };
                     if (opt && opt.body) headers['Content-Type'] = 'application/json';
@@ -11176,6 +11295,8 @@ async def pmcat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResu
                     }
                     return best.x;
                 };
+                // 单轮 evaluate 只做一次 challenge→verify→checkin;重试在 Python 侧
+                // (PMCAT_CAPTCHA_MAX_TRIES),别在这里再套循环,否则重试会变 N×N。
                 // 拟人轨迹:带缓动 + 抖动 + 总时长 480-780ms(服务端会拒绝直线/过快)
                 const mkTrack = (target) => {
                     const steps = 24 + Math.floor(Math.random() * 8);
@@ -11194,36 +11315,33 @@ async def pmcat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResu
                     return tr;
                 };
                 const tries = [];
-                for (let i = 0; i < maxTries; i++) {
-                    const chR = await apicall('/api/captcha/challenge');
-                    const ch = chR.body && (chR.body.data || chR.body);
-                    if (!ch || !ch.id || !ch.image) {
-                        tries.push({ stage: 'challenge', status: chR.status });
-                        continue;
-                    }
-                    const SW = ch.slider_w || 50, SH = ch.slider_h || 80, TY = ch.target_y || 0;
-                    const bg = pixels(await loadImg(ch.image));
-                    const x = solveX(bg, SW, SH, TY);
-                    const vr = await apicall('/api/captcha/verify', {
-                        method: 'POST',
-                        body: { id: ch.id, x: x, track: mkTrack(x) },
-                    });
-                    const vbody = vr.body || {};
-                    const token = vbody.token || (vbody.data && vbody.data.token);
-                    tries.push({ stage: 'verify', status: vr.status, x: x, reason: vbody.reason || null, ok: !!token });
-                    if (!token) continue;
-                    const ck = await apicall('/api/checkin', { method: 'POST', body: { captcha_token: token } });
-                    const cbody = ck.body || {};
-                    const cdata = cbody.data || cbody;
-                    const msg = (cbody.message || cdata.message || (cbody.error && cbody.error.message) || '').toString();
-                    tries.push({ stage: 'checkin', status: ck.status, message: msg });
-                    return { ok: ck.status === 200, tries: tries };
+                const chR = await apicall('/api/captcha/challenge');
+                const ch = chR.body && (chR.body.data || chR.body);
+                if (!ch || !ch.id || !ch.image) {
+                    tries.push({ stage: 'challenge', status: chR.status });
+                    return { ok: false, tries: tries };
                 }
-                return { ok: false, tries: tries };
+                const SW = ch.slider_w || 50, SH = ch.slider_h || 80, TY = ch.target_y || 0;
+                const bg = pixels(await loadImg(ch.image));
+                const x = solveX(bg, SW, SH, TY);
+                const vr = await apicall('/api/captcha/verify', {
+                    method: 'POST',
+                    body: { id: ch.id, x: x, track: mkTrack(x) },
+                });
+                const vbody = vr.body || {};
+                const token = vbody.token || (vbody.data && vbody.data.token);
+                tries.push({ stage: 'verify', status: vr.status, x: x, reason: vbody.reason || null, ok: !!token });
+                if (!token) return { ok: false, tries: tries };
+                const ck = await apicall('/api/checkin', { method: 'POST', body: { captcha_token: token } });
+                const cbody = ck.body || {};
+                const cdata = cbody.data || cbody;
+                const msg = (cbody.message || cdata.message || (cbody.error && cbody.error.message) || '').toString();
+                tries.push({ stage: 'checkin', status: ck.status, message: msg });
+                return { ok: ck.status === 200, tries: tries };
             }""",
-            [1],
         )
         tries = (solved or {}).get("tries") or []
+        all_tries.extend(tries)
         if solved and solved.get("ok"):
             ck = {}
             for item in tries:
@@ -11237,14 +11355,16 @@ async def pmcat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResu
                 last_err = f"checkin HTTP 200 但 /api/me 未落账: {msg}"
                 print(f"  pmcat: {last_err}", flush=True)
                 continue
-            try:
-                month = _pmcat_month(v_checkin.get("today"))
-            except Exception:
-                month = 0
+            streak_txt = _pmcat_streak_text(v_checkin)
+            month = _pmcat_month(v_checkin.get("today"))
+            month_txt = (
+                f"{month} 月签到 {len(v_checkin.get('recent') or [])} 天" if month else ""
+            )
+            tail = ",".join(b for b in (streak_txt, month_txt) if b)
             return ok_result(
                 "OK",
                 adapter=kind,
-                detail=f"{msg}(连续 {v_checkin.get('streak')} 天,{month} 月签到 {len(v_checkin.get('recent') or [])} 天)",
+                detail=f"{msg}({tail})" if tail else msg,
                 action=ActionEvidence(
                     kind="api_post",
                     target="/api/checkin",
@@ -11258,16 +11378,26 @@ async def pmcat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResu
                 transition="PENDING_TO_DONE",
                 attribution="runner",
             )
-        last_err = "; ".join(
-            f"{t.get('stage')} HTTP {t.get('status')} x={t.get('x')}" + (f" reason={t.get('reason')}" if t.get("reason") else "")
-            for t in tries
-            if isinstance(t, dict)
-        )[:180]
+        last_err = _pmcat_tries_detail(tries)
         print(f"  pmcat attempt {attempt}/{PMCAT_CAPTCHA_MAX_TRIES} failed: {last_err}", flush=True)
+        if _pmcat_auth_lost(tries):
+            need_reauth = True
         await asyncio.sleep(1.2)
 
-    if "auth" in last_err.lower() or "401" in last_err:
-        return fail_result("auth_required", detail=last_err, adapter=kind, stage="auth")
+    # 落账兜底:签到可能已经成功,只是当轮回读抖动、或第二轮被「今日已签」
+    # 打回 —— 判失败前以 /api/me 为准再确认一次,别把已签的一天记成失败。
+    final_me = _pmcat_payload(await _pmcat_api(page, "/api/me"))
+    final_checkin = final_me.get("checkin") if isinstance(final_me.get("checkin"), dict) else {}
+    if final_checkin.get("checked_in_today"):
+        return _pmcat_already_result(kind, final_me)
+
+    if _pmcat_auth_lost(all_tries):
+        return fail_result(
+            "auth_required",
+            detail=last_err or "签到过程中会话失效",
+            adapter=kind,
+            stage="auth",
+        )
     return fail_result("captcha_failed", detail=last_err or "滑块验证未通过", adapter=kind, stage="captcha")
 
 

@@ -776,7 +776,9 @@ sites:
     ready_rounds: 30
   # pmcat(plan.pmcat.top,PM-Plan Token Plan 分发平台)—— 自研 SPA(hash 路由),不是
   # New API:签到带滑块拼接验证码,拼图块不含 target_x,缺口=背景上的暗色窗口。
-  # 登录态为 LINUX DO Connect 的 pmplan_session Cookie(30 天),过期只能人工重登。
+  # 登录态为 LINUX DO Connect 的 pmplan_session Cookie(30 天);过期先走站内
+  # /v1/oauth/login 自动重授权(共享 profile 里 linux.do 会话通常仍在),
+  # 只有 linux.do 自己也掉登录才需要人工重登。
   - name: 'pmcat'
     url: https://plan.pmcat.top/#/
     kind: pmcat
