@@ -187,6 +187,19 @@ NEWAPI_ALREADY_SELECTORS = [
     'text=今天已签',
 ]
 
+# PM-Plan(plan.pmcat.top)自研 SPA:今日签到按钮是 button[data-action="checkin"],
+# 已签态同一按钮 disabled 且文案变「今日已签到」。常量前置是因为
+# _BUILTIN_SITE_ADAPTERS 在 import 期求值。
+PMCAT_CTA_SELECTORS = [
+    'button[data-action="checkin"]:not([disabled])',
+    'button[data-action="checkin"]',
+]
+PMCAT_DONE_SELECTORS = [
+    'button[data-action="checkin"][disabled]',
+    'text=今日已签到',
+]
+PMCAT_CAPTCHA_MAX_TRIES = 3
+
 
 OVERLAY_ZAPPER_JS = """
 () => {
@@ -442,7 +455,7 @@ TERMS_CLICK_SELECTORS = [
 ]
 
 Status = Literal["OK", "ALREADY", "FAIL"]
-AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool", "sub2api", "xmiaom", "glados", "yunzhi", "ilovecat", "jianzhile", "nailao"]
+AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool", "sub2api", "xmiaom", "glados", "yunzhi", "ilovecat", "jianzhile", "nailao", "pmcat"]
 
 
 @dataclass
@@ -1212,6 +1225,16 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         ready_rounds=30,
         prefer_cta_before_auth=True,
     ),
+    # pmcat(plan.pmcat.top,PM-Plan): 自研 SPA,签到带滑块拼接验证码;
+    # pmcat_checkin 走 /api/me + /api/captcha/challenge + /api/checkin。
+    _B(
+        "pmcat",
+        "https://plan.pmcat.top/#/",
+        signs=list(PMCAT_CTA_SELECTORS),
+        already=list(PMCAT_DONE_SELECTORS),
+        ready_rounds=30,
+        kind="pmcat",
+    ),
     # 47 wraps the real check-in in an iframe at /47/checkin/; the wrapper page
     # (/custom/daily-checkin) only renders the sidebar nav, so _B must target the
     # iframe URL directly to see the real 立即签到 button + 今日已签到 confirm.
@@ -1836,6 +1859,19 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
             prefer_catalog_url=bool(entry.get("prefer_catalog_url", False)),
             login_url=str(entry.get("login_url", "") or "https://api.ilovecat520.me/login"),
             kind="ilovecat",
+        )
+    if kind == "pmcat":
+        # plan.pmcat.top(PM-Plan)自研 SPA 滑块验证签到:pmcat_checkin 走
+        # /api/me → /api/captcha/challenge → /api/captcha/verify → /api/checkin,
+        # 拼图块不含 target_x,缺口按背景最暗窗口求解;写操作需 X-PMPlan-CSRF。
+        return _B(
+            name, url or "https://plan.pmcat.top/#/",
+            signs=list(signs) if signs is not None else list(PMCAT_CTA_SELECTORS),
+            already=list(already) if already is not None else list(PMCAT_DONE_SELECTORS),
+            ready_rounds=rr,
+            prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
+            login_url=str(entry.get("login_url", "") or "https://plan.pmcat.top/#/"),
+            kind="pmcat",
         )
     # browser (default)
     return _B(
@@ -9726,15 +9762,20 @@ def is_huaweicloud_name(name: str) -> bool:
 
 
 def is_dygyz_site(site_url: str) -> bool:
-    """dygyz.pmcat.top 专属站判定."""
+    """dygyz.pmcat.top 专属站判定.
+
+    2026-11-01 收紧:原来的宽匹配 "pmcat.top" 会把 plan.pmcat.top(PM-Plan,
+    滑块验证签到)一起吞掉;这里只认 dygyz 子域,pap.pmcat.top 继续按原样
+    匹配(pap 走自身 yaml 条目,不依赖本谓词)。
+    """
     u = (site_url or "").lower()
-    return "dygyz.pmcat.top" in u or "pmcat.top" in u
+    return "dygyz.pmcat.top" in u or ("pmcat.top" in u and "plan.pmcat.top" not in u)
 
 
 def is_dygyz_name(name: str) -> bool:
     """dygyz 站点名称判定."""
     n = (name or "").lower()
-    return "dygyz" in n or "pmcat" in n
+    return "dygyz" in n
 
 
 def is_mulink_site(site_url: str) -> bool:
@@ -10806,6 +10847,281 @@ async def glados_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
 
     text_final = await page_text(page, 600)
     return fail_result("no_confirm", detail=text_final[:100], adapter=kind, action=action, stage="confirm")
+
+
+# ===================== pmcat (PM-Plan plan.pmcat.top 滑块验证签到) =====================
+# 2026-11-01 接入(前端 bundle + 真实会话实证)。站点是自研 SPA(hash 路由),不是
+# New API/L 站框架:
+#   1. GET /api/me → checkin.checked_in_today / checkin.can_checkin / streak;
+#   2. 点「今日签到」→ GET /api/captcha/challenge 出滑块题
+#      {id,w,h,slider_w,slider_h,target_y,image(背景),slider(拼图块)};缺口在背景上
+#      渲染成一块平坦暗区,拼图块是整块 50x80 不透明切片,**不含** target_x;
+#   3. POST /api/captcha/verify {id,x,track} → 一次性 token(服务端校验 x 与缺口对齐,
+#      并拒绝 bot 轨迹:过快/直线会被 reason=bot_behavior 打回);
+#   4. POST /api/checkin {captcha_token} → 落账。
+# 写操作需要 CSRF 头 `X-PMPlan-CSRF: 1`(前端 api() 对非 GET 一律加,服务端只校验存在性)。
+# 登录态 = LINUX DO Connect OAuth 的 pmplan_session Cookie(30 天,httpOnly,同 9222 profile),
+# 过期后只能人工重新 LINUX DO 登录 → 返回 auth_required。
+# 缺口求法:在背景上滑一个 slider_w 宽窗口,取带内行/列隔点亮度均值最小的位置(缺口是暗块)。
+# 选择器常量定义在文件顶部(PMCAT_* 与 NEWAPI_* 同处),因为内置兜底表在 import 期求值。
+
+
+def is_pmcat_site(site_url: str) -> bool:
+    """plan.pmcat.top 专属站判定.
+
+    只认 plan 子域:dygyz.pmcat.top / pap.pmcat.top 是同家族但完全不同的站
+    (dygyz 的 is_dygyz_site 用宽匹配 "pmcat.top"),宽匹配会把它们误路由进
+    pmcat_checkin。
+    """
+    u = (site_url or "").lower()
+    host = u.split("://", 1)[-1].split("/", 1)[0].split("#", 1)[0]
+    return host in ("plan.pmcat.top", "pmcat.top")
+
+
+async def _pmcat_api(page, path: str, method: str = "GET", payload=None) -> dict:
+    """在页面内(同源 + 会话 Cookie)调用 PM-Plan API;非 GET 带 CSRF 头。"""
+    try:
+        data = await page.evaluate(
+            """async ([path, method, payload]) => {
+                const headers = { Accept: 'application/json' };
+                if (payload !== null && payload !== undefined) headers['Content-Type'] = 'application/json';
+                if (method !== 'GET' && method !== 'HEAD') headers['X-PMPlan-CSRF'] = '1';
+                try {
+                    const r = await fetch(path, {
+                        method,
+                        headers,
+                        credentials: 'same-origin',
+                        body: (payload === null || payload === undefined) ? undefined : JSON.stringify(payload),
+                    });
+                    const text = await r.text();
+                    let body = null;
+                    try { body = text ? JSON.parse(text) : null; } catch (e) { body = { _raw: text.slice(0, 200) }; }
+                    return { _http_status: r.status, body };
+                } catch (e) {
+                    return { _err: String(e) };
+                }
+            }""",
+            [path, method, payload],
+        )
+        return data if isinstance(data, dict) else {"_err": "bad evaluate result"}
+    except Exception as e:
+        return {"_err": str(e)}
+
+
+def _pmcat_payload(resp: dict) -> dict:
+    body = (resp or {}).get("body")
+    if isinstance(body, dict):
+        data = body.get("data")
+        return data if isinstance(data, dict) else body
+    return {}
+
+
+def _pmcat_month(day: str) -> int:
+    try:
+        return int(str(day or "").split("-")[1])
+    except (IndexError, ValueError):
+        return 0
+
+
+async def pmcat_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """PM-Plan(plan.pmcat.top) 滑块验证码签到流程."""
+    kind = adapter.kind or "pmcat"
+    site_url = adapter.url or "https://plan.pmcat.top/#/"
+    print(f"  pmcat flow: {adapter.name} -> {site_url}", flush=True)
+
+    try:
+        await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+    except Exception as e:
+        print(f"  pmcat goto warning (continuing): {e}", flush=True)
+    await bypass_chrome_interstitial_if_needed(page)
+    await wait_text_ready(page, 30, adapter.ready_rounds)
+
+    cf = await wait_out_cloudflare(page, CF_WAIT_S)
+    if cf:
+        return fail_result("cloudflare", adapter=kind)
+
+    # 登录态 + 今日状态(/api/me 是唯一可靠来源:签到卡片文案依赖它)
+    me_resp = await _pmcat_api(page, "/api/me")
+    status_code = me_resp.get("_http_status")
+    if status_code in (401, 403):
+        return fail_result(
+            "auth_required",
+            detail=f"/api/me HTTP {status_code}(LINUX DO 会话失效)",
+            adapter=kind,
+            stage="auth",
+        )
+    if status_code != 200:
+        text = (await page_text(page, 300) or "").replace("\n", " ")
+        return fail_result("api_unavailable", detail=f"/api/me HTTP {status_code} {text[:80]}", adapter=kind, stage="precheck")
+
+    me = _pmcat_payload(me_resp)
+    checkin = me.get("checkin") if isinstance(me.get("checkin"), dict) else {}
+    user = me.get("user") if isinstance(me.get("user"), dict) else {}
+    who = user.get("username") or user.get("display_name") or ""
+    if checkin.get("checked_in_today"):
+        streak = checkin.get("streak")
+        return ok_result(
+            "ALREADY",
+            adapter=kind,
+            detail=f"今日已签到(连续 {streak} 天){' ' + who if who else ''}",
+            # ALREADY 走无 action 的 precheck 分支时,必须带 confirming evidence,
+            # 否则被归因门判 unattributed_success。
+            confirmation=dom_confirmation(
+                f"/api/me checked_in_today=true (连续 {streak} 天)", done_state=True
+            ),
+            pre_state="DONE",
+            post_state="DONE",
+            transition="NONE",
+            attribution="precheck",
+            business_status="already",
+            business_reason="checked_in_today",
+        )
+    if checkin.get("can_checkin") is False:
+        return pending_result(
+            "not_ready",
+            detail=f"checkin.can_checkin=false(today={checkin.get('today')})",
+            adapter=kind,
+            stage="precheck",
+        )
+
+    last_err = ""
+    for attempt in range(1, PMCAT_CAPTCHA_MAX_TRIES + 1):
+        solved = await page.evaluate(
+            """async ([maxTries]) => {
+                const apicall = async (path, opt) => {
+                    const headers = { Accept: 'application/json' };
+                    if (opt && opt.body) headers['Content-Type'] = 'application/json';
+                    if (opt && opt.method && opt.method !== 'GET') headers['X-PMPlan-CSRF'] = '1';
+                    const r = await fetch(path, {
+                        method: (opt && opt.method) || 'GET',
+                        headers,
+                        credentials: 'same-origin',
+                        body: opt && opt.body ? JSON.stringify(opt.body) : undefined,
+                    });
+                    let body = null;
+                    try { body = await r.json(); } catch (e) { body = null; }
+                    return { status: r.status, body };
+                };
+                const loadImg = (src) => new Promise((res, rej) => {
+                    const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+                });
+                const pixels = (im) => {
+                    const c = document.createElement('canvas');
+                    c.width = im.naturalWidth; c.height = im.naturalHeight;
+                    const ctx = c.getContext('2d', { willReadFrequently: true });
+                    ctx.drawImage(im, 0, 0);
+                    return { w: c.width, h: c.height, d: ctx.getImageData(0, 0, c.width, c.height).data };
+                };
+                // 缺口 = 带内最暗的 slider_w 宽窗口(缺口是暗块,不透明拼图块不含坐标)
+                const solveX = (bg, SW, SH, TY) => {
+                    let best = { x: 0, s: 1e9 };
+                    for (let x = 0; x + SW <= bg.w; x++) {
+                        let sum = 0, n = 0;
+                        for (let y = TY; y < Math.min(TY + SH, bg.h); y += 2) {
+                            for (let p = 0; p < SW; p += 2) {
+                                const i = (y * bg.w + (x + p)) * 4;
+                                sum += bg.d[i] * 0.299 + bg.d[i + 1] * 0.587 + bg.d[i + 2] * 0.114;
+                                n++;
+                            }
+                        }
+                        const s = n ? sum / n : 1e9;
+                        if (s < best.s) best = { x: x, s: s };
+                    }
+                    return best.x;
+                };
+                // 拟人轨迹:带缓动 + 抖动 + 总时长 480-780ms(服务端会拒绝直线/过快)
+                const mkTrack = (target) => {
+                    const steps = 24 + Math.floor(Math.random() * 8);
+                    const tr = [];
+                    for (let i = 0; i <= steps; i++) {
+                        const t = i / steps;
+                        const ease = t < 0.45 ? 2.2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+                        const clamped = Math.max(0, Math.min(1, ease));
+                        tr.push({
+                            x: Math.round(target * clamped * 10) / 10,
+                            y: Math.round((Math.random() * 2 - 1) * 1.8 * 10) / 10,
+                            t: Math.round(t * (480 + Math.random() * 300)),
+                        });
+                    }
+                    tr[tr.length - 1].x = target;
+                    return tr;
+                };
+                const tries = [];
+                for (let i = 0; i < maxTries; i++) {
+                    const chR = await apicall('/api/captcha/challenge');
+                    const ch = chR.body && (chR.body.data || chR.body);
+                    if (!ch || !ch.id || !ch.image) {
+                        tries.push({ stage: 'challenge', status: chR.status });
+                        continue;
+                    }
+                    const SW = ch.slider_w || 50, SH = ch.slider_h || 80, TY = ch.target_y || 0;
+                    const bg = pixels(await loadImg(ch.image));
+                    const x = solveX(bg, SW, SH, TY);
+                    const vr = await apicall('/api/captcha/verify', {
+                        method: 'POST',
+                        body: { id: ch.id, x: x, track: mkTrack(x) },
+                    });
+                    const vbody = vr.body || {};
+                    const token = vbody.token || (vbody.data && vbody.data.token);
+                    tries.push({ stage: 'verify', status: vr.status, x: x, reason: vbody.reason || null, ok: !!token });
+                    if (!token) continue;
+                    const ck = await apicall('/api/checkin', { method: 'POST', body: { captcha_token: token } });
+                    const cbody = ck.body || {};
+                    const cdata = cbody.data || cbody;
+                    const msg = (cbody.message || cdata.message || (cbody.error && cbody.error.message) || '').toString();
+                    tries.push({ stage: 'checkin', status: ck.status, message: msg });
+                    return { ok: ck.status === 200, tries: tries };
+                }
+                return { ok: false, tries: tries };
+            }""",
+            [1],
+        )
+        tries = (solved or {}).get("tries") or []
+        if solved and solved.get("ok"):
+            ck = {}
+            for item in tries:
+                if isinstance(item, dict) and item.get("stage") == "checkin":
+                    ck = item
+            msg = str(ck.get("message") or "签到成功")
+            # 落账复查:以 /api/me 的 checked_in_today 为准,不信单次响应文案
+            verify = _pmcat_payload(await _pmcat_api(page, "/api/me"))
+            v_checkin = verify.get("checkin") if isinstance(verify.get("checkin"), dict) else {}
+            if not v_checkin.get("checked_in_today"):
+                last_err = f"checkin HTTP 200 但 /api/me 未落账: {msg}"
+                print(f"  pmcat: {last_err}", flush=True)
+                continue
+            try:
+                month = _pmcat_month(v_checkin.get("today"))
+            except Exception:
+                month = 0
+            return ok_result(
+                "OK",
+                adapter=kind,
+                detail=f"{msg}(连续 {v_checkin.get('streak')} 天,{month} 月签到 {len(v_checkin.get('recent') or [])} 天)",
+                action=ActionEvidence(
+                    kind="api_post",
+                    target="/api/checkin",
+                    request_seen=True,
+                    response_status=200,
+                    attempted_at=datetime.now().isoformat(timespec="seconds"),
+                ),
+                confirmation=dom_confirmation(msg, done_state=True),
+                pre_state="PENDING",
+                post_state="DONE",
+                transition="PENDING_TO_DONE",
+                attribution="runner",
+            )
+        last_err = "; ".join(
+            f"{t.get('stage')} HTTP {t.get('status')} x={t.get('x')}" + (f" reason={t.get('reason')}" if t.get("reason") else "")
+            for t in tries
+            if isinstance(t, dict)
+        )[:180]
+        print(f"  pmcat attempt {attempt}/{PMCAT_CAPTCHA_MAX_TRIES} failed: {last_err}", flush=True)
+        await asyncio.sleep(1.2)
+
+    if "auth" in last_err.lower() or "401" in last_err:
+        return fail_result("auth_required", detail=last_err, adapter=kind, stage="auth")
+    return fail_result("captcha_failed", detail=last_err or "滑块验证未通过", adapter=kind, stage="captcha")
 
 
 # ===================== yunzhi (云智手机 云机空间权益 纯 RPC 签到) =====================
@@ -12797,6 +13113,8 @@ async def legacy_checkin_on_page(
             return await yunzhi_checkin(page, adapter, browser=browser)
         if kind == "ilovecat" or is_ilovecat_site(site_url) or is_ilovecat_name(adapter.name):
             return await ilovecat_checkin(page, adapter, browser=browser)
+        if kind == "pmcat" or is_pmcat_site(site_url) or adapter.name.lower() == "pmcat":
+            return await pmcat_checkin(page, adapter, browser=browser)
         # fengwind 专属窗口守卫(业务根因,2026-09-07):读服务端 /api/checkin/status 的
         # next_reset_at。今日新周期未开时页面残留昨日「已签到」,通用 already 会误判
         # ALREADY 并把 daily_tasks 标 done,使 cron 跳过真实可签时段。本轮守卫只作用于

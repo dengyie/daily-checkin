@@ -443,6 +443,21 @@ class TestSuccessGate(unittest.TestCase):
         self.assertTrue(hcnsec.prefer_catalog_url)
         self.assertEqual(hcnsec.login_url, "https://api.hcnsec.cn/sign-in")
 
+        # pmcat 2026-11-01 接入:plan.pmcat.top 自研 SPA + 滑块验证码,
+        # kind=pmcat 走 pmcat_checkin(/api/me → captcha → /api/checkin)。
+        pmcat = self.m.resolve_site("pmcat", "https://plan.pmcat.top/#/")
+        self.assertIsNotNone(pmcat)
+        assert pmcat is not None
+        self.assertEqual(pmcat.kind, "pmcat")
+        self.assertEqual(pmcat.url, "https://plan.pmcat.top/#/")
+        self.assertEqual(
+            pmcat.sign_selectors[0], 'button[data-action="checkin"]:not([disabled])'
+        )
+        self.assertIn('button[data-action="checkin"][disabled]', pmcat.already_selectors)
+        self.assertTrue(pmcat.prefer_catalog_url)
+        self.assertTrue(self.m.is_pmcat_site("https://plan.pmcat.top/#/"))
+        self.assertFalse(self.m.is_pmcat_site("https://api.llm.pm/profile"))
+
     def test_signin_api_uid_header_js_builds_header(self):
         """try_signin_api builds the New-Api-User header when uid present."""
         js = self.m.SiteAdapter(
@@ -5474,7 +5489,11 @@ class TestSitesYaml(unittest.TestCase):
         self.assertEqual(resolved.login_url, "https://dygyz.pmcat.top/login")
         self.assertTrue(is_dygyz_site("https://dygyz.pmcat.top/dashboard"))
         self.assertTrue(is_dygyz_name("dygyz"))
-        self.assertTrue(is_dygyz_name("pmcat"))
+        # 2026-11-01 起 "pmcat" 是 plan.pmcat.top(PM-Plan 滑块签到)的名字,
+        # 不能再被 dygyz 的名称谓词吞掉;plan 子域也不再算 dygyz 站点。
+        self.assertFalse(is_dygyz_name("pmcat"))
+        self.assertFalse(is_dygyz_site("https://plan.pmcat.top/#/"))
+        self.assertTrue(is_dygyz_site("https://pap.pmcat.top/#/console/wallet"))
         builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "dygyz"), None)
         self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 dygyz")
         self.assertEqual(builtin_entry.kind, "browser")

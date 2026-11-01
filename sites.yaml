@@ -774,6 +774,20 @@ sites:
       - 'button:has-text("已签到")'
       - 'button:has-text("今日已签到")'
     ready_rounds: 30
+  # pmcat(plan.pmcat.top,PM-Plan Token Plan 分发平台)—— 自研 SPA(hash 路由),不是
+  # New API:签到带滑块拼接验证码,拼图块不含 target_x,缺口=背景上的暗色窗口。
+  # 登录态为 LINUX DO Connect 的 pmplan_session Cookie(30 天),过期只能人工重登。
+  - name: 'pmcat'
+    url: https://plan.pmcat.top/#/
+    kind: pmcat
+    prefer_catalog_url: true
+    signs:
+      - 'button[data-action="checkin"]:not([disabled])'
+      - 'button[data-action="checkin"]'
+    already:
+      - 'button[data-action="checkin"][disabled]'
+      - 'text=今日已签到'
+    ready_rounds: 30
   - name: '47'
     url: https://47.47-gpt.com/47/checkin/
     kind: browser
