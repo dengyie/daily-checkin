@@ -779,6 +779,10 @@ sites:
   # 登录态为 LINUX DO Connect 的 pmplan_session Cookie(30 天);过期先走站内
   # /v1/oauth/login 自动重授权(共享 profile 里 linux.do 会话通常仍在),
   # 只有 linux.do 自己也掉登录才需要人工重登。
+  # 2026-11-03 应用户要求改为手动签到池(staging DB checkin_mode=manual):
+  # 08:10 自动批次排除,Web UI「人工手动签到」专区人工执行。目录仍登记精确
+  # 选择器,供站方放行/需要时切回 auto 一键启用。注意 checkin_mode 以 DB 为准,
+  # 本 yaml 不承载模式字段。
   - name: 'pmcat'
     url: https://plan.pmcat.top/#/
     kind: pmcat
