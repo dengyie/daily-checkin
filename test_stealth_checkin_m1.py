@@ -8449,6 +8449,248 @@ class YunzhiCheckinTest(unittest.TestCase):
         self.assertEqual(res.transition, "PENDING_TO_DONE")
         self.assertEqual(state["status_calls"], 1)
 
+    def test_yunzhi_async_ingestion_transient_error_retry_success(self):
+        """弹窗刚领完时，服务端异步入账暂态报错「权益不存在或已过期」，重试自愈成功开通."""
+        m = self.m
+        state = {"claimed": False, "status_calls": 0, "benefit_calls": 0}
+
+        def popup_init(s):
+            popups = [] if s["claimed"] else [
+                {"popupId": 46, "popupName": "今日登录福利", "benefitType": 1,
+                 "state": "CAN_CLAIM", "canClaim": True},
+            ]
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success",
+                              "data": {"channelCode": "00000042", "popups": popups}}}
+
+        def popup_claim(s):
+            s["claimed"] = True
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success", "data": {
+                        "success": True, "claimed": True,
+                        "claimNo": "CLM17907948158771499554", "benefitType": 1}}}
+
+        def benefit(s):
+            s["benefit_calls"] += 1
+            # 模拟第 1 次查询因 MQ 延迟返回「权益不存在或已过期」
+            if s["benefit_calls"] == 1:
+                return {"_http_status": 200, "_authorization": "",
+                        "_data": {"code": 10001, "message": "权益不存在或已过期", "data": None}}
+            items = [{"userItemId": 355236345335936}]
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success", "data": {
+                        "benefitConfigId": 158, "matchType": "CLOUD_DEVICE",
+                        "remainingQuota": 1,
+                        "userItems": items,
+                        "cloudDevices": [
+                            {"flavor": "4C8G128GB", "vendorResourceId": "D0026092223823038",
+                             "status": 2, "expireTime": "2026-10-05 06:25:39"},
+                        ]}}}
+
+        def claim(s):
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success",
+                              "data": {"claimId": 2720635, "status": 0, "errorMsg": None}}}
+
+        def claim_status(s):
+            s["status_calls"] += 1
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success",
+                              "data": {"claimId": 2720635, "status": 1, "errorMsg": None}}}
+
+        responses = {
+            ("GET", "/api/content/home-popups/init"): popup_init,
+            ("POST", "/api/content/home-popups/46/claim"): popup_claim,
+            ("POST", "/api/benefit/user/benefit"): benefit,
+            ("POST", "/api/benefit/claim"): claim,
+            ("POST", "/api/benefit/claim/status"): claim_status,
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        async def fake_sleep(*a, **k):
+            return None
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass), \
+             mock.patch.object(m.asyncio, "sleep", fake_sleep):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, state), self._adapter()))
+        self.assertEqual(res.status, "OK")
+        self.assertIn("弹窗46福利卡领取成功", res.detail)
+        self.assertIn("D0026092223823038", res.detail)
+        self.assertEqual(res.transition, "PENDING_TO_DONE")
+        self.assertGreaterEqual(state["benefit_calls"], 2)
+
+    def test_yunzhi_async_ingestion_empty_user_items_retry_success(self):
+        """弹窗刚领完时，第1次查询userItems为空列表，重试后返回卡片成功开通."""
+        m = self.m
+        state = {"claimed": False, "status_calls": 0, "benefit_calls": 0}
+
+        def popup_init(s):
+            popups = [] if s["claimed"] else [
+                {"popupId": 46, "popupName": "今日登录福利", "benefitType": 1,
+                 "state": "CAN_CLAIM", "canClaim": True},
+            ]
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success",
+                              "data": {"channelCode": "00000042", "popups": popups}}}
+
+        def popup_claim(s):
+            s["claimed"] = True
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success", "data": {
+                        "success": True, "claimed": True,
+                        "claimNo": "CLM17907948158771499554", "benefitType": 1}}}
+
+        def benefit(s):
+            s["benefit_calls"] += 1
+            items = [] if s["benefit_calls"] == 1 else [{"userItemId": 355236345335936}]
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success", "data": {
+                        "benefitConfigId": 158, "matchType": "CLOUD_DEVICE",
+                        "remainingQuota": 1,
+                        "userItems": items,
+                        "cloudDevices": [
+                            {"flavor": "4C8G128GB", "vendorResourceId": "D0026092223823038",
+                             "status": 2, "expireTime": "2026-10-05 06:25:39"},
+                        ]}}}
+
+        def claim(s):
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success",
+                              "data": {"claimId": 2720635, "status": 1, "errorMsg": None}}}
+
+        responses = {
+            ("GET", "/api/content/home-popups/init"): popup_init,
+            ("POST", "/api/content/home-popups/46/claim"): popup_claim,
+            ("POST", "/api/benefit/user/benefit"): benefit,
+            ("POST", "/api/benefit/claim"): claim,
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        async def fake_sleep(*a, **k):
+            return None
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass), \
+             mock.patch.object(m.asyncio, "sleep", fake_sleep):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, state), self._adapter()))
+        self.assertEqual(res.status, "OK")
+        self.assertIn("弹窗46福利卡领取成功", res.detail)
+        self.assertIn("D0026092223823038", res.detail)
+        self.assertGreaterEqual(state["benefit_calls"], 2)
+
+    def test_yunzhi_async_ingestion_exhausted_preserves_popup_note(self):
+        """4次重试均报暂态错误耗尽时，失败detail必须保留弹窗已领取的业务上下文."""
+        m = self.m
+        state = {"claimed": False, "benefit_calls": 0}
+
+        def popup_init(s):
+            popups = [] if s["claimed"] else [
+                {"popupId": 46, "popupName": "今日登录福利", "benefitType": 1,
+                 "state": "CAN_CLAIM", "canClaim": True},
+            ]
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success",
+                              "data": {"channelCode": "00000042", "popups": popups}}}
+
+        def popup_claim(s):
+            s["claimed"] = True
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success", "data": {
+                        "success": True, "claimed": True,
+                        "claimNo": "CLM17907948158771499554", "benefitType": 1}}}
+
+        def benefit(s):
+            s["benefit_calls"] += 1
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 10001, "message": "权益不存在或已过期", "data": None}}
+
+        responses = {
+            ("GET", "/api/content/home-popups/init"): popup_init,
+            ("POST", "/api/content/home-popups/46/claim"): popup_claim,
+            ("POST", "/api/benefit/user/benefit"): benefit,
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        async def fake_sleep(*a, **k):
+            return None
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass), \
+             mock.patch.object(m.asyncio, "sleep", fake_sleep):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, state), self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "error")
+        self.assertIn("弹窗46福利卡领取成功", res.detail)
+        self.assertIn("权益不存在或已过期", res.detail)
+        self.assertEqual(state["benefit_calls"], 4)
+
+    def test_yunzhi_postcheck_matches_target_device_expire_time(self):
+        """多云机账号二次复查时，必须读取本次绑定的目标云机有效期，禁止错取第1台历史过期设备."""
+        m = self.m
+        state = {"claimed": True}
+
+        def popup_init(s):
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success", "data": {"popups": []}}}
+
+        def benefit(s):
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success", "data": {
+                        "benefitConfigId": 158, "matchType": "CLOUD_DEVICE",
+                        "remainingQuota": 1,
+                        "userItems": [{"userItemId": 355236345335936}],
+                        "cloudDevices": [
+                            {"flavor": "2C4G", "vendorResourceId": "OLD_EXPIRED_DEV",
+                             "status": 4, "expireTime": "2024-01-01 00:00:00"},
+                            {"flavor": "4C8G128GB", "vendorResourceId": "D0026092223823038",
+                             "status": 2, "expireTime": "2026-11-21 06:25:39"},
+                        ]}}}
+
+        def claim(s):
+            return {"_http_status": 200, "_authorization": "",
+                    "_data": {"code": 0, "message": "success",
+                              "data": {"claimId": 2720635, "status": 1, "errorMsg": None}}}
+
+        responses = {
+            ("GET", "/api/content/home-popups/init"): popup_init,
+            ("POST", "/api/benefit/user/benefit"): benefit,
+            ("POST", "/api/benefit/claim"): claim,
+        }
+
+        async def fake_url(page):
+            return "https://yunzhi.play.cn/ai/?channel_code=00000042"
+
+        async def fake_bypass(page):
+            return False
+
+        async def fake_sleep(*a, **k):
+            return None
+
+        with mock.patch.object(m, "page_url", fake_url), \
+             mock.patch.object(m, "bypass_chrome_interstitial_if_needed", fake_bypass), \
+             mock.patch.object(m.asyncio, "sleep", fake_sleep):
+            res = self.asyncio.run(m.yunzhi_checkin(self._fake_page(responses, state), self._adapter()))
+        self.assertEqual(res.status, "OK")
+        self.assertIn("D0026092223823038", res.detail)
+        self.assertIn("有效期至 2026-11-21 06:25:39", res.detail)
+        self.assertNotIn("2024-01-01", res.detail)
+
 
     def test_yunzhi_evaluate_exception_fails_not_already(self):
         """P1 回归(2026-10-01 review):页面内 fetch 异常必须 FAIL error,禁止穿透成假 ALREADY."""

@@ -11826,6 +11826,8 @@ async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
                 else:
                     popup_note = f"弹窗{pid}:{rd.get('failReason') or '未领取'}"
             print(f"  yunzhi popup claim: {popup_note}", flush=True)
+        else:
+            popup_note = "弹窗ID异常"
     else:
         popup_note = "今日弹窗无可领项"
 
@@ -11836,30 +11838,45 @@ async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
             body_params={"benefitConfigId": YUNZI_BENEFIT_ID},
         )
 
-    det = await _fetch_benefit()
-    _update_token(det.get("_authorization"))
-    bd, det_err = _yunzhi_check_business(det, "benefit/user/benefit")
-    if det_err:
-        if _yunzhi_is_auth_err(det_err) or det.get("_http_status") in (401, 403):
-            return fail_result("auth_required", detail=det_err, adapter=kind, stage="auth")
-        return fail_result("error", detail=det_err, adapter=kind)
+    # 弹窗刚领成功但卡片异步入账通常需 1~2s:
+    # 异步入账期间服务端会返回「权益不存在或已过期」或 userItems 数组为空。
+    # 刚领取成功时前置缓冲 1.5s，并在暂态错误/空卡时轮询重试。
+    is_fresh_claimed = "领取成功" in popup_note
+    if is_fresh_claimed:
+        await asyncio.sleep(1.5)
 
-    user_items = bd.get("userItems") or []
-    devices = bd.get("cloudDevices") or []
+    max_benefit_retries = 4 if is_fresh_claimed else 1
+    bd = {}
+    det_err = ""
+    user_items = []
+    devices = []
 
-    # 弹窗刚领成功但卡片可能异步入账,补查几次
-    if not user_items and "领取成功" in popup_note:
-        for _ in range(3):
+    for attempt in range(max_benefit_retries):
+        if attempt > 0:
             await asyncio.sleep(1.5)
-            det = await _fetch_benefit()
-            _update_token(det.get("_authorization"))
-            bd_retry, retry_err = _yunzhi_check_business(det, "benefit/user/benefit")
-            if not retry_err:
-                bd = bd_retry
-                user_items = bd.get("userItems") or []
-                devices = bd.get("cloudDevices") or devices
-                if user_items:
-                    break
+        det = await _fetch_benefit()
+        _update_token(det.get("_authorization"))
+        bd_curr, err_curr = _yunzhi_check_business(det, "benefit/user/benefit")
+        if _yunzhi_is_auth_err(err_curr) or det.get("_http_status") in (401, 403):
+            return fail_result("auth_required", detail=err_curr, adapter=kind, stage="auth")
+
+        if err_curr:
+            det_err = err_curr
+            # 刚领完弹窗的异步入账窗口内，未入账可能返回「权益不存在或已过期」等暂态，继续重试
+            if is_fresh_claimed and any(kw in err_curr for kw in ("不存在", "过期", "未找到")):
+                continue
+            break
+
+        det_err = ""
+        bd = bd_curr
+        user_items = bd.get("userItems") or []
+        devices = bd.get("cloudDevices") or []
+        if user_items:
+            break
+
+    if det_err:
+        fail_detail = f"{popup_note}; {det_err}" if popup_note else det_err
+        return fail_result("error", detail=fail_detail, adapter=kind)
 
     if not user_items:
         # ALREADY 必须有正向证据:无可领弹窗 + remainingQuota==0 双确认;
@@ -11955,10 +11972,11 @@ async def yunzhi_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
         # 二次确认:复查 remainingQuota 归零与云机有效期
         try:
             det2 = await _fetch_benefit()
-            bd2 = ((det2.get("_data") or {}).get("data") or {}) if isinstance(det2.get("_data"), dict) else {}
+            _update_token(det2.get("_authorization"))
+            bd2, _ = _yunzhi_check_business(det2, "benefit/user/benefit[post-check]")
             exp = ""
             for d in (bd2.get("cloudDevices") or []):
-                if isinstance(d, dict) and d.get("expireTime"):
+                if isinstance(d, dict) and str(d.get("vendorResourceId") or "") == resource_id and d.get("expireTime"):
                     exp = str(d.get("expireTime"))
                     break
             if exp:
