@@ -728,7 +728,11 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
     ),
     _N("muyuan", "https://muyuan.do/console/personal"),
-    _N("42", "https://api.42w.shop/profile"),
+    _N(
+        "42",
+        "https://api.42x.shop/profile",
+        prefer_catalog_url=True,
+    ),
     _N("jiuitj", "https://jiuuij.de5.net/console/personal"),
     _N("afsmc", "https://api.afsmc.cn/profile"),
     _N("zmingu", "https://api.zmingu.app/profile"),
@@ -1573,6 +1577,21 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         "https://loxo.cc/check-in",
         signs=['button[data-testid="check-in-button"]'],
         already=['[data-testid="check-in-today-done"]'],
+        ready_rounds=20,
+        prefer_catalog_url=True,
+        kind="browser",
+    ),
+    # xkrelay(深空 API / xkrelay.com)—— 2026-11-04 接入。原 QQ 群内签到被站方关闭,
+    # 迁到站内 /qq-checkin(New API 定制分支,checkin_enabled=false,QQ 奖励模块)。
+    # 保留在 builtin,避免 sites.yaml 读不到时静默丢站。
+    _B(
+        "xkrelay",
+        "https://xkrelay.com/qq-checkin",
+        signs=[
+            'button[data-slot="button"]:text-is("今日签到")',
+            'button:has-text("今日签到")',
+        ],
+        already=['button:has-text("今日已签到")', 'text=今日已签到'],
         ready_rounds=20,
         prefer_catalog_url=True,
         kind="browser",

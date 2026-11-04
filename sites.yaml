@@ -46,9 +46,12 @@ sites:
   - name: 'muyuan'
     url: https://muyuan.do/console/personal
     kind: newapi_profile
+  # 42(42 API / api.42x.shop 原 api.42w.shop 域名下线)—— 2026-11-04 域名迁移至 api.42x.shop。
+  # 标准 New API (v1.0.0-rc.46)，LinuxDO OAuth，BTC 积分单位，走 newapi_profile 通道。
   - name: '42'
-    url: https://api.42w.shop/profile
+    url: https://api.42x.shop/profile
     kind: newapi_profile
+    prefer_catalog_url: true
   - name: 'jiuitj'
     url: https://jiuuij.de5.net/console/personal
     kind: newapi_profile
@@ -1466,3 +1469,33 @@ sites:
       - 'button[data-testid="check-in-button"]'
     already:
       - '[data-testid="check-in-today-done"]'
+  # xkrelay(深空 API / xkrelay.com,用户 "mangoqwq" UID 2139)—— 2026-11-04 接入。
+  # 背景:站方 2026-11-04 关闭 QQ 群内「@小kun酱 签到」,回执
+  # 「签到已移至站内 https://xkrelay.com/qq-checkin」;同日 QQ 群签到守护
+  # (pxed AutoNexus shenkong-checkin)已停用并冻结,签到统一并入本项目。
+  # 站点是 New API 定制分支(v1.0.0-rc.36-ds14-checkin-no-badge-...):
+  #   - /api/status 的 checkin_enabled=false(标准 New API 签到被关),
+  #     真实入口是自研 QQ 奖励模块(读取接口 /api/qq-rewards/self?month=...);
+  #   - 会话 = new_api_has_session Cookie;SPA 加载时 POST /api/user/auth/refresh
+  #     换取 access_token,Bearer 只存内存(不落 localStorage)。reload 不丢会话:
+  #     刷新后 refresh 会用 Cookie 重新签发 token,所以走通用浏览器流程即可;
+  #   - 奖励按昨日实际消费分档;邮箱 dengyietech@gmail.com 是 QQ 奖励模块的绑定,
+  #     与 QQ 群无关,站内无需再绑。
+  #   - 站点同时开放 linuxdo_oauth / github_oauth / 密码登录,会话失效由通用
+  #     LinuxDO SSO 兜底(本条目不登记账密);登录页 /sign-in,故显式给 login_url。
+  # 两态(2026-11-04 16:49 真机取证):未签 button「今日签到」(enabled) → 单击即入账
+  # → button 翻「今日已签到」+ 卡片出现「奖励: ¥N」+ 记录表新增当日 credited 行。
+  # 文案互不为子串(「今日已签到」不含「今日签到」),页面常驻的「签到方法」说明、
+  # 侧栏「签到领奖」导航均不命中已签态,故无需 date 前缀守卫。
+  - name: 'xkrelay'
+    url: 'https://xkrelay.com/qq-checkin'
+    kind: browser
+    prefer_catalog_url: true
+    login_url: 'https://xkrelay.com/sign-in'
+    ready_rounds: 20
+    signs:
+      - 'button[data-slot="button"]:text-is("今日签到")'
+      - 'button:has-text("今日签到")'
+    already:
+      - 'button:has-text("今日已签到")'
+      - 'text=今日已签到'

@@ -5001,6 +5001,47 @@ class TestSitesYaml(unittest.TestCase):
         self.assertEqual(builtin_entry.url, "https://loxo.cc/check-in")
         self.assertTrue(builtin_entry.trusted_already_selectors)
 
+    def test_yaml_registers_xkrelay_entry(self):
+        """xkrelay(深空 API) 2026-11-04 接入:S 站内 /qq-checkin 取代 QQ 群签到。
+
+        New API 定制分支(checkin_enabled=false,自研 QQ 奖励模块),两态是
+        button「今日签到」→「今日已签到」。守卫两个易错点:
+        ① already 选择器不能把页面常驻的「签到方法」说明/侧栏「签到领奖」
+           命中成已签(「今日已签到」与「今日签到」互不为子串);
+        ② 不能登记成 signin_api 站(端点是站方内部实现,未取证前不许硬编码)。
+        """
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "xkrelay"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 xkrelay 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://xkrelay.com/qq-checkin")
+        self.assertTrue(a.prefer_catalog_url, "钉 yaml URL,防任务行旧地址回灌")
+        self.assertEqual(a.signin_api, "", "未取证的签到端点不得硬编码")
+        self.assertIn('button:has-text("今日签到")', a.sign_selectors)
+        self.assertIn('button:has-text("今日已签到")', a.already_selectors)
+        # 已签选择器必须是完整短语:裸「签到」/「已签到」会被日历说明与导航误命中。
+        for sel in a.already_selectors:
+            self.assertNotEqual(sel.strip(), "text=已签到")
+            self.assertNotEqual(sel.strip(), "text=签到")
+        self.assertTrue(a.trusted_sign_selectors)
+        self.assertTrue(a.trusted_already_selectors)
+        resolved = resolve_site("xkrelay", "https://xkrelay.com/qq-checkin")
+        self.assertEqual(resolved.kind, "browser")
+        self.assertEqual(resolved.url, "https://xkrelay.com/qq-checkin")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "xkrelay"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 xkrelay")
+        self.assertEqual(builtin_entry.url, "https://xkrelay.com/qq-checkin")
+        self.assertTrue(builtin_entry.trusted_already_selectors)
+
     def test_yaml_registers_pigeonw_cf_entry(self):
         """pigeonw-cf(cloudflare.pigeonw.com) 2026-10-30 接入:自研 Vue 3 SPA +
         纯 LinuxDO OAuth,签到按钮「签到领取」,浏览器内跑 PoW;builtin 兜底同 loxo。"""
@@ -5126,6 +5167,33 @@ class TestSitesYaml(unittest.TestCase):
         self.assertIsNotNone(cred)
         self.assertEqual(cred[0], "ci-account-sub2api")
         self.assertTrue(len(cred[1]) > 0)
+
+    def test_yaml_registers_42_entry(self):
+        """42 API (api.42x.shop) 2026-11-04 域名迁移:
+        原 api.42w.shop 意外断开，新域名 api.42x.shop，启用 prefer_catalog_url 防任务行漂移。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "42"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 42 条目")
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://api.42x.shop/profile")
+        self.assertTrue(a.prefer_catalog_url)
+        # 即使历史笔记或任务行带旧域名 api.42w.shop，prefer_catalog_url 也会确保实际导航至新域名
+        resolved = resolve_site("42", "https://api.42w.shop/profile")
+        self.assertEqual(resolved.url, "https://api.42x.shop/profile")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "42"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 42")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://api.42x.shop/profile")
+        self.assertTrue(builtin_entry.prefer_catalog_url)
 
     def test_nailao_checkin_api_flow(self):
         """nailao 2026-10-27 改版流程:登录 → 拦截 Bearer → POST /api/user/checkin。
