@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import importlib.util
 import json
 import sys
@@ -218,8 +217,7 @@ class ProviderEvidenceTests(unittest.TestCase):
                 self.assertIsNone(module.acquire_run_lock())
             finally:
                 assert first is not None
-                fcntl.flock(first.fileno(), fcntl.LOCK_UN)
-                first.close()
+                module.release_run_lock(first)
                 module.RUN_LOCK_PATH = original
 
     def test_browser_alive_rejects_half_dead_cdp(self):
