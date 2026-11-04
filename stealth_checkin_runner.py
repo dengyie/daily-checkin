@@ -25,6 +25,16 @@ import asyncio
 import base64
 import calendar
 import socket
+
+# Windows consoles may default to a legacy code page such as cp1252. The runner
+# prints Chinese status messages, so make its own text streams UTF-8 before any
+# fallback path can turn a recoverable Obsidian error into UnicodeEncodeError.
+for _console_stream in (sys.stdout, sys.stderr):
+    try:
+        _console_stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
+
 if sys.platform != "win32":
     import fcntl
 else:
