@@ -659,6 +659,8 @@ class ReviewFixTests(unittest.TestCase):
                 cwd=ROOT,
                 env=env,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 timeout=60,
@@ -693,6 +695,7 @@ class ReviewFixTests(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(ROOT / "stealth_checkin_runner.py"), "--dry-run"],
                 cwd=ROOT, env=env, text=True,
+                encoding="utf-8", errors="replace",
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60,
             )
             self.assertEqual(result.returncode, 0, result.stdout)
@@ -720,6 +723,7 @@ class ReviewFixTests(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(ROOT / "stealth_checkin_runner.py"), "--dry-run"],
                 cwd=ROOT, env=env, text=True,
+                encoding="utf-8", errors="replace",
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60,
             )
             self.assertEqual(result.returncode, 0, result.stdout)

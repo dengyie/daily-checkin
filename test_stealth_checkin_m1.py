@@ -9619,7 +9619,8 @@ class TestJianzhileCheckin(unittest.TestCase):
         }).encode("utf-8")
         mock_response.__enter__.return_value = mock_response
 
-        with patch("urllib.request.urlopen", return_value=mock_response):
+        with patch.dict(os.environ, {"DAILY_CHECKIN_VISION_API_KEY": "test-key"}), \
+                patch("urllib.request.urlopen", return_value=mock_response):
             code = self.m.solve_captcha_with_vision(b"fake_image_bytes")
             self.assertEqual(code, "2GML5")
 
