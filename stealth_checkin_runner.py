@@ -12670,6 +12670,12 @@ _DIALOG_DISMISS_JS = """() => {
     if (/摸猫|猫咪占卜|抽一支签|再摸一下猫/.test(text) && /连续摸猫|喵乐园/.test(text)) continue;
     if (/翻牌|开宝箱|翻卡|点击翻牌|幸运大转盘/.test(text) && !looksAnnouncement) continue;
 
+    // 4. 严禁关闭安全验证/人机验证/Turnstile/Captcha 验证弹窗
+    if (/安全验证|人机验证|验证码|Turnstile|hCaptcha|reCAPTCHA/i.test(text) ||
+        d.querySelector('[name="cf-turnstile-response"], iframe[src*="challenge"], iframe[src*="turnstile"], iframe[src*="hcaptcha"], iframe[src*="recaptcha"]')) {
+      continue;
+    }
+
     // 若弹窗内部存在滚动阻碍（如 404api "读到底部才能确认"，确认按钮被 disabled 锁定），
     // 自动滚动到底部触发可点击状态
     const scrollables = d.querySelectorAll('div, [class*="scroll"], [class*="overflow"]');

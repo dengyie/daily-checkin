@@ -4464,8 +4464,10 @@ class TestSitesYaml(unittest.TestCase):
         self.assertEqual(done_button_signal("Checked in", False), "")
         self.assertEqual(done_button_signal("Daily Check-in\nChecked in\nToday +$50", False), "btn:card:checkedin")
 
-        # 验证弹窗遮罩排除机制包含「我已知悉」
+        # 验证弹窗遮罩排除机制包含「我已知悉」及安全验证/Turnstile/Captcha 保护
         self.assertIn("我已知悉", _DIALOG_DISMISS_JS)
+        self.assertIn("安全验证", _DIALOG_DISMISS_JS)
+        self.assertIn("cf-turnstile-response", _DIALOG_DISMISS_JS)
 
     def test_yaml_registers_bxacc_entry(self):
         """sites.yaml 的 bxacc 条目解析为 newapi_profile,/profile,prefer_catalog_url。"""
