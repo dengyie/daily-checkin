@@ -4956,6 +4956,37 @@ class TestSitesYaml(unittest.TestCase):
         # LinuxDO OAuth 站:不应登记账密(避免误走账密填充)
         self.assertIsNone(get_account_credential("lingjing"))
 
+    def test_yaml_registers_3sbqs_entry(self):
+        """3sbqs(api.3sbqs.xyz) 2026-11-04 接入:标准 LinuxDO + New API 站,
+        newapi_profile 通道,/profile,prefer_catalog_url,无自定义选择器。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "3sbqs"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 3sbqs 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://api.3sbqs.xyz/profile")
+        self.assertEqual(a.login_url, "")
+        self.assertIn("签到", " ".join(a.sign_selectors))
+        self.assertIn("已签到", " ".join(a.already_selectors))
+        self.assertTrue(a.prefer_catalog_url)
+        resolved = resolve_site("3sbqs", "https://api.3sbqs.xyz/profile")
+        self.assertEqual(resolved.url, "https://api.3sbqs.xyz/profile")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "3sbqs"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 3sbqs")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://api.3sbqs.xyz/profile")
+        # LinuxDO OAuth 站:不应登记账密
+        self.assertIsNone(get_account_credential("3sbqs"))
+
     def test_yaml_registers_loxo_entry(self):
         """loxo(loxo.cc) 2026-10-30 接入:自研 Vue SPA + 纯 LinuxDO OAuth。
 

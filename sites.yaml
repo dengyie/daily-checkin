@@ -1499,3 +1499,10 @@ sites:
     already:
       - 'button:has-text("今日已签到")'
       - 'text=今日已签到'
+  # 3sbqs(api.3sbqs.xyz / 三生三世)—— 2026-11-04 接入。
+  # 标准 New API 站点，LinuxDO OAuth 登录，走标准 newapi_profile 流程：
+  # /profile → 点「立即签到」+ 确认门。
+  - name: '3sbqs'
+    url: https://api.3sbqs.xyz/profile
+    kind: newapi_profile
+    prefer_catalog_url: true

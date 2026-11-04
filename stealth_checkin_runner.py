@@ -1596,6 +1596,9 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
         kind="browser",
     ),
+    # 3sbqs(api.3sbqs.xyz)—— 2026-11-04 接入。标准 New API,
+    # LinuxDO OAuth 登录,签到 /profile「立即签到」+ 确认门。通用 newapi_profile 通道。
+    _N("3sbqs", "https://api.3sbqs.xyz/profile", prefer_catalog_url=True),
 ]
 
 
