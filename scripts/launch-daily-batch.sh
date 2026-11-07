@@ -38,4 +38,12 @@ LOG_DIR="${DAILY_CHECKIN_LOG_DIR:-}"
 [[ -n "$LOG_DIR" ]] && mkdir -p "$LOG_DIR"
 
 cd "$ROOT" || { echo "FATAL: cannot cd $ROOT" >&2; exit 2; }
-exec "$ROOT/.venv/bin/python" "$ROOT/scripts/daily-checkin-cron.py" --source cron "$@"
+"$ROOT/.venv/bin/python" "$ROOT/scripts/daily-checkin-cron.py" --source cron "$@"
+EXIT_CODE=$?
+
+# 自动将最新打卡账本与状态增量同步至 pxed 生产 Web 看板（原子 mv，防撕裂读）
+if [[ -f "${DAILY_CHECKIN_DB:-}" ]]; then
+  "$ROOT/scripts/sync-db-to-pxed.sh" || true
+fi
+
+exit $EXIT_CODE

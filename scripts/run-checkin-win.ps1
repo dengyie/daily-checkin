@@ -27,3 +27,12 @@ if ($DryRun) {
 
 Write-Host "Starting Windows daily-checkin runner..." -ForegroundColor Cyan
 python @argsList
+$rc = $LASTEXITCODE
+
+# 2026-11-06 多节点: 晨批结束后把本节点权威库原子同步到面板副本（保鲜），
+# 使 win 站点的任务状态在 check.mangoqwq.com 统一清单中可见。失败不致命。
+$env:DAILY_CHECKIN_SYNC_SSH_ALIAS = "pxed-direct"
+$env:DAILY_CHECKIN_SYNC_REMOTE_PATH = "/data/daily-checkin/data/system-win.db"
+powershell -NoProfile -ExecutionPolicy Bypass -File "E:\project\daily-checkin\scripts\sync-db-to-panel.ps1"
+
+exit $rc

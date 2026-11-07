@@ -10,6 +10,16 @@ const esc = (value) => String(value ?? "").replace(
   (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char],
 );
 
+// chip 计数后缀剥离的唯一实现：文案形如 "值 (计数 · 备注)"，括号内可为任意内容。
+// 旧 \(\d+\)$ 只认纯数字尾，在 "mac (114 · 待签113)" 上必然匹配失败 → 残留脏值
+// （2026-11-07 面板节点筛选恒空集的根因；组件高亮与三处 select 解析共用）。
+function stripCountSuffix(raw) {
+  return String(raw ?? "").replace(/\s*\([^)]*\)\s*$/, "").trim();
+}
+function parseChipValue(raw) {
+  return stripCountSuffix(raw) || "全部";
+}
+
 /* ==========================================================================
    Awesome UI Kit · Standard UiIcon Engine (Tabler Geometry, MIT License)
    ========================================================================== */
@@ -265,11 +275,11 @@ class PromptChips extends HTMLElement {
     let items = [];
     try { items = JSON.parse(this.getAttribute("suggestions") || "[]"); } catch { items = []; }
     const active = this.getAttribute("active") || "";
-    const activeClean = active.replace(/\s*\(\d+\)$/, "").trim();
+    const activeClean = stripCountSuffix(active);
     this.innerHTML = `
       <div class="ui-prompt-chips" role="radiogroup">
         ${items.map((item) => {
-          const itemClean = String(item).replace(/\s*\(\d+\)$/, "").trim();
+          const itemClean = stripCountSuffix(item);
           const isAct = item === active || (activeClean !== "" && itemClean === activeClean);
           return `
             <button type="button" class="ui-chip-btn ${isAct ? "active" : ""}" data-chip="${esc(item)}" role="radio" aria-checked="${isAct ? "true" : "false"}">
@@ -390,9 +400,11 @@ let state = {
   runs: [],
   jobs: [],
   history: [],
+  dispatch: null,
 };
 
 let currentFilter = "全部";
+let currentNodeFilter = "全部"; // 平台（执行节点）筛选: "全部" 或 node 名（mac/win…）
 let searchQuery = "";
 let manualSearchQuery = "";
 let manualStatusFilter = "all"; // "all", "pending", "done"
@@ -639,8 +651,13 @@ async function load() {
     updateServerStatus("online", "API 正常", ping);
     render();
   } catch (error) {
-    serverOnline = false;
-    updateServerStatus("offline", "API 离线");
+    if (error?.message === "请提供有效的控制台访问密码") {
+      serverOnline = true;
+      updateServerStatus("busy", "需解锁");
+    } else {
+      serverOnline = false;
+      updateServerStatus("offline", "API 离线");
+    }
     console.error("Failed to load state:", error);
   } finally {
     isLoadingState = false;
@@ -864,6 +881,27 @@ function openSiteDetailDrawer(siteName) {
       }
       try {
         const res = await api("/api/sites/delete", { name: task.name });
+        if (res.queued && res.mode === "remote") {
+          // Dispatch mode: the node that owns the authoritative DB performs
+          // the cascade delete (tasks + keychain + obsidian) and syncs back.
+          showToast(`已发布删除指令至节点 ${res.node || "mac"}（作业 #${res.job_id}），正在等待执行...`, "info");
+          await load();
+          const settled = await trackDispatchJob(res.job_id, 20000);
+          if (settled && settled.status === "done") {
+            showToast(`站点「${task.name}」已从节点 ${res.node || "mac"} 彻底删除`, "success");
+          } else if (settled) {
+            showToast(`节点删除失败（作业 #${res.job_id}）：${settled.message || settled.status}`, "error");
+            if (delBtn) {
+              delBtn.disabled = false;
+              delBtn.innerHTML = origHtml;
+            }
+          } else {
+            showToast(`作业 #${res.job_id} 仍在执行，站点即将消失于列表。`, "info");
+          }
+          closeSiteDrawer();
+          await load();
+          return;
+        }
         showToast(`站点「${task.name}」已成功删除`, "success");
         closeSiteDrawer();
         await load();
@@ -897,7 +935,20 @@ function openSiteDetailDrawer(siteName) {
         }
         const targetSiteName = formObj.name || task.name;
         const res = await api("/api/sites/update", formObj);
-        showToast(`站点「${targetSiteName}」配置已更新为 ${formObj.checkin_mode === "manual" ? "手动签到" : "自动签到"}`, "success");
+        if (res.queued && res.mode === "remote") {
+          showToast(`已发布配置更新指令至节点 ${res.node || "mac"}（作业 #${res.job_id}），正在等待执行...`, "info");
+          await load();
+          const settled = await trackDispatchJob(res.job_id, 20000);
+          if (settled && settled.status === "done") {
+            showToast(`站点「${targetSiteName}」配置已在节点生效`, "success");
+          } else if (settled) {
+            showToast(`节点更新配置失败（作业 #${res.job_id}）：${settled.message || settled.status}`, "error");
+          } else {
+            showToast(`作业 #${res.job_id} 仍在执行，配置稍后生效。`, "info");
+          }
+        } else {
+          showToast(`站点「${targetSiteName}」配置已更新为 ${formObj.checkin_mode === "manual" ? "手动签到" : "自动签到"}`, "success");
+        }
         await load();
         openSiteDetailDrawer(targetSiteName);
       } catch (err) {
@@ -998,10 +1049,22 @@ function openSiteDetailDrawer(siteName) {
       });
       if (!confirmed) return;
       try {
-        await api("/api/credentials/delete", { ref: cred.ref });
+        const delRes = await api("/api/credentials/delete", { ref: cred.ref });
         await load();
         openSiteDetailDrawer(siteName);
-        showToast("凭据已安全删除", "success");
+        if (delRes.queued && delRes.mode === "remote") {
+          showToast(`已发布凭据删除指令至节点 ${delRes.node || "mac"}（作业 #${delRes.job_id}）...`, "info");
+          const settled = await trackDispatchJob(delRes.job_id, 20000);
+          if (settled && settled.status === "done") {
+            showToast("凭据已从节点 Keychain 删除", "success");
+          } else if (settled) {
+            showToast(`节点删除凭据失败（作业 #${delRes.job_id}）：${settled.message || settled.status}`, "error");
+          } else {
+            showToast(`作业 #${delRes.job_id} 仍在执行。`, "info");
+          }
+        } else {
+          showToast("凭据已安全删除", "success");
+        }
       } catch (err) { showToast(err.message, "error"); }
     });
 
@@ -1021,10 +1084,22 @@ function openSiteDetailDrawer(siteName) {
           if (!formObj.label) formObj.label = account;
         }
         delete formObj.account;
-        await api("/api/credentials", formObj);
+        const credRes = await api("/api/credentials", formObj);
         await load();
         openSiteDetailDrawer(siteName);
-        showToast("凭据已安全保存到 Keychain");
+        if (credRes.queued && credRes.mode === "remote") {
+          showToast(`已发布凭据保存指令至节点 ${credRes.node || "mac"}（作业 #${credRes.job_id}），正在等待执行...`, "info");
+          const settled = await trackDispatchJob(credRes.job_id, 20000);
+          if (settled && settled.status === "done") {
+            showToast("凭据已保存到节点 Keychain", "success");
+          } else if (settled) {
+            showToast(`节点保存凭据失败（作业 #${credRes.job_id}）：${settled.message || settled.status}`, "error");
+          } else {
+            showToast(`作业 #${credRes.job_id} 仍在执行，凭据稍后生效。`, "info");
+          }
+        } else {
+          showToast("凭据已安全保存到 Keychain");
+        }
       } catch (err) { showToast(err.message); }
     });
   }
@@ -1116,7 +1191,19 @@ function openSiteDetailDrawer(siteName) {
         const formData = new FormData(e.target);
         const formObj = Object.fromEntries(formData);
         const res = await api("/api/sites/balance", formObj);
-        showToast(`站点「${task.name}」资产已更新为 ${res.balance?.raw_text || formObj.amount}`, "success");
+        if (res.queued && res.mode === "remote") {
+          showToast(`已发布资产更新指令至节点 ${res.node || "mac"}（作业 #${res.job_id}），正在等待执行...`, "info");
+          const settled = await trackDispatchJob(res.job_id, 20000);
+          if (settled && settled.status === "done") {
+            showToast(`站点「${task.name}」资产已在节点更新`, "success");
+          } else if (settled) {
+            showToast(`节点更新资产失败（作业 #${res.job_id}）：${settled.message || settled.status}`, "error");
+          } else {
+            showToast(`作业 #${res.job_id} 仍在执行。`, "info");
+          }
+        } else {
+          showToast(`站点「${task.name}」资产已更新为 ${res.balance?.raw_text || formObj.amount}`, "success");
+        }
         await load();
         openSiteDetailDrawer(siteName);
         switchSiteDrawerTab("balance");
@@ -1648,6 +1735,14 @@ function getManualTasks() {
 
 function getFilteredTasks() {
   let list = (state.tasks || []).filter((t) => !isManualTask(t));
+  // 平台（执行节点）筛选：任务行带 node 渠道参数（remote 合并清单）。
+  // 非 remote/无 dispatch 数据时任务行没有 node 字段，node 筛选会得到空集——
+  // 仅在 remote 模式应用。缺 node 的行按 default_node 归属（与节点 chip
+  // 计数同口径，避免「计入计数却被筛选排除」的隐形行）。
+  if (currentNodeFilter !== "全部" && state.dispatch && state.dispatch.mode === "remote") {
+    const defaultNode = (state.dispatch.default_node || "mac");
+    list = list.filter((t) => (t.node || defaultNode) === currentNodeFilter);
+  }
   if (currentFilter === "待办") {
     list = list.filter(isPendingTask);
   } else if (currentFilter === "已完成") {
@@ -1756,6 +1851,7 @@ function renderTile(task, showAction = true) {
             <div class="tile-title-row">
               <span class="tile-title">${esc(task.name)}</span>
               <span class="tile-category-tag">${esc(category)}</span>
+              ${task.node ? `<span class="tile-category-tag node" title="执行渠道（节点）: ${esc(task.node)}">${uiIcon("monitor", { size: 11 })} ${esc(task.node)}</span>` : ""}
               ${isManual ? `<span class="tile-category-tag manual">${uiIcon("user-check", { size: 11 })} 人工签到</span>` : ""}
               ${(isDone && (task.task_reward_text || task.last_reward_text)) ? `<span class="tile-reward-badge" title="本次签到所获奖励: ${esc(task.task_reward_text || task.last_reward_text)}">${uiIcon("gift", { size: 11 })} ${esc(task.task_reward_text || task.last_reward_text)}</span>` : ""}
               ${task.last_balance_text ? `<span class="tile-balance-badge" title="账户余额 (更新于 ${esc(task.balance_updated_at || '最近')})">${uiIcon("coin", { size: 11 })} ${esc(task.last_balance_text)}</span>` : ""}
@@ -2202,6 +2298,12 @@ function renderOverviewView(stats = computeTaskStats()) {
 
 function renderTasksView(stats) {
   const { autoTasks, totalTasks, counts } = stats;
+  // 节点下线/改名后陈旧筛选自愈：必须在 getFilteredTasks() 之前执行，否则
+  // 高亮回落「全部」而网格仍按已不存在的旧节点名硬滤（0 卡片、无提示）。
+  if (currentNodeFilter !== "全部" && state.dispatch && state.dispatch.mode === "remote") {
+    const liveNames = (state.dispatch.nodes || []).map((n) => n.name).filter(Boolean);
+    if (liveNames.length && !liveNames.includes(currentNodeFilter)) currentNodeFilter = "全部";
+  }
   const filteredTasks = getFilteredTasks();
   $("#tasks-header-count").textContent = `${filteredTasks.length} / ${totalTasks}`;
 
@@ -2218,6 +2320,34 @@ function renderTasksView(stats) {
     chips.setAttribute("suggestions", JSON.stringify(suggestions));
     const activeCount = getTaskFilterCount(currentFilter, autoTasks, counts);
     chips.setAttribute("active", `${currentFilter} (${activeCount})`);
+  }
+
+  // 平台（执行节点）筛选行：remote 模式下按节点拆分清单，一眼看清
+  // 每个平台各自有多少待签。与状态/Tag 筛选正交叠加。
+  const nodeChips = $("#tasks-node-filter-chips");
+  if (nodeChips) {
+    const dispatch = state.dispatch;
+    if (dispatch && dispatch.mode === "remote" && Array.isArray(dispatch.nodes) && dispatch.nodes.length) {
+      const nodeNames = dispatch.nodes.map((n) => n.name).filter(Boolean);
+      const allPending = autoTasks.filter(isPendingTask).length;
+      const suggestions = [`全部 (${autoTasks.length})`].concat(
+        nodeNames.map((name) => {
+          const rows = autoTasks.filter((t) => (t.node || dispatch.default_node || "mac") === name);
+          const pend = rows.filter(isPendingTask).length;
+          return `${name} (${rows.length}${pend ? ` · 待签${pend}` : " · 全签"})`;
+        })
+      );
+      nodeChips.classList.add("is-visible");
+      nodeChips.setAttribute("suggestions", JSON.stringify(suggestions));
+      const activeSug = currentNodeFilter === "全部"
+        ? `全部 (${autoTasks.length})`
+        // 精确到 "名称 (" 前缀：startsWith(名称) 会在节点名互为前缀时
+        // （win / win-x）点亮错误的 chip（2026-11-07 review）。
+        : suggestions.find((s) => s.startsWith(`${currentNodeFilter} (`)) || `全部 (${autoTasks.length})`;
+      nodeChips.setAttribute("active", activeSug);
+    } else {
+      nodeChips.classList.remove("is-visible");
+    }
   }
 
   const tasksTilesContainer = $("#tasks-tiles-container");
@@ -2400,13 +2530,30 @@ function renderHistoryView(stats) {
 }
 
 function renderQueueView() {
+  const nodeBar = $("#dispatch-node-bar");
+  if (nodeBar) {
+    const dispatch = state.dispatch;
+    if (dispatch && dispatch.mode === "remote") {
+      nodeBar.classList.add("is-visible");
+      const nodes = dispatch.nodes || [];
+      nodeBar.innerHTML = nodes.map((n) => `
+        <span class="tile-status-pill ${n.online ? "is-ok" : "is-fail"}">
+          <span class="tile-pulse-dot"></span>
+          节点 ${esc(n.name)} · ${n.online ? "在线" : "离线"}
+        </span>`).join("")
+        + `<span class="dispatch-node-hint">作业由面板经 EasyTier 直推节点执行（无轮询）</span>`;
+    } else {
+      nodeBar.classList.remove("is-visible");
+      nodeBar.innerHTML = "";
+    }
+  }
   const jobsTbody = $("#jobs-tbody");
   if (jobsTbody) {
     const jobsList = state.jobs || [];
     jobsTbody.innerHTML = jobsList.length ? jobsList.map((j) => `
       <tr>
         <td><strong>#${j.id}</strong></td>
-        <td><code>${esc(j.kind)}</code></td>
+        <td><code>${esc(j.kind)}</code>${j.node ? `<span class="dispatch-job-node"> · ${esc(j.node)}</span>` : ""}</td>
         <td>${esc(j.created_at)}</td>
         <td>
           <span class="tile-status-pill ${j.status === "done" ? "is-ok" : j.status === "failed" ? "is-fail" : "is-pending"}">
@@ -2515,8 +2662,22 @@ function initTileActionDelegation() {
       }).then((confirmed) => {
         if (!confirmed) return;
         return api("/api/credentials/delete", { ref })
-          .then(() => load())
-          .then(() => showToast("凭据已安全移除", "success"))
+          .then(async (delRes) => {
+            await load();
+            if (delRes.queued && delRes.mode === "remote") {
+              showToast(`已发布凭据删除指令至节点 ${delRes.node || "mac"}（作业 #${delRes.job_id}）...`, "info");
+              const settled = await trackDispatchJob(delRes.job_id, 20000);
+              if (settled && settled.status === "done") {
+                showToast("凭据已从节点 Keychain 删除", "success");
+              } else if (settled) {
+                showToast(`节点删除凭据失败（作业 #${delRes.job_id}）：${settled.message || settled.status}`, "error");
+              } else {
+                showToast(`作业 #${delRes.job_id} 仍在执行。`, "info");
+              }
+            } else {
+              showToast("凭据已安全移除", "success");
+            }
+          })
           .catch((err) => showToast(err.message, "error"));
       });
       return;
@@ -2550,6 +2711,25 @@ function getTodayString() {
   return `${year}-${month}-${day}`;
 }
 
+// Poll /api/state until the given dispatch job reaches a terminal state
+// (done/failed) or the deadline passes. Returns the job record, or null on
+// timeout. Each cycle refreshes state, so task cards update live as the
+// node executes and syncs its DB back to the panel.
+async function trackDispatchJob(jobId, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      await load();
+      const job = (state.jobs || []).find((j) => j.id === jobId);
+      if (job && (job.status === "done" || job.status === "failed" || job.status === "delivery_failed")) {
+        return job;
+      }
+    } catch {}
+  }
+  return null;
+}
+
 async function markTaskManuallyComplete(siteName, clickedBtn = null) {
   let originalHtml = "";
   if (clickedBtn) {
@@ -2561,6 +2741,24 @@ async function markTaskManuallyComplete(siteName, clickedBtn = null) {
     showToast(`正在确认并提交「${siteName}」打卡状态...`, "info");
     const today = getTodayString();
     const res = await api("/api/tasks/complete", { name: siteName, day: today });
+    if (res.queued && res.mode === "remote") {
+      // Dispatch mode: the command is pushed to the executor node and only
+      // lands in the panel replica after the node runs it and syncs the DB
+      // back (~2-10s). Reload right away for the queued state, then keep
+      // polling until the job settles so the card flips without waiting for
+      // the 10s idle interval (the reported "toast ok but card unchanged").
+      showToast(`已发布手动完成指令至节点 ${res.node || "mac"}（作业 #${res.job_id}），正在等待执行回显...`, "info");
+      await load();
+      const settled = await trackDispatchJob(res.job_id, 20000);
+      if (settled && settled.status === "done") {
+        showToast(`站点「${siteName}」已由节点 ${res.node || "mac"} 执行完成。`, "success");
+      } else if (settled) {
+        showToast(`节点 ${res.node || "mac"} 执行失败（作业 #${res.job_id}）：${settled.message || settled.status}`, "error");
+      } else {
+        showToast(`作业 #${res.job_id} 仍在节点执行中，结果稍后会显示在卡片上。`, "info");
+      }
+      return;
+    }
     if (res.ok) {
       const reverted = res.status === "pending" || res.action === "revert";
       showToast(reverted
@@ -2585,7 +2783,14 @@ async function triggerRun(sites) {
   try {
     updateServerStatus("busy");
     const data = await api("/api/run", { sites });
-    showToast(`作业 #${data.job_id} 已入队执行，正在附着 Chrome 9222 执行签到...`, "success");
+    if (data.mode === "remote") {
+      // Multi-node: a mixed selection fans out into per-node jobs.
+      const jobs = data.jobs || [{ job_id: data.job_id, node: data.node }];
+      const summary = jobs.map((j) => `#${j.job_id}→${j.node}`).join("、");
+      showToast(`作业 ${summary} 已直推对应节点执行...`, "success");
+    } else {
+      showToast(`作业 #${data.job_id} 已入队执行...`, "success");
+    }
     setTimeout(load, 800);
   } catch (error) {
     showToast(`触发失败：${error.message}`, "error");
@@ -2668,7 +2873,20 @@ $("#batch-config-form")?.addEventListener("submit", async (e) => {
   try {
     const res = await api("/api/config/update", { configs: payload });
     if (res.ok) {
-      showToast("批次调度与全局配置已成功保存！", "success");
+      if (res.queued && res.mode === "remote") {
+        // Runtime configs are consumed by the runner on the executor node.
+        showToast(`已发布配置更新指令至节点 ${res.node || "mac"}（作业 #${res.job_id}），正在等待执行...`, "info");
+        const settled = await trackDispatchJob(res.job_id, 20000);
+        if (settled && settled.status === "done") {
+          showToast("批次调度与全局配置已在节点生效！", "success");
+        } else if (settled) {
+          showToast(`节点更新配置失败（作业 #${res.job_id}）：${settled.message || settled.status}`, "error");
+        } else {
+          showToast(`作业 #${res.job_id} 仍在执行，配置稍后生效。`, "info");
+        }
+      } else {
+        showToast("批次调度与全局配置已成功保存！", "success");
+      }
       await loadBatchConfig();
     }
   } catch (err) {
@@ -2917,11 +3135,21 @@ $("#manual-open-all-pending-btn")?.addEventListener("click", async () => {
   showToast(`已在新标签页打开 ${pendingManuals.length} 个待办站点，签到完成后请点击「标记完成」`);
 });
 
+// parseChipValue / stripCountSuffix 定义在文件顶部（esc 之后）：
+// prompt-chips 组件高亮与三处 chip select 解析共用同一往返契约。
+
 const filterChips = $("#tasks-filter-chips");
 if (filterChips) {
   filterChips.addEventListener("select", (e) => {
-    const raw = e.detail || "全部";
-    currentFilter = raw.replace(/\s*\(\d+\)$/, "");
+    currentFilter = parseChipValue(e.detail);
+    render("tasks");
+  });
+}
+
+const nodeFilterChips = $("#tasks-node-filter-chips");
+if (nodeFilterChips) {
+  nodeFilterChips.addEventListener("select", (e) => {
+    currentNodeFilter = parseChipValue(e.detail);
     render("tasks");
   });
 }
@@ -2929,8 +3157,7 @@ if (filterChips) {
 const manualFilterChips = $("#manual-filter-chips");
 if (manualFilterChips) {
   manualFilterChips.addEventListener("select", (e) => {
-    const raw = e.detail || "全部";
-    const clean = raw.replace(/\s*\(\d+\)$/, "");
+    const clean = parseChipValue(e.detail);
     if (clean === "待办") {
       manualStatusFilter = "pending";
     } else if (clean === "已完成") {
@@ -2991,11 +3218,25 @@ $("#new-site-manage-form")?.addEventListener("submit", async (event) => {
         .join(",");
       formObj.tags = cleanTags;
     }
-    await api("/api/tasks", formObj);
+    const addRes = await api("/api/tasks", formObj);
     event.target.reset();
     initNewSiteTagsPicker();
     await load();
-    showToast(`站点「${formObj.name}」已成功配置并保存到今日待办！`, "success");
+    if (addRes.queued && addRes.mode === "remote") {
+      // Dispatch mode: the node owning the authoritative DB creates the
+      // site row; it appears in the panel after the node's DB sync.
+      showToast(`已发布新增站点指令至节点 ${addRes.node || "mac"}（作业 #${addRes.job_id}），正在等待执行...`, "info");
+      const settled = await trackDispatchJob(addRes.job_id, 20000);
+      if (settled && settled.status === "done") {
+        showToast(`站点「${formObj.name}」已在节点创建并同步至看板！`, "success");
+      } else if (settled) {
+        showToast(`节点创建站点失败（作业 #${addRes.job_id}）：${settled.message || settled.status}`, "error");
+      } else {
+        showToast(`作业 #${addRes.job_id} 仍在执行，站点稍后会出现在列表。`, "info");
+      }
+    } else {
+      showToast(`站点「${formObj.name}」已成功配置并保存到今日待办！`, "success");
+    }
     if (formObj.checkin_mode === "manual") {
       switchView("manual");
     } else {
@@ -3049,11 +3290,23 @@ $("#credential-form")?.addEventListener("submit", async (event) => {
       if (!formObj.label) formObj.label = account;
     }
     delete formObj.account;
-    await api("/api/credentials", formObj);
+    const credRes = await api("/api/credentials", formObj);
     event.target.reset();
     updateMainCredKindUi();
     await load();
-    showToast("凭据已安全保存到 Keychain");
+    if (credRes.queued && credRes.mode === "remote") {
+      showToast(`已发布凭据保存指令至节点 ${credRes.node || "mac"}（作业 #${credRes.job_id}），正在等待执行...`, "info");
+      const settled = await trackDispatchJob(credRes.job_id, 20000);
+      if (settled && settled.status === "done") {
+        showToast("凭据已保存到节点 Keychain", "success");
+      } else if (settled) {
+        showToast(`节点保存凭据失败（作业 #${credRes.job_id}）：${settled.message || settled.status}`, "error");
+      } else {
+        showToast(`作业 #${credRes.job_id} 仍在执行，凭据稍后生效。`, "info");
+      }
+    } else {
+      showToast("凭据已安全保存到 Keychain");
+    }
   } catch (error) { showToast(error.message); }
 });
 

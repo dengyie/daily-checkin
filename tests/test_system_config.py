@@ -103,6 +103,67 @@ class TestNotifyWithDynamicConfig(unittest.TestCase):
             self.assertTrue(sent2)
             raw.assert_called_once()
 
+    def test_notify_skips_when_notify_on_success_false(self):
+        self.store.set_configs({
+            "tg_notify_enabled": "true",
+            "tg_bot_token": "token123",
+            "tg_chat_id": "chat123",
+            "tg_notify_policy": "all",
+        })
+        with mock.patch.dict(os.environ, {"NOTIFY_ON_SUCCESS": "false"}), \
+                mock.patch("checkin_core.notify._send_telegram_raw") as raw:
+            sent = notify_daily_summary(
+                [self._res("OK"), self._res("ALREADY")], "2026-09-02", run_scope="full", store=self.store
+            )
+            self.assertFalse(sent)
+            raw.assert_not_called()
+
+    def test_notify_delegates_failures_to_agent_and_suppresses_tg(self):
+        self.store.set_configs({
+            "tg_notify_enabled": "true",
+            "tg_bot_token": "token123",
+            "tg_chat_id": "chat123",
+        })
+        with mock.patch("checkin_core.notify.delegate_failures_to_agent", return_value=True) as mock_agent, \
+                mock.patch("checkin_core.notify._send_telegram_raw") as raw:
+            sent = notify_daily_summary(
+                [self._res("OK"), self._res("FAIL", reason="timeout", site="yunzhi")],
+                "2026-09-02", run_scope="full", store=self.store
+            )
+            self.assertTrue(sent)
+            mock_agent.assert_called_once()
+            raw.assert_not_called()
+
+    def test_delegate_failures_to_agent_payload(self):
+        from checkin_core.notify import delegate_failures_to_agent
+        import json
+        with mock.patch.dict(os.environ, {
+            "AUTONEXUS_AGENT_ENABLED": "true",
+            "AUTONEXUS_ALERT_TOKEN": "test-alert-token",
+            "AUTONEXUS_ALERT_URL": "https://monitor.mangoqwq.com/api/v1/alerts/ingest",
+        }), mock.patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = mock.MagicMock()
+            mock_resp.status = 200
+            mock_resp.read.return_value = json.dumps({"success": True}).encode()
+            mock_resp.__enter__.return_value = mock_resp
+            mock_urlopen.return_value = mock_resp
+
+            results = [
+                self._res("OK", site="siteA"),
+                self._res("FAIL", site="yunzhi", reason="WAF 503"),
+            ]
+            ok = delegate_failures_to_agent(results, "2026-09-02")
+            self.assertTrue(ok)
+            mock_urlopen.assert_called_once()
+            req = mock_urlopen.call_args[0][0]
+            self.assertEqual(req.headers["Authorization"], "Bearer test-alert-token")
+            self.assertEqual(req.headers["X-alert-source"], "daily-checkin")
+            payload = json.loads(req.data.decode("utf-8"))
+            self.assertEqual(payload["source"], "daily-checkin")
+            self.assertEqual(payload["rule"], "checkin_site_failed")
+            self.assertIn("yunzhi", payload["target"])
+            self.assertEqual(payload["details"]["failed_count"], 1)
+
 
 class TestConfigWebApi(unittest.TestCase):
     def setUp(self):

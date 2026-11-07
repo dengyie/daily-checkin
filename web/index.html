@@ -302,6 +302,11 @@
             <prompt-chips id="tasks-filter-chips" suggestions='["全部", "待办", "已完成", "失败", "熔断"]' active="全部"></prompt-chips>
           </div>
 
+          <!-- 平台（执行节点）筛选行：remote 多节点时显示，按平台拆分签到状态 -->
+          <div class="tasks-chips-wrap">
+            <prompt-chips id="tasks-node-filter-chips" class="node-filter-chips" suggestions='[]' active="全部"></prompt-chips>
+          </div>
+
           <!-- 站点卡片全平铺网格容器 -->
           <div id="tasks-tiles-container" class="tiles-spread-container"></div>
         </div>
@@ -483,6 +488,7 @@
               <div class="card-title">
                 <span><ui-icon name="settings" size="16"></ui-icon> 异步执行作业队列 (Job Executor)</span>
               </div>
+              <div id="dispatch-node-bar" class="dispatch-node-bar"></div>
             </div>
             <div class="table-responsive">
               <table class="modern-table">

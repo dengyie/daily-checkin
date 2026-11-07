@@ -1340,10 +1340,14 @@ sites:
   # 已抽: button[disabled] 展示「今日已抽」+「今日抽奖次数已用完」。
   # 资产单位为 USD ($)，通过 /api/user/auth/refresh 换取 Bearer Token 读取 /api/user/self (quota / 500000.0)
   # 与 /api/lottery/status (my_draw.quotaAmount 或 prizeLabel 提取当日中奖收益)。
+  # 登录方式(2026-11-07 用户明确要求):只用本站账密登录,禁止 LinuxDO SSO。
+  # 登录页由 /login 重定向到 /sign-in,故 login_url 钉死 /sign-in;
+  # 账密存于 vault(账号 mangoqqq),runner 侧用站点级守卫永不点 LinuxDO 按钮。
   - name: 'leileihog'
     url: https://fapi.leileihog.top/lottery
     kind: browser
     prefer_catalog_url: true
+    login_url: https://fapi.leileihog.top/sign-in
     signs:
       - 'button.lottery-board-center:not([disabled])'
       - 'button.lottery-board-center'
@@ -1506,3 +1510,68 @@ sites:
     url: https://api.3sbqs.xyz/profile
     kind: newapi_profile
     prefer_catalog_url: true
+  # 伏枥 (dash.free-ai.de5.net / 伏枥公益站) —— 2026-11-05 接入。
+  # 标准 New API 站点 (v1.0.0-rc.48)，LinuxDO OAuth 登录，走标准 newapi_profile 流程：
+  # /profile → 点「立即签到」+ 确认门。
+  - name: '伏枥'
+    url: https://dash.free-ai.de5.net/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # newcodex (cdn.newcodex.cn / NewCodex) —— 2026-11-06 接入。
+  # 标准 New API 站点，LinuxDO OAuth 登录，走标准 newapi_profile 流程：
+  # /profile → 点「立即签到」+ 确认门。
+  - name: 'newcodex'
+    url: https://cdn.newcodex.cn/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # laisiai (laisiai.tw.cpolar.io / 莱斯超级API) —— 2026-11-07 接入。
+  # 标准 New API 站点(/api/status 实测 system_name=莱斯超级API):
+  # checkin_enabled=true、linuxdo_oauth=false、password_login_enabled=true、
+  # turnstile_check=true(仅登录侧)、quota_per_unit=500000。
+  # 账密站,按用户要求不登记账密、不做登录:依赖共享 9222 profile 的既有会话
+  # 直接签到;会话失效时本站会 FAIL:auth_required,需人工补登。
+  # 走标准 newapi_profile 流程:/profile → 点「立即签到」+ 确认门。
+  - name: 'laisiai'
+    url: https://laisiai.tw.cpolar.io/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # hyper (ai.hyper.nyc.mn / 澎湃AI网关) —— 2026-11-07 接入。
+  # 标准 New API 站点(/api/status 实测 system_name=澎湃AI网关,
+  # version=v1.0.0-rc.37-25-g69a500298):
+  # checkin_enabled=true、linuxdo_oauth=false、github_oauth=true、
+  # password_login_enabled=false、turnstile_check=false、quota_per_unit=500000。
+  # 纯 GitHub OAuth 站,不登记账密、不代填账密;依赖共享 9222 profile 的既有
+  # GitHub/站点会话直接签到。会话失效时通用通道无 GitHub SSO 兜底(only LinuxDO),
+  # 会 FAIL:auth_required,需人工在 9222 补登一次(后续可评估接专属 GitHub 流)。
+  # 走标准 newapi_profile 流程:/profile → 点「立即签到」+ 确认门。
+  - name: 'hyper'
+    url: https://ai.hyper.nyc.mn/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # qulink(链享趣 qulink.cyou)—— 2026-11-07 接入。
+  # /api/status 实测: system_name=链享趣,
+  # version=20261022-appgroup-encrypted, checkin_enabled=false(签到不走标准
+  # New API /api/user/checkin), github_oauth=true, password_login_enabled=true,
+  # turnstile_check=false, quota_per_unit=500000。
+  # 自研 Vite+React SPA(路由 /points/check-in),签到机制:
+  #   GET  /api/points/check-in → 预览(serverTime/nextCheckInAt/rewardPoints/token)
+  #   POST /api/points/check-in header x-preview-token + New-Api-User → 扣一次,
+  #   响应须 checkedIn=true 且 claimed=bool;固定奖励 10 积分/天,北京时间 00:00 翻日。
+  # 两态锁按钮自身(class qpc-claim,已签时 disabled 且文案翻「今日已签到」):
+  #   未签「签到领 10 积分」→ 点击后 notice「签到成功，10 积分已到账。」
+  #   已签「今日已签到」+「今日 HH:MM 已领取，明天再来。」
+  # 注意:加载中按钮也是 disabled(文案「正在读取签到状态」),所以 already
+  # 绝不能写裸 button.qpc-claim[disabled],否则首屏即假 ALREADY(同 zerocat 坑)。
+  # 纯会话依赖:需站点已登录 + 积分账户 connected;失效时通用通道无 GitHub SSO
+  # 兜底(库内只有 LinuxDO),会 FAIL:auth_required,需人工在 9222 补登。
+  - name: 'qulink'
+    url: https://qulink.cyou/points/check-in
+    kind: browser
+    prefer_catalog_url: true
+    signs:
+      - 'button.qpc-claim:not([disabled])'
+      - 'button:has-text("签到领 10 积分")'
+    already:
+      - 'button:text-is("今日已签到")'
+      - 'text=已领取，明天再来'
+      - 'text=签到成功，10 积分已到账'

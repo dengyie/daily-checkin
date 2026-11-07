@@ -9,6 +9,11 @@ import urllib.request
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 MAX_TG_TEXT_LEN = 4000
 
+# AutoNexus Agent 告警委派配置
+AUTONEXUS_ALERT_URL = os.environ.get("AUTONEXUS_ALERT_URL", "https://monitor.mangoqwq.com/api/v1/alerts/ingest")
+AUTONEXUS_ALERT_TOKEN = os.environ.get("AUTONEXUS_ALERT_TOKEN") or os.environ.get("FLEET_AUTH_TOKEN") or ""
+AUTONEXUS_AGENT_ENABLED = os.environ.get("AUTONEXUS_AGENT_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+
 
 def _get_ssl_context() -> ssl.SSLContext | None:
     """Create SSL context with fallback to common CA cert bundles."""
@@ -103,6 +108,93 @@ def build_daily_summary_text(results, today_str: str, ai_report: Any | None = No
     return "\n".join(lines)
 
 
+def delegate_failures_to_agent(
+    results,
+    today_str: str,
+    ai_report: Any | None = None,
+) -> bool:
+    """将签到失败异常优先委派给 AutoNexus Agent 自动处置（诊断、自愈重试、凭据探测）。
+
+    成功接收后返回 True，此时抑制即时 Telegram 发送（由 Agent 自愈失败后再报警）；
+    未配置、禁用或发送失败返回 False，触发调用方回退直发 Telegram 兜底。
+    """
+    token = os.environ.get("AUTONEXUS_ALERT_TOKEN") or os.environ.get("FLEET_AUTH_TOKEN") or AUTONEXUS_ALERT_TOKEN
+    url = os.environ.get("AUTONEXUS_ALERT_URL") or AUTONEXUS_ALERT_URL
+    enabled = os.environ.get("AUTONEXUS_AGENT_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+    if not enabled or not token or not url:
+        return False
+
+    fails = [r for r in results if getattr(r, "status", None) == "FAIL"]
+    if not fails:
+        return False
+
+    failed_sites = [getattr(r, "site", "unknown") for r in fails]
+    target_sites = "、".join(failed_sites[:10])
+    summary = f"⚠️ 签到日报 {today_str[5:] if len(today_str) > 5 else today_str} 失败 {len(fails)} 站: {target_sites}"
+    if len(failed_sites) > 10:
+        summary += f" +{len(failed_sites)-10}"
+
+    fail_details = []
+    for r in fails[:20]:
+        site_val = getattr(r, "site", "")
+        reason_val = getattr(r, "reason", "")
+        msg_val = getattr(r, "message", "")
+        fail_details.append({
+            "site": site_val if isinstance(site_val, str) else (str(site_val) if site_val else ""),
+            "reason": reason_val if isinstance(reason_val, str) else (str(reason_val) if reason_val else ""),
+            "message": msg_val if isinstance(msg_val, str) else "",
+        })
+
+    ai_info = {}
+    if ai_report:
+        summary_val = getattr(ai_report, "summary", "")
+        retry_val = getattr(ai_report, "auto_retry_targets", [])
+        ai_info = {
+            "summary": summary_val if isinstance(summary_val, str) else "",
+            "auto_retry_targets": [str(x) for x in retry_val] if isinstance(retry_val, (list, tuple)) else [],
+        }
+
+    payload_dict = {
+        "source": "daily-checkin",
+        "rule": "checkin_site_failed",
+        "target": f"checkin:{target_sites[:80]}",
+        "severity": "ERROR",
+        "summary": summary[:200],
+        "dedup_key": f"daily-checkin:{today_str}:{len(fails)}",
+        "details": {
+            "date": today_str,
+            "failed_count": len(fails),
+            "total_count": len(results),
+            "failures": fail_details,
+            "ai_report": ai_info,
+        },
+    }
+    payload_bytes = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload_bytes,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "X-Alert-Source": "daily-checkin",
+        },
+        method="POST",
+    )
+    ctx = _get_ssl_context()
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            if resp.status in (200, 201, 202):
+                data = json.loads(resp.read().decode("utf-8"))
+                if data.get("success") is not False:
+                    print(f"  🤖 签到异常已成功委派给 AutoNexus Agent 自动处置（已暂缓 TG 日报）", flush=True)
+                    return True
+            print(f"  ⚠️ 委派 AutoNexus Agent 响应异常 (HTTP {resp.status})", flush=True)
+            return False
+    except Exception as exc:
+        print(f"  ⚠️ 委派 AutoNexus Agent 请求失败: {exc}", flush=True)
+        return False
+
+
 def notify_daily_summary(
     results,
     today_str: str,
@@ -160,9 +252,23 @@ def notify_daily_summary(
         return False
 
     fail_count = sum(1 for r in results if getattr(r, "status", None) == "FAIL")
-    if policy == "fail_only" and fail_count == 0:
-        print("  notify: TG notification skipped (policy=fail_only and 0 failures)", flush=True)
-        return False
+
+    # 1. 成功通知静默判断：受 NOTIFY_ON_SUCCESS 约束（基本不报，拉活成功不报，缺省静默）
+    if fail_count == 0:
+        notify_on_success_env = os.environ.get("NOTIFY_ON_SUCCESS", "false").lower() in ("1", "true", "yes", "on")
+        if not notify_on_success_env:
+            print("  notify: TG notification skipped (0 failures and NOTIFY_ON_SUCCESS=false by default)", flush=True)
+            return False
+        if policy == "fail_only":
+            print("  notify: TG notification skipped (policy=fail_only and 0 failures)", flush=True)
+            return False
+
+    # 2. 失败异常：优先委派 AutoNexus Agent 自动处置（自愈、质检与重试）；成功接收后暂缓 TG，失败回退直发 TG
+    if fail_count > 0:
+        delegated = delegate_failures_to_agent(results, today_str, ai_report=ai_report)
+        if delegated:
+            return True
+        print("  ⚠️ 委派 AutoNexus Agent 失败或未配置，自动回退到 Telegram 直发日报告警。", flush=True)
 
     text = build_daily_summary_text(results, today_str, ai_report=ai_report)
     if not text:

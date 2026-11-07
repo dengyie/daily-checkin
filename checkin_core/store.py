@@ -72,6 +72,46 @@ DEFAULT_SYSTEM_CONFIGS: dict[str, str] = {
 
 
 
+# Same join as tasks(), used to read OTHER executor nodes' replica DBs on the
+# panel host in strict read-only mode. `immutable=1` is deliberate: the panel
+# never writes replicas, node agents replace them via atomic `mv`, so an
+# immutable reader either sees the whole old file or the whole new one — and
+# it must not create -shm/-wal next to a replica the node will overwrite.
+_TASKS_SQL = """SELECT s.id site_id,s.name,s.url,s.provider,s.enabled,s.credential_ref,
+                       COALESCE(s.checkin_mode,'auto') checkin_mode,
+                       COALESCE(s.tags,'') tags,
+                       s.last_balance,
+                       COALESCE(s.last_balance_text,'') last_balance_text,
+                       COALESCE(s.last_balance_currency,'USD') last_balance_currency,
+                       COALESCE(s.last_reward_text,'') last_reward_text,
+                       COALESCE(s.balance_updated_at,'') balance_updated_at,
+                       s.created_at site_created_at,
+                       t.day,t.status,t.source,t.obsidian_path,t.last_reason,
+                       CASE WHEN t.last_reward_text<>'' THEN t.last_reward_text ELSE s.last_reward_text END task_reward_text,
+                       t.updated_at
+                       ,COALESCE(h.status,'active') site_health_status
+                       ,COALESCE(h.failures,0) site_health_failures
+                       ,COALESCE(h.last_reason,'') site_health_reason
+                FROM daily_tasks t JOIN sites s ON s.id=t.site_id
+                LEFT JOIN site_health h ON h.site_id=s.id
+                WHERE t.day=? AND s.enabled=1 ORDER BY s.id"""
+
+
+def read_only_tasks(db_path: str | Path, day: str) -> list[dict[str, Any]]:
+    """Read a node replica's task rows without touching the file (no WAL/shm)."""
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    uri = f"file:{path}?mode=ro&immutable=1"
+    try:
+        with sqlite3.connect(uri, uri=True, timeout=5) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(_TASKS_SQL, (day,)).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []  # replica mid-replacement or unreadable: skip, stay empty
+
+
 class SystemStore:
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path else default_db_path()
@@ -440,6 +480,8 @@ class SystemStore:
                 (day,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+
 
     def materialize_day(self, day: str) -> int:
         """Create today's pending tasks from the authoritative enabled site catalog."""
@@ -1287,8 +1329,13 @@ class SystemStore:
             row = db.execute("SELECT COUNT(*) FROM runs").fetchone()
             return int(row[0]) if row else 0
 
-    def snapshot(self, day: str) -> dict[str, Any]:
-        self.materialize_day(day)
+    def snapshot(self, day: str, materialize: bool = True) -> dict[str, Any]:
+        if materialize:
+            # The panel host (dispatch "remote" mode) treats system.db as a
+            # read-only replica synced from the executor node, so it must not
+            # write pending-task rows here — that would create WAL frames the
+            # next wholesale scp replacement could trip over.
+            self.materialize_day(day)
         return {
             "schema_version": SCHEMA_VERSION,
             "day": day,

@@ -20,7 +20,37 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from checkin_core.keychain import CredentialStore, make_ref, credential_store_from_env
 from checkin_core.notify import _send_telegram_raw
-from checkin_core.store import SystemStore, store_from_env, obsidian_daily_task_path
+from checkin_core.store import SystemStore, store_from_env, obsidian_daily_task_path, read_only_tasks
+from checkin_core.dispatch import (
+    DeliveryWorker,
+    DispatchStore,
+    dispatch_db_path,
+    dispatch_mode,
+    make_delivery_worker,
+)
+
+# Unified multi-node panel (2026-11-06): additional executor nodes' replica
+# DBs to merge into /api/state's task list, as "node=path" pairs separated by
+# commas (e.g. "win=/data/daily-checkin/data/system-win.db"). The default
+# node's tasks come from the primary store; every row gets a "node" field —
+# the execution channel is just an attribute of the task, the frontend stays
+# one unified list.
+NODE_REPLICAS_ENV = "DAILY_CHECKIN_NODE_REPLICAS"
+
+
+def node_replicas() -> dict[str, Path]:
+    raw = os.environ.get(NODE_REPLICAS_ENV, "")
+    out: dict[str, Path] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        node, _, path = part.partition("=")
+        node = node.strip()
+        path = path.strip()
+        if node and path:
+            out[node] = Path(path)
+    return out
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN_FILENAME = "web.token"
@@ -110,7 +140,9 @@ def _constant_eq(a: str | None, b: str | None) -> bool:
 _DEFAULT_ALLOWED_ORIGINS = (
     "http://127.0.0.1:8766,http://localhost:8766,"
     "http://check.example.com:8766,https://check.example.com,"
-    "http://check.mangoqwq.com:8766,http://check-api.mangoqwq.com:8766"
+    "http://check.mangoqwq.com:8766,http://check-api.mangoqwq.com:8766,"
+    "https://check.mangoqwq.com,https://check-api.mangoqwq.com,"
+    "http://check.mangoqwq.com,http://check-api.mangoqwq.com"
 )
 CORS_ORIGINS_ENV = "DAILY_CHECKIN_WEB_ORIGINS"
 CORS_ALLOW_METHODS = "GET, POST, OPTIONS"
@@ -306,12 +338,58 @@ class CheckinWebApp:
         self.token_path = self.store.path.parent / TOKEN_FILENAME
         self.auth_token, self.token_created = load_or_create_token(self.token_path)
         self.credentials = credentials or credential_store_from_env()
-        self.executor = JobExecutor(self.store)
         self.csrf_path = self.store.path.parent / CSRF_FILENAME
         self.csrf = load_or_create_csrf(self.csrf_path)
-        # Durable jobs survived a possible earlier web-process crash; requeue
-        # any that were still pending before the API went away.
-        self.executor.recover_stale_jobs()
+        # Dispatch mode: the cloud panel ("remote") only enqueues durable jobs
+        # and pushes them to executor-node agents; it never spawns a local
+        # runner (there is no CDP browser on the panel host). Local mode keeps
+        # the legacy in-process executor untouched.
+        self.dispatch_mode = dispatch_mode()
+        self.dispatch: DispatchStore | None = None
+        self.delivery: DeliveryWorker | None = None
+        if self.dispatch_mode == "remote":
+            self.dispatch = DispatchStore(dispatch_db_path(self.store.path))
+            self.executor = JobExecutor(self.store, start_worker=False)
+            self.delivery = make_delivery_worker(self.dispatch)
+        else:
+            self.executor = JobExecutor(self.store)
+            # Durable jobs survived a possible earlier web-process crash; requeue
+            # any that were still pending before the API went away.
+            self.executor.recover_stale_jobs()
+
+    # Paths whose writes are only meaningful on the executor node that owns
+    # the authoritative DB (the panel host's system.db is a synced replica
+    # that would be clobbered by the next push). The panel rejects them with
+    # a clear operator-facing message instead of silently losing the data.
+    REMOTE_BLOCKED_WRITE_PATHS = frozenset({
+        "/api/sync/obsidian",
+        # Everything below was removed from this list and dispatches to the
+        # owning executor node instead (authoritative DB + keychain live
+        # there): add_site (/api/tasks), update_site (/api/sites/update),
+        # set_credential/delete_credential (/api/credentials*),
+        # update_config (/api/config/update), delete_site (/api/sites/delete).
+    })
+    REMOTE_BLOCKED_MESSAGE = "看板模式下该操作需在执行节点本地完成（权威数据在 Mac 节点）"
+
+    def _dispatch_write(self, kind: str, payload: dict, node_hint: str | None = None):
+        """Enqueue an authoritative-write job for the owning executor node and
+        return the 202 payload the frontend's dispatch-tracking toast expects.
+        Every panel write that lands in the authoritative DB / keychain goes
+        through this: the panel replica must never be written directly."""
+        node = node_hint
+        site = str(payload.get("site") or "").strip()
+        if not node and site:
+            node = self.dispatch.node_for_site(site)
+        if not node:
+            node = self.dispatch.default_node()
+        job_id = self.dispatch.enqueue(kind, payload=payload, node=node)
+        return {
+            "ok": True,
+            "queued": True,
+            "job_id": job_id,
+            "node": node,
+            "mode": "remote",
+        }
 
     def handler(self):
         app = self
@@ -376,6 +454,62 @@ class CheckinWebApp:
                     return False
                 return _constant_eq(token.strip(), app.auth_token)
 
+            def check_node_token(self) -> str | None:
+                """Authenticate an executor-node callback via X-Node-Token.
+
+                Returns the authenticated node name, or None. Machine-to-machine
+                path: intentionally bypasses web auth/CSRF but still passes the
+                allowed_host gate checked by every do_* entrypoint.
+                """
+                if not app.dispatch:
+                    return None
+                token = (self.headers.get("X-Node-Token") or "").strip()
+                return app.dispatch.verify_node_token(token)
+
+            def handle_dispatch_api(self, path: str) -> None:
+                node = self.check_node_token()
+                if not node:
+                    self.send_json({"error": "auth"}, HTTPStatus.UNAUTHORIZED)
+                    return
+                if path == "/api/dispatch/heartbeat":
+                    app.dispatch.heartbeat(node)
+                    self.send_json({"ok": True, "node": node})
+                    return
+                if path == "/api/dispatch/result":
+                    try:
+                        body = self.read_json()
+                    except ValueError as exc:
+                        self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                        return
+                    status = str(body.get("status") or "").strip()
+                    if status not in ("done", "failed"):
+                        self.send_json(
+                            {"error": "status must be 'done' or 'failed'"},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    try:
+                        job_id = int(body.get("job_id"))
+                    except (TypeError, ValueError):
+                        self.send_json({"error": "job_id required"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    exit_code = body.get("exit_code")
+                    try:
+                        exit_code = int(exit_code) if exit_code is not None else None
+                    except (TypeError, ValueError):
+                        exit_code = None
+                    message = str(body.get("message") or "")[:4000]
+                    if not app.dispatch.finish(job_id, node, status, exit_code, message):
+                        # Wrong owner / unknown job / non-running state.
+                        self.send_json(
+                            {"error": "job not finishable by this node"},
+                            HTTPStatus.CONFLICT,
+                        )
+                        return
+                    self.send_json({"ok": True, "job_id": job_id, "status": status})
+                    return
+                self.send_error(HTTPStatus.NOT_FOUND)
+
             def do_HEAD(self):
                 if not self.allowed_host():
                     self.send_error(HTTPStatus.FORBIDDEN)
@@ -407,7 +541,30 @@ class CheckinWebApp:
                     return
                 if path == "/api/state":
                     day = datetime.now().strftime("%Y-%m-%d")
-                    data = app.store.snapshot(day)
+                    if app.dispatch_mode == "remote":
+                        # Panel host: read-only replica + dispatch queue view.
+                        data = app.store.snapshot(day, materialize=False)
+                        data["jobs"] = app.dispatch.jobs(30)
+                        default_node = app.dispatch.default_node()
+                        # Unified multi-node task list: default node's rows
+                        # from the primary replica, other nodes' rows merged
+                        # from their own read-only replicas; each row carries
+                        # its execution channel in "node".
+                        for t in data["tasks"]:
+                            t["node"] = default_node
+                        merged = list(data["tasks"])
+                        for node, replica_path in node_replicas().items():
+                            for t in read_only_tasks(replica_path, day):
+                                t["node"] = node
+                                merged.append(t)
+                        data["tasks"] = merged
+                        data["dispatch"] = {
+                            "mode": "remote",
+                            "default_node": default_node,
+                            "nodes": app.dispatch.nodes(),
+                        }
+                    else:
+                        data = app.store.snapshot(day)
                     data["csrf"] = app.csrf
                     self.send_json(data)
                     return
@@ -464,6 +621,12 @@ class CheckinWebApp:
                     print(f"web [rejected:host] {self.path} host={self.headers.get('Host')}", flush=True)
                     self.send_json({"error": "host"}, HTTPStatus.FORBIDDEN)
                     return
+                path = urlparse(self.path).path
+                # Executor-node callbacks (result/heartbeat) authenticate with
+                # the per-node token, not the web password/CSRF pair.
+                if path.startswith("/api/dispatch/"):
+                    self.handle_dispatch_api(path)
+                    return
                 if not self.check_auth():
                     print(f"web [rejected:auth] {self.path}", flush=True)
                     self.send_json({"error": "auth"}, HTTPStatus.UNAUTHORIZED)
@@ -472,9 +635,11 @@ class CheckinWebApp:
                     print(f"web [rejected:csrf] {self.path}", flush=True)
                     self.send_json({"error": "csrf"}, HTTPStatus.FORBIDDEN)
                     return
-                path = urlparse(self.path).path
                 try:
                     body = self.read_json()
+                    if app.dispatch_mode == "remote" and path in app.REMOTE_BLOCKED_WRITE_PATHS:
+                        self.send_json({"error": app.REMOTE_BLOCKED_MESSAGE}, HTTPStatus.BAD_REQUEST)
+                        return
                     if path == "/api/run":
                         raw_names = body.get("sites") or []
                         if not isinstance(raw_names, list):
@@ -484,6 +649,42 @@ class CheckinWebApp:
                         for n in names:
                             if "," in n:
                                 raise ValueError("site name cannot contain commas")
+                        if app.dispatch_mode == "remote":
+                            if not names:
+                                # Full-batch run fans out to EVERY registered
+                                # node: each agent executes its own enabled
+                                # catalog against its own authoritative DB in
+                                # parallel — one click, all platforms together.
+                                jobs = []
+                                for node in app.dispatch.registered_nodes():
+                                    job_id = app.dispatch.enqueue("all", node=node)
+                                    jobs.append({"job_id": job_id, "node": node, "sites": []})
+                                payload = {"mode": "remote", "jobs": jobs}
+                                if len(jobs) == 1:
+                                    payload["job_id"] = jobs[0]["job_id"]
+                                    payload["node"] = jobs[0]["node"]
+                                self.send_json(payload, HTTPStatus.ACCEPTED)
+                                return
+                            # Multi-node routing: group the requested sites by
+                            # their pinned executor node (site_nodes map, else
+                            # the default node) and enqueue one job per node,
+                            # so a mixed Mac/Windows selection fans out into
+                            # per-node jobs that run against each node's own
+                            # authoritative DB.
+                            groups = app.dispatch.resolve_nodes_for_sites(names)
+                            jobs = []
+                            for node, node_names in groups.items():
+                                job_id = app.dispatch.enqueue(
+                                    "site", site_names=node_names, node=node
+                                )
+                                jobs.append({"job_id": job_id, "node": node, "sites": node_names})
+                            payload = {"mode": "remote", "jobs": jobs}
+                            if len(jobs) == 1:
+                                # Back-compat single-job shape for the frontend.
+                                payload["job_id"] = jobs[0]["job_id"]
+                                payload["node"] = jobs[0]["node"]
+                            self.send_json(payload, HTTPStatus.ACCEPTED)
+                            return
                         self.send_json({"job_id": app.executor.submit(names)}, HTTPStatus.ACCEPTED)
                         return
                     if path == "/api/tasks":
@@ -501,6 +702,22 @@ class CheckinWebApp:
                             raise ValueError("name reserved: 雅思")
                         if checkin_mode not in ("auto", "manual"):
                             raise ValueError("checkin_mode must be 'auto' or 'manual'")
+                        if app.dispatch_mode == "remote":
+                            # Site catalog writes belong to the executor node
+                            # owning the authoritative DB (same contract as
+                            # delete_site); the replica stays read-only.
+                            self.send_json(
+                                app._dispatch_write(
+                                    "add_site",
+                                    {
+                                        "site": name, "url": url, "provider": provider,
+                                        "checkin_mode": checkin_mode, "tags": tags, "day": day,
+                                    },
+                                    node_hint=app.dispatch.node_for_site(name),
+                                ),
+                                HTTPStatus.ACCEPTED,
+                            )
+                            return
                         app.store.upsert_task(
                             day, name, url, provider=provider,
                             checkin_mode=checkin_mode, tags=tags,
@@ -513,6 +730,28 @@ class CheckinWebApp:
                         day = str(body.get("day") or datetime.now().strftime("%Y-%m-%d")).strip()
                         if not re.fullmatch(r"^\d{4}-\d{2}-\d{2}$", day):
                             raise ValueError(f"invalid day format (expected YYYY-MM-DD): {day}")
+                        if app.dispatch_mode == "remote":
+                            # Manual completion must land on the executor whose
+                            # authoritative DB owns the task (and its Obsidian
+                            # projection), so it is dispatched like a check-in
+                            # run and routed via the site_nodes map.
+                            node = app.dispatch.node_for_site(name) or app.dispatch.default_node()
+                            job_id = app.dispatch.enqueue(
+                                "manual",
+                                payload={"site": name, "day": day},
+                                node=node,
+                            )
+                            self.send_json(
+                                {
+                                    "ok": True,
+                                    "queued": True,
+                                    "job_id": job_id,
+                                    "node": node,
+                                    "mode": "remote",
+                                },
+                                HTTPStatus.ACCEPTED,
+                            )
+                            return
                         res = app.store.complete_task_manually(day, name)
                         self.send_json(res)
                         return
@@ -548,6 +787,17 @@ class CheckinWebApp:
                             updates["url"] = str(body["url"]).strip()
                         if "provider" in body:
                             updates["provider"] = str(body["provider"]).strip()
+                        if app.dispatch_mode == "remote":
+                            if not updates:
+                                raise ValueError("no valid fields to update")
+                            self.send_json(
+                                app._dispatch_write(
+                                    "update_site", {"site": name, **updates},
+                                    node_hint=app.dispatch.node_for_site(name),
+                                ),
+                                HTTPStatus.ACCEPTED,
+                            )
+                            return
                         res = app.store.update_site_config(name, **updates)
                         self.send_json({"ok": True, "site": res})
                         return
@@ -569,6 +819,20 @@ class CheckinWebApp:
                         day = str(body.get("day") or "").strip()
                         if day and not re.fullmatch(r"^\d{4}-\d{2}-\d{2}$", day):
                             raise ValueError(f"invalid day format (expected YYYY-MM-DD): {day}")
+                        if app.dispatch_mode == "remote":
+                            # Balance ledger lives in the authoritative DB.
+                            self.send_json(
+                                app._dispatch_write(
+                                    "update_balance",
+                                    {
+                                        "site": name, "amount": amount_raw,
+                                        "currency": currency, "raw_text": raw_text, "day": day,
+                                    },
+                                    node_hint=app.dispatch.node_for_site(name),
+                                ),
+                                HTTPStatus.ACCEPTED,
+                            )
+                            return
                         res = app.store.update_site_balance_manual(
                             name,
                             amount=amount,
@@ -584,6 +848,28 @@ class CheckinWebApp:
                         if not name:
                             raise ValueError("name required")
                         ignore_missing = bool(body.get("ignore_missing", False))
+                        if app.dispatch_mode == "remote":
+                            # Deletion must run where the authoritative DB and
+                            # the credentials backend (keychain) live, then the
+                            # node's DB sync erases the row from the panel
+                            # replica — same contract as manual completion.
+                            node = app.dispatch.node_for_site(name) or app.dispatch.default_node()
+                            job_id = app.dispatch.enqueue(
+                                "delete_site",
+                                payload={"site": name, "ignore_missing": ignore_missing},
+                                node=node,
+                            )
+                            self.send_json(
+                                {
+                                    "ok": True,
+                                    "queued": True,
+                                    "job_id": job_id,
+                                    "node": node,
+                                    "mode": "remote",
+                                },
+                                HTTPStatus.ACCEPTED,
+                            )
+                            return
                         res = app.store.delete_site(name, ignore_missing=ignore_missing)
                         cred_refs = res.get("credential_refs") or ([res.get("credential_ref")] if res.get("credential_ref") else [])
                         for c_ref in cred_refs:
@@ -603,6 +889,17 @@ class CheckinWebApp:
                             raise ValueError("site and secret required")
                         if kind not in ALLOWED_CRED_KINDS:
                             raise ValueError(f"invalid credential kind: {kind}")
+                        if app.dispatch_mode == "remote":
+                            # Secrets live in the executor node's keychain.
+                            self.send_json(
+                                app._dispatch_write(
+                                    "set_credential",
+                                    {"site": site, "kind": kind, "secret": secret, "label": label},
+                                    node_hint=app.dispatch.node_for_site(site),
+                                ),
+                                HTTPStatus.ACCEPTED,
+                            )
+                            return
                         ref = make_ref(site, kind)
                         app.credentials.put(ref, secret)
                         app.store.set_credential_ref(site, ref, kind, label)
@@ -612,6 +909,12 @@ class CheckinWebApp:
                         ref = str(body.get("ref") or "").strip()
                         if not ref:
                             raise ValueError("ref required")
+                        if app.dispatch_mode == "remote":
+                            self.send_json(
+                                app._dispatch_write("delete_credential", {"ref": ref}),
+                                HTTPStatus.ACCEPTED,
+                            )
+                            return
                         app.credentials.delete(ref)
                         app.store.delete_credential_ref(ref)
                         self.send_json({"ok": True})
@@ -638,6 +941,15 @@ class CheckinWebApp:
                                         raise ValueError(f"{k} must be between {min_v} and {max_v}")
                                 except (ValueError, TypeError):
                                     raise ValueError(f"{k} must be an integer between {min_v} and {max_v}")
+                        if app.dispatch_mode == "remote":
+                            # Batch/runtime configs are consumed by the runner
+                            # on the executor node (cron schedule, timeouts,
+                            # AI inspector...) — the write must land there.
+                            self.send_json(
+                                app._dispatch_write("update_config", {"configs": mapping}),
+                                HTTPStatus.ACCEPTED,
+                            )
+                            return
                         updated = app.store.set_configs(mapping)
                         self.send_json({"ok": True, "configs": updated})
                         return

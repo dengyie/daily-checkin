@@ -1400,15 +1400,20 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     ),
     # glados(glados.rocks/console/checkin, GLaDOS 控制台每日签到)—— 2026-09-30 接入。
     # 复用 9222 共享 profile 的 gld:sess 会话，走专属 glados_checkin 流程。
+    # 2026-11-06 前端改版: 签到按钮从 button.checkin-cute-btn 变为 button.ckb
+    # (完成态 ckb.is-done, 文案 "Checkin"/"Checkin! Got N Points"), 新旧选择器双兼容。
     _B(
         "glados",
         "https://glados.rocks/console/checkin",
         signs=[
+            'button.ckb:not(.is-done)',
             'button.checkin-cute-btn:not(.is-done)',
+            'button.ckb:has-text("Checkin")',
             'button.checkin-cute-btn:has-text("签到")',
             'button.checkin-cute-btn:has-text("Checkin")',
         ],
         already=[
+            'button.ckb.is-done',
             'button.checkin-cute-btn.is-done',
             'text=Checkin! Got',
             'text=Return tomorrow',
@@ -1526,6 +1531,7 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
             'text=抽奖成功',
         ],
         prefer_catalog_url=True,
+        login_url="https://fapi.leileihog.top/sign-in",
         kind="browser",
     ),
     _B(
@@ -1599,6 +1605,38 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     # 3sbqs(api.3sbqs.xyz)—— 2026-11-04 接入。标准 New API,
     # LinuxDO OAuth 登录,签到 /profile「立即签到」+ 确认门。通用 newapi_profile 通道。
     _N("3sbqs", "https://api.3sbqs.xyz/profile", prefer_catalog_url=True),
+    # 伏枥(dash.free-ai.de5.net)—— 2026-11-05 接入。标准 New API,
+    # LinuxDO OAuth 登录,签到 /profile「立即签到」+ 确认门。通用 newapi_profile 通道。
+    _N("伏枥", "https://dash.free-ai.de5.net/profile", prefer_catalog_url=True),
+    # newcodex(cdn.newcodex.cn)—— 2026-11-06 接入。标准 New API,
+    # LinuxDO OAuth 登录,签到 /profile「立即签到」+ 确认门。通用 newapi_profile 通道。
+    _N("newcodex", "https://cdn.newcodex.cn/profile", prefer_catalog_url=True),
+    # laisiai(laisiai.tw.cpolar.io)—— 2026-11-07 接入。标准 New API 账密站
+    # (linuxdo_oauth=false),不登记账密、不登录,签到 /profile「立即签到」+ 确认门。
+    # 通用 newapi_profile 通道。
+    _N("laisiai", "https://laisiai.tw.cpolar.io/profile", prefer_catalog_url=True),
+    # hyper(ai.hyper.nyc.mn)—— 2026-11-07 接入。标准 New API 纯 GitHub OAuth 站
+    # (linuxdo_oauth=false),不登记账密、不登录,签到 /profile「立即签到」+ 确认门。
+    # 通用通道无 GitHub SSO 兜底,会话失效 FAIL:auth_required 需人工补登。
+    _N("hyper", "https://ai.hyper.nyc.mn/profile", prefer_catalog_url=True),
+    # qulink(qulink.cyou / 链享趣)—— 2026-11-07 接入。自研 Vite+React SPA,
+    # /api/status checkin_enabled=false,签到在 /points/check-in,两态锁按钮
+    # button.qpc-claim(已签 disabled + 文案「今日已签到」/「已领取，明天再来」)。
+    # 加载中同是 disabled,already 不带裸 disabled 选择器(同 zerocat 假 ALREADY 坑)。
+    _B(
+        "qulink",
+        "https://qulink.cyou/points/check-in",
+        signs=[
+            'button.qpc-claim:not([disabled])',
+            'button:has-text("签到领 10 积分")',
+        ],
+        already=[
+            'button:text-is("今日已签到")',
+            'text=已领取，明天再来',
+            'text=签到成功，10 积分已到账',
+        ],
+        prefer_catalog_url=True,
+    ),
 ]
 
 
@@ -1854,15 +1892,19 @@ def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
     if kind == "glados":
         # glados.rocks/console/checkin 专属 glados_checkin 流程:
         # 避免 Daily Punch 日历图例常驻 "Checked in" 触发泛文本假阳性，
-        # 结合 /api/user/points 今日记录与 button.checkin-cute-btn 精准判定。
+        # 结合 /api/user/points 今日记录与签到按钮精准判定。
+        # 2026-11-06 改版: 按钮改为 button.ckb (完成态 .is-done)，新旧选择器双兼容。
         return _B(
             name, url,
             signs=list(signs) if signs is not None else [
+                'button.ckb:not(.is-done)',
                 'button.checkin-cute-btn:not(.is-done)',
+                'button.ckb:has-text("Checkin")',
                 'button.checkin-cute-btn:has-text("签到")',
                 'button.checkin-cute-btn:has-text("Checkin")',
             ],
             already=list(already) if already is not None else [
+                'button.ckb.is-done',
                 'button.checkin-cute-btn.is-done',
                 'text=Checkin! Got',
                 'text=Return tomorrow',
@@ -5032,10 +5074,26 @@ async def try_linuxdo_sso(page, origin_host: str = "", browser=None) -> str:
         await _sso_cleanup()
 
 
-async def maybe_sso_if_needed(page, force: bool = False, browser=None) -> str | None:
+async def maybe_sso_if_needed(
+    page, force: bool = False, browser=None, allow_linuxdo: bool = True
+) -> str | None:
+    # allow_linuxdo=False:调用方明确禁止 LinuxDO SSO(如 leileihog,用户要求
+    # 一律用站内账密登录)。此时连「授权页点允许」都不做,统一返回 NO_BUTTON,
+    # 让上层 _attempt_account_login_then_reload 用账密兜底;账密也失败就如实
+    # 报 auth_required。同时按 host 兜底判断,防止调用方漏传参数。
+    cur_url = await page_url(page)
+    try:
+        _sso_host = urlparse(cur_url).netloc
+    except Exception:
+        _sso_host = ""
+    if not allow_linuxdo or is_leileihog_site(_sso_host):
+        if not allow_linuxdo:
+            print("  LinuxDO SSO disabled for this site: account/password only", flush=True)
+        return "NO_BUTTON"
+
     # 站点把未登录访问直接重定向到 connect.linux.do/oauth2/authorize 时,
     # page 已是授权页:直接点「允许」完成授权(勿再找 origin CTA)。
-    if is_linuxdo_authorize_url(await page_url(page)):
+    if is_linuxdo_authorize_url(cur_url):
         print("  already on LinuxDO authorize page; approving directly", flush=True)
         used = await _approve_linuxdo_authorize(page)
         return "OK" if used else "TIMEOUT"
@@ -10800,15 +10858,25 @@ async def glados_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     2. 页面内含慢速第三方统计脚本 (deepshark.net)，必须使用 wait_until="commit" 导航并轮询等待主组件渲染。
     3. Daily Punch 卡片下方的 30 天日历图例常驻 "Checked in" 与 "Missed" 静态说明，
        不可用泛文本 "Checked in" 直接判已签；本函数结合：
-       - button.checkin-cute-btn.is-done 按钮完成态及按钮内反馈文案 (Checkin! Got / Please Try Tomorrow)
+       - 签到按钮 is-done 完成态及按钮内反馈文案 (Checkin! Got / Please Try Tomorrow)
        - 按钮点击触发 POST /api/user/checkin ({token: window.location.hostname})
        - /api/user/points 历史记录中的今日 checkin 明细 (business="system:checkin", detail=YYYY-MM-DD)
        需要注意的是，GLaDOS 前端刷新页面后 state.checkin 重置为 false，按钮恢复显示「签到」，
-       若 /api/user/points 已含今日签到记录，仍点击一次按钮让前端变为 .is-done ("Please Try Tomorrow")，
+       若 /api/user/points 已含今日签到记录，仍点击一次按钮让前端变为 is-done ("Please Try Tomorrow")，
        并按 pre_done 状态准确返回 ALREADY（首次当日签成则返回 OK）。
+
+    2026-11-06 前端改版适配（9222 实机 DOM 取证）:
+    - 签到按钮由 button.checkin-cute-btn 改为 button.ckb（内嵌 SVG 勾图标 + 文案
+      "Checkin"），完成态 class 为 "ckb is-done"，文案 "Checkin! Got N Points"；
+      旧版 button.checkin-cute-btn 选择器保留双兼容。
+    - 点击后按钮 DOM 可能被 React 重挂载（文本短暂找不到 Checkin 按钮），状态判定
+      以 is-done 按钮与 /api/user/points 今日记录为准，不要求按钮文本恒定存在。
     """
     kind = adapter.kind or "glados"
     site_url = adapter.url or "https://glados.rocks/console/checkin"
+    # 新版 button.ckb 优先，旧版 checkin-cute-btn 兜底（:not(.is-done) 只匹配待签态）
+    pending_btn_sel = "button.ckb:not(.is-done), button.checkin-cute-btn:not(.is-done)"
+    done_btn_sel = "button.ckb.is-done, button.checkin-cute-btn.is-done"
     print(f"  glados flow: {adapter.name} -> {site_url}", flush=True)
 
     try:
@@ -10828,8 +10896,8 @@ async def glados_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     if "/login" in cur_url or "login to glados" in body_init.lower():
         return fail_result("auth_required", detail="redirected to /login (session expired)", adapter=kind, stage="auth")
 
-    # 等待 checkin-cute-btn 挂载 (SPA 异步加载组件)
-    btn_loc = page.locator("button.checkin-cute-btn").first
+    # 等待签到按钮挂载 (SPA 异步加载组件)
+    btn_loc = page.locator(pending_btn_sel).first
     for _ in range(16):
         try:
             if await btn_loc.count() > 0 and await btn_loc.is_visible(timeout=500):
@@ -10853,38 +10921,44 @@ async def glados_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     pre_checked_today = _glados_points_has_today_checkin(pts_before)
 
     # 检查按钮是否已处于 is-done 状态
-    done_btn = page.locator("button.checkin-cute-btn.is-done").first
+    done_btn = page.locator(done_btn_sel).first
     try:
         if await done_btn.count() > 0 and await done_btn.is_visible(timeout=500):
             done_txt = (await done_btn.inner_text(timeout=500) or "").strip()
-            return confirmed_done_result(done_txt or "button.checkin-cute-btn.is-done", adapter=kind)
+            return confirmed_done_result(done_txt or "checkin button is-done", adapter=kind)
     except Exception:
         pass
 
     if await btn_loc.count() == 0 or not await btn_loc.is_visible(timeout=1500):
         if pre_checked_today:
             return confirmed_done_result("api/user/points history confirmed today", adapter=kind)
-        return fail_result("no_button", detail="button.checkin-cute-btn not visible", adapter=kind, stage="action")
+        return fail_result("no_button", detail=f"{pending_btn_sel} not visible", adapter=kind, stage="action")
 
-    # 点击 button.checkin-cute-btn 触发签到 (或触发前端切换为 Please Try Tomorrow)
+    # 点击签到按钮触发签到 (或触发前端切换为 is-done / Please Try Tomorrow)
     action = ActionEvidence(
         kind="dom_click",
-        target="button.checkin-cute-btn",
+        target=pending_btn_sel,
         attempted_at=datetime.now().isoformat(timespec="seconds"),
     )
-    print("  glados: clicking button.checkin-cute-btn...", flush=True)
+    print(f"  glados: clicking {pending_btn_sel}...", flush=True)
     try:
         await btn_loc.click(timeout=3000)
     except Exception as click_err:
         print(f"  glados click fallback force: {click_err}", flush=True)
         await btn_loc.click(timeout=3000, force=True)
 
-    # 轮询等待前端状态更新 (checkin() 内含 1s 延迟后 setState({checkin: true, message: a.message}))
+    # 轮询等待前端状态更新。新版前端点击后可能重挂载按钮 DOM（text 短暂消失），
+    # 所以除按钮态外，每轮都复查 /api/user/points 今日落账作为硬确认。
+    ok_text_seen = False
     for _ in range(15):
         await asyncio.sleep(0.7)
         text_poll = await page_text(page, 1200)
         if "device-mismatch" in text_poll.lower() or "login device" in text_poll.lower():
             return fail_result("auth_required", detail="GLaDOS checkin device-mismatch; relogin required", adapter=kind, action=action, stage="auth")
+
+        # 硬确认: 今日 checkin 已落账（OK 或 ALREADY 均从此放行）
+        pts_poll = await _glados_fetch_points(page)
+        posted_today = _glados_points_has_today_checkin(pts_poll)
 
         try:
             if await done_btn.count() > 0 and await done_btn.is_visible(timeout=400):
@@ -10908,22 +10982,8 @@ async def glados_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
                         transition="NONE",
                         attribution="precheck",
                     )
-                if "checkin! got" in msg_low or "got" in msg_low or "points" in msg_low:
-                    return ok_result(
-                        "OK",
-                        adapter=kind,
-                        detail=btn_msg,
-                        action=action,
-                        confirmation=dom_confirmation(btn_msg, done_state=True),
-                        pre_state="PENDING",
-                        post_state="DONE",
-                        transition="PENDING_TO_DONE",
-                        attribution="runner",
-                    )
-                # 其它 is-done 消息，复查 /api/user/points 今日记录
-                pts_after = await _glados_fetch_points(page)
-                if _glados_points_has_today_checkin(pts_after):
-                    status_val: Status = "ALREADY" if pre_checked_today else "OK"
+                if "checkin! got" in msg_low or "got" in msg_low or "points" in msg_low or posted_today:
+                    status_val = "ALREADY" if pre_checked_today else "OK"
                     return ok_result(
                         status_val,
                         adapter=kind,
@@ -10935,8 +10995,26 @@ async def glados_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
                         transition="NONE" if pre_checked_today else "PENDING_TO_DONE",
                         attribution="precheck" if pre_checked_today else "runner",
                     )
+                # 其它 is-done 消息，复查 /api/user/points 今日记录
+                if posted_today:
+                    return ok_result(
+                        "ALREADY" if pre_checked_today else "OK",
+                        adapter=kind,
+                        detail=btn_msg or "glados checked in today",
+                        action=action,
+                        confirmation=dom_confirmation(btn_msg or "glados checked in today", done_state=True),
+                        pre_state="DONE" if pre_checked_today else "PENDING",
+                        post_state="DONE",
+                        transition="NONE" if pre_checked_today else "PENDING_TO_DONE",
+                        attribution="precheck" if pre_checked_today else "runner",
+                    )
         except Exception:
             pass
+
+        # 按钮尚未变 is-done：若 API 已落账（新版前端重挂载窗口期），直接确认
+        if posted_today:
+            ok_text_seen = True
+            break
 
     # 兜底核对 /api/user/points 今日是否已落账
     pts_final = await _glados_fetch_points(page)
@@ -10954,6 +11032,10 @@ async def glados_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
             transition="NONE" if pre_checked_today else "PENDING_TO_DONE",
             attribution="precheck" if pre_checked_today else "runner",
         )
+
+    if ok_text_seen:
+        # 极端窗口: API 曾落账但最终复查又查不到（网络瞬断），按无确认处理重试由外层负责
+        print("  glados: ok_text_seen but final points recheck failed", flush=True)
 
     text_final = await page_text(page, 600)
     return fail_result("no_confirm", detail=text_final[:100], adapter=kind, action=action, stage="confirm")
@@ -13313,6 +13395,15 @@ def is_pipiwangcom_site(site_url: str) -> bool:
     return "pipiwangcom.com" in (site_url or "").lower()
 
 
+def is_leileihog_site(site_url: str) -> bool:
+    """一梦五千年 fapi.leileihog.top 专属站判定。
+
+    用户 2026-11-07 明确要求:本站登录只用用户名/密码,禁止 LinuxDO SSO。
+    凡是命中本站的 SSO 路径都要让位给账密登录。
+    """
+    return "leileihog.top" in (site_url or "").lower()
+
+
 async def _pipiwangcom_console_ready(page) -> bool:
     """签到按钮只在登录后的控制台可见;落地页里同名节点是隐藏的。"""
     try:
@@ -13392,6 +13483,8 @@ async def legacy_checkin_on_page(
     sign_selectors = adapter.sign_selectors
     already_selectors = adapter.already_selectors
     kind = adapter.kind
+    # 站点级 SSO 开关:leileihog 用户明确要求只用账密登录,禁用 LinuxDO SSO。
+    sso_disabled = is_leileihog_site(site_url)
     action: ActionEvidence | None = None
     try:
         if kind == "cross" or is_cross_site(site_url):
@@ -13508,7 +13601,13 @@ async def legacy_checkin_on_page(
                 cta_preferred = True
                 print(f"  site CTA before auth: {pre_used}", flush=True)
 
-        sso_status = None if cta_preferred else await maybe_sso_if_needed(page, browser=browser)
+        sso_status = (
+            None
+            if cta_preferred
+            else await maybe_sso_if_needed(
+                page, browser=browser, allow_linuxdo=not sso_disabled
+            )
+        )
         if sso_status in ("CLOUDFLARE", "TIMEOUT", "UPSTREAM_UNAVAILABLE") or (
             sso_status and str(sso_status).startswith("FAIL")
         ):
@@ -13519,6 +13618,12 @@ async def legacy_checkin_on_page(
             if looks_logged_out(text0) and btn0 is None:
                 if await _attempt_account_login_then_reload(page, adapter, site_url):
                     pass  # logged in via account+password; fall through to CTA scan
+                elif sso_disabled:
+                    return fail_result(
+                        "auth_required",
+                        detail="账号密码登录失败(LinuxDO SSO 已禁用)",
+                        adapter=kind,
+                    )
                 else:
                     return fail_result("auth_required", detail="login page without supported SSO", adapter=kind)
         if (
@@ -13551,7 +13656,9 @@ async def legacy_checkin_on_page(
             reason, detail = page_block
             return fail_result(reason, detail=detail, adapter=kind)
         if looks_logged_out(text) and not cta_preferred:
-            sso_status = await maybe_sso_if_needed(page, force=True, browser=browser)
+            sso_status = await maybe_sso_if_needed(
+                page, force=True, browser=browser, allow_linuxdo=not sso_disabled
+            )
             if sso_status == "OK":
                 await asyncio.sleep(2.5)
                 await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
@@ -13566,6 +13673,12 @@ async def legacy_checkin_on_page(
                 if btn0 is None and looks_logged_out(await page_text(page, 500)):
                     if await _attempt_account_login_then_reload(page, adapter, site_url):
                         sso_status = "OK"  # account login cleared the gate
+                    elif sso_disabled:
+                        return fail_result(
+                            "auth_required",
+                            detail="账号密码登录失败(LinuxDO SSO 已禁用)",
+                            adapter=kind,
+                        )
                     else:
                         return fail_result("auth_required", detail="login page without supported SSO", adapter=kind)
             if looks_logged_out(await page_text(page, 500)):
@@ -13573,6 +13686,12 @@ async def legacy_checkin_on_page(
                 if btn0 is None:
                     if await _attempt_account_login_then_reload(page, adapter, site_url):
                         sso_status = "OK"  # account login cleared the gate
+                    elif sso_disabled:
+                        return fail_result(
+                            "auth_required",
+                            detail="账号密码登录失败(LinuxDO SSO 已禁用)",
+                            adapter=kind,
+                        )
                     else:
                         return fail_result("auth_required", detail=sso_fail_msg(sso_status or "unknown"), adapter=kind)
 
@@ -13671,7 +13790,9 @@ async def legacy_checkin_on_page(
 
         if btn is None:
             if looks_logged_out(await page_text(page, 400)):
-                sso_status = await maybe_sso_if_needed(page, force=True, browser=browser)
+                sso_status = await maybe_sso_if_needed(
+                    page, force=True, browser=browser, allow_linuxdo=not sso_disabled
+                )
                 if sso_status == "OK":
                     await asyncio.sleep(2.5)
                     await page.goto(site_url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
@@ -13713,7 +13834,9 @@ async def legacy_checkin_on_page(
                 # New-API console/personal sites (grok-heavy, etc.).
                 if is_auth_gated_empty(preview) and sso_status != "OK":
                     print("  auth-gated empty page → force SSO + re-goto", flush=True)
-                    sso_retry = await maybe_sso_if_needed(page, force=True, browser=browser)
+                    sso_retry = await maybe_sso_if_needed(
+                        page, force=True, browser=browser, allow_linuxdo=not sso_disabled
+                    )
                     if sso_retry == "OK":
                         await asyncio.sleep(2.5)
                         try:
@@ -15725,8 +15848,14 @@ def run_doctor() -> int:
         add("FAIL", "CDP", f"发现流程异常: {exc}")
 
     # 2) 后端 API 8765(期望 401=存活且鉴权开启;200=存活)
+    # Web 面板可能已整体迁移到云端节点(2026-11-06 Mac->pxed): 迁移节点上本机
+    # 8765/8766 本就不该运行, 设 DAILY_CHECKIN_WEB_MIGRATED_REMOTE=1 后报 SKIP
+    # 而非 FAIL, 避免 doctor 恒定 exit=2 掩盖真实故障。
+    web_migrated_remote = os.environ.get("DAILY_CHECKIN_WEB_MIGRATED_REMOTE", "").strip() == "1"
     api = _doctor_http_status("http://127.0.0.1:8765/api/state")
-    if api in (200, 401):
+    if web_migrated_remote:
+        add("SKIP", "API 8765", f"HTTP {api}(本机 web 已迁移云端看板, 仅 cron CLI 模式)")
+    elif api in (200, 401):
         # GET /api/state 是 web.py 设计的公开探活端点(200 空 state);其余 /api/* 需鉴权
         add("OK", "API 8765", f"HTTP {api}(存活)")
     else:
@@ -15734,7 +15863,9 @@ def run_doctor() -> int:
 
     # 3) 前端 8766
     fe = _doctor_http_status("http://127.0.0.1:8766/")
-    if fe == 200:
+    if web_migrated_remote:
+        add("SKIP", "FE 8766", f"HTTP {fe}(本机前端已迁移云端看板)")
+    elif fe == 200:
         add("OK", "FE 8766", "HTTP 200")
     else:
         add("FAIL", "FE 8766", f"HTTP {fe}(应启动 scripts/serve-frontend.py --port 8766)")

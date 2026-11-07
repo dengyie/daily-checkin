@@ -524,6 +524,28 @@ code, pre {
   margin-bottom: 20px;
 }
 
+/* 平台（执行节点）筛选行：默认隐藏，remote 多节点时由 JS 加 is-visible。
+   与状态筛选行拉开小间距，chip 用平台蓝以示这是渠道维度而非状态维度。 */
+.node-filter-chips {
+  display: none;
+  margin-top: -10px;
+}
+
+.node-filter-chips.is-visible {
+  display: block;
+}
+
+.node-filter-chips .ui-chip-btn {
+  border-color: rgba(59, 130, 246, 0.35);
+  color: rgba(59, 130, 246, 0.95);
+}
+
+.node-filter-chips .ui-chip-btn.active {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(59, 130, 246, 0.65);
+  color: var(--text-main);
+}
+
 .tiles-spread-container {
   display: flex;
   flex-direction: column;
@@ -2203,3 +2225,35 @@ html[data-resolved-theme="light"] .balance-top-item:hover {
   background: #f1f5f9;
 }
 
+
+/* ============================================================
+   Dispatch node bar (remote mode job queue header)
+   ============================================================ */
+.dispatch-node-bar {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dispatch-node-bar.is-visible {
+  display: flex;
+}
+
+.dispatch-node-hint {
+  font-size: 12px;
+  opacity: 0.65;
+  margin-left: 4px;
+}
+
+.dispatch-job-node {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* Task tile execution-channel chip (multi-node: node is just a parameter) */
+.tile-category-tag.node {
+  color: var(--accent, #3b82f6);
+  border-color: rgba(59, 130, 246, 0.35);
+  background: rgba(59, 130, 246, 0.10);
+}

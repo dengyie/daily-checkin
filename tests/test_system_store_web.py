@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from unittest import mock
 from datetime import datetime
@@ -2307,6 +2308,676 @@ class SiteConfigUpdateApiTests(unittest.TestCase):
             args = mock_subrun.call_args[0][0]
             self.assertEqual(args[:4], ["taskkill", "/F", "/T", "/PID"])
             self.assertEqual(args[4], "999999")
+
+
+class LocalModeDispatchEndpointTests(unittest.TestCase):
+    """Legacy local mode (default, executor on the same host) must be untouched:
+    no dispatch store, node callbacks unreachable, /api/run still local-executes."""
+
+    def setUp(self):
+        self._backup = os.environ.pop("DAILY_CHECKIN_DISPATCH_MODE", None)
+        self.td = TemporaryDirectory()
+        self.store = SystemStore(Path(self.td.name) / "system.db")
+        self.app = CheckinWebApp(self.store, FakeCredentials())
+        self.server = __import__("http.server").server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.app.handler()
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+
+    def tearDown(self):
+        self.conn.close()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(3)
+        self.td.cleanup()
+        if self._backup is not None:
+            os.environ["DAILY_CHECKIN_DISPATCH_MODE"] = self._backup
+
+    def test_local_mode_has_no_dispatch_store(self):
+        self.assertIsNone(self.app.dispatch)
+        self.assertIsNone(self.app.delivery)
+        self.assertEqual(self.app.dispatch_mode, "local")
+
+    def test_node_callbacks_are_401_without_dispatch(self):
+        headers = {"Content-Type": "application/json", "X-Node-Token": "anything"}
+        self.conn.request("POST", "/api/dispatch/heartbeat", "{}", headers)
+        response = self.conn.getresponse()
+        data = json.loads(response.read())
+        self.assertEqual(response.status, 401)
+        self.assertEqual(data["error"], "auth")
+
+    def test_local_run_still_uses_legacy_executor(self):
+        with mock.patch.object(self.app.executor, "submit", return_value=55) as submit:
+            headers = {
+                "Content-Type": "application/json",
+                "X-CSRF-Token": self.app.csrf,
+                "Authorization": "Bearer " + self.app.auth_token,
+            }
+            self.conn.request("POST", "/api/run", json.dumps({"sites": ["A"]}), headers)
+            response = self.conn.getresponse()
+            data = json.loads(response.read())
+            self.assertEqual(response.status, 202)
+            self.assertEqual(data["job_id"], 55)
+            submit.assert_called_once_with(["A"])
+
+
+class DispatchUiContractTests(unittest.TestCase):
+    """Dispatch 前端契约（源码锚定式，仓库无前端 JS 测试框架）。"""
+
+    def setUp(self):
+        web = Path(__file__).resolve().parents[1] / "web"
+        self.app_js = (web / "app.js").read_text(encoding="utf-8")
+        self.index_html = (web / "index.html").read_text(encoding="utf-8")
+        self.style_css = (web / "style.css").read_text(encoding="utf-8")
+
+    def test_trigger_run_renders_remote_push_toast_without_hardcoded_cdp(self):
+        self.assertIn('data.mode === "remote"', self.app_js)
+        self.assertIn("已直推对应节点执行", self.app_js)
+        # 误导性写死文案必须移除（作业 #420 根因之一）。
+        self.assertNotIn("正在附着 Chrome 9222", self.app_js)
+
+    def test_manual_complete_handles_dispatch_queue_response(self):
+        self.assertIn('res.queued && res.mode === "remote"', self.app_js)
+        self.assertIn("已发布手动完成指令至节点", self.app_js)
+
+    def test_queue_view_renders_dispatch_node_bar(self):
+        self.assertIn('id="dispatch-node-bar"', self.index_html)
+        self.assertIn("renderQueueView", self.app_js)
+        m = self.app_js.index("function renderQueueView")
+        block = self.app_js[m:self.app_js.index("function renderHealthView")]
+        self.assertIn("state.dispatch", block)
+        self.assertIn('dispatch.mode === "remote"', block)
+        self.assertIn("n.online", block)
+        self.assertIn("在线", block)
+        self.assertIn("离线", block)
+        self.assertIn("j.node", block)
+
+    def test_dispatch_node_styles_exist_without_inline_styles(self):
+        self.assertIn(".dispatch-node-bar", self.style_css)
+        self.assertIn(".dispatch-node-bar.is-visible", self.style_css)
+        self.assertIn(".dispatch-node-hint", self.style_css)
+        self.assertIn(".dispatch-job-node", self.style_css)
+        self.assertNotIn("style=", self.index_html)
+        self.assertNotIn("style=", self.app_js)
+
+    def test_trigger_run_handles_multi_node_job_list(self):
+        m = self.app_js.index("async function triggerRun")
+        block = self.app_js[m:self.app_js.index("async function", m + 10)]
+        self.assertIn("data.jobs ||", block)
+        self.assertIn("已直推对应节点执行", block)
+        # 旧的单作业文案被多作业摘要取代（仍然兼容单作业回退形状）。
+        self.assertIn("job_id: data.job_id", block)
+
+    def test_task_tile_renders_execution_channel_chip(self):
+        """统一清单：执行平台只是任务上的渠道参数（tile-category-tag node）。"""
+        m = self.app_js.index("function renderTile(")
+        block = self.app_js[m:self.app_js.index("function renderTilesGrid")]
+        self.assertIn('tile-category-tag node', block)
+        self.assertIn("task.node", block)
+        self.assertIn("执行渠道", block)
+        self.assertIn(".tile-category-tag.node", self.style_css)
+
+    def test_tasks_view_renders_platform_filter_chips(self):
+        """平台分组筛选：remote 模式下按执行节点拆分清单（待签计数），与状态筛选正交。"""
+        m = self.app_js.index("function renderTasksView")
+        block = self.app_js[m:self.app_js.index("function renderManualView")]
+        self.assertIn('id="tasks-node-filter-chips"', self.index_html)
+        self.assertIn("#tasks-node-filter-chips", block)
+        self.assertIn("currentNodeFilter", block)
+        # 每个节点 chip 带该平台任务总数与待签计数
+        self.assertIn("待签", block)
+        self.assertIn("全签", block)
+        # getFilteredTasks 里 node 筛选只在 remote 模式应用（本地模式不误伤）。
+        # 注意函数顺序: getFilteredTasks 之后紧跟 renderTile。
+        g = self.app_js.index("function getFilteredTasks")
+        gblock = self.app_js[g:self.app_js.index("function renderTile(")]
+        self.assertIn("currentNodeFilter", gblock)
+        self.assertIn('state.dispatch && state.dispatch.mode === "remote"', gblock)
+        # 选中事件绑定 + CSS 存在且默认隐藏
+        self.assertIn("nodeFilterChips.addEventListener", self.app_js)
+        self.assertIn(".node-filter-chips", self.style_css)
+        self.assertIn(".node-filter-chips.is-visible", self.style_css)
+
+    def test_node_filter_select_strips_full_count_paren_group(self):
+        """节点 chip 选中解析必须整组剥离计数括号（2026-11-07 实测踩坑回归锚点）。
+
+        chip 文案形如 "mac (114 · 待签113)"：旧解析 \\(\\d+\\)$ 只认纯数字尾、
+        匹配失败，再剥 ·.*$ 后残留 "mac (114" —— 过滤条件恒假 → 点 mac/win
+        平台标签得到空清单。修复=经共享 parseChipValue 整组剥离。
+        """
+        m = self.app_js.index("const nodeFilterChips")
+        block = self.app_js[m:self.app_js.index("const manualFilterChips")]
+        self.assertIn("parseChipValue(", block)
+        # 旧的缺陷正则不得回到本 handler（纯数字尾匹配在 "· 待签N)" 形态下必然失败）
+        self.assertNotIn(r'replace(/\s*\(\d+\)$/, "")', block)
+        self.assertNotIn(r'replace(/\s*·.*$/', block)
+
+    def test_chip_value_round_trip_shared_helper(self):
+        """「label ↔ 筛选值」往返契约收敛到共享 stripCountSuffix/parseChipValue。
+
+        深度 review（2026-11-07）：同类 \\(\\d+\\)$ 解析散在 prompt-chips 组件
+        高亮 + filterChips / manualFilterChips / nodeFilterChips 三处 select，
+        任一处往 label 加后缀就会静默复现空集 bug——必须单点实现。
+        """
+        self.assertIn("function stripCountSuffix", self.app_js)
+        self.assertIn("function parseChipValue", self.app_js)
+        self.assertIn(r'replace(/\s*\([^)]*\)\s*$/, "")', self.app_js)
+        for anchor in ("filterChips.addEventListener", "nodeFilterChips.addEventListener",
+                       "manualFilterChips.addEventListener"):
+            m = self.app_js.index(anchor)
+            block = self.app_js[m:m + 400]
+            self.assertIn("parseChipValue(", block, anchor)
+        # prompt-chips 组件的 active 高亮匹配同契约（第 5 处同类，组件内联正则退役）
+        self.assertIn("const activeClean = stripCountSuffix(active)", self.app_js)
+        self.assertIn("const itemClean = stripCountSuffix(item)", self.app_js)
+        # 旧纯数字尾正则全量退役（全文件范围，含组件）
+        self.assertNotIn(r'replace(/\s*\(\d+\)$/, "")', self.app_js)
+
+    def test_node_filter_uses_dispatch_default_node_fallback(self):
+        """过滤与 chip 计数同口径：缺 node 行按 default_node 归属，而非硬编码 mac。
+
+        深度 review（2026-11-07）：getFilteredTasks 用 `t.node || "mac"`、节点
+        chip 计数用 `t.node || dispatch.default_node || "mac"`——default_node 改为
+        非 mac 时会出现「计入 chip 计数却被该 chip 筛选排除」的隐形行。
+        """
+        g = self.app_js.index("function getFilteredTasks")
+        gblock = self.app_js[g:self.app_js.index("function renderTile(")]
+        self.assertIn("state.dispatch.default_node", gblock)
+        self.assertNotIn('t.node || "mac"', gblock)
+
+    def test_node_filter_resets_when_node_deregistered(self):
+        """节点下线/改名后陈旧筛选自愈：过滤前把失效节点选择重置为「全部」。
+
+        深度 review（2026-11-07）：remove-node 后 chips 高亮回落「全部」但
+        currentNodeFilter 仍按旧节点名硬滤 → 0 卡片且无提示。重置必须发生在
+        getFilteredTasks() 之前（renderTasksView 开头），否则晚一拍。
+        """
+        m = self.app_js.index("function renderTasksView")
+        block = self.app_js[m:self.app_js.index("function renderManualView")]
+        self.assertIn("liveNames.includes(currentNodeFilter)", block)
+        self.assertIn('currentNodeFilter = "全部"', block)
+        # 自愈先于过滤执行（注释里出现 getFilteredTasks() 字样，用语句全文锚定）
+        self.assertLess(block.index("liveNames.includes(currentNodeFilter)"),
+                        block.index("const filteredTasks = getFilteredTasks()"))
+
+    def test_node_chip_active_highlight_exact_prefix(self):
+        """chip 高亮精确到 "名称 (" 前缀：节点名互为前缀（win / win-x）时不点亮错误项。"""
+        m = self.app_js.index("const activeSug")
+        block = self.app_js[m:m + 400]
+        self.assertIn("startsWith(`${currentNodeFilter} (`", block)
+
+
+class DispatchRemoteWebTests(unittest.TestCase):
+    """Cloud-panel ("remote") dispatch mode: /api/run only enqueues and the
+    node callbacks (result/heartbeat) authenticate with the per-node token.
+
+    The local-mode /api/run contract is covered by WebTests above and must
+    stay untouched — dispatch is opt-in via DAILY_CHECKIN_DISPATCH_MODE.
+    """
+
+    def setUp(self):
+        self._env_backup = {
+            key: os.environ.pop(key, None)
+            for key in (
+                "DAILY_CHECKIN_DISPATCH_MODE",
+                "DAILY_CHECKIN_DISPATCH_DB",
+                "DAILY_CHECKIN_DISPATCH_SWEEP_INTERVAL",
+                "DAILY_CHECKIN_WEB_PASSWORD",
+            )
+        }
+        os.environ["DAILY_CHECKIN_DISPATCH_MODE"] = "remote"
+        self.td = TemporaryDirectory()
+        os.environ["DAILY_CHECKIN_DISPATCH_DB"] = str(Path(self.td.name) / "dispatch.db")
+        # Keep the background delivery thread idle for the whole test; the
+        # sweeper is exercised directly in tests/test_dispatch.py.
+        os.environ["DAILY_CHECKIN_DISPATCH_SWEEP_INTERVAL"] = "3600"
+        self.store = SystemStore(Path(self.td.name) / "system.db")
+        self.creds = FakeCredentials()
+        self.app = CheckinWebApp(self.store, self.creds)
+        self.node_token = self.app.dispatch.add_node("mac", "http://127.0.0.1:19999")
+        self.server = __import__("http.server").server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self.app.handler()
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+
+    def tearDown(self):
+        self.conn.close()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(3)
+        self.td.cleanup()
+        for key, value in self._env_backup.items():
+            if value is not None:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+
+    def request_json(self, method, path, body=None, csrf=None, auth=None, node_token=None):
+        headers = {"Content-Type": "application/json"}
+        if csrf is not None:
+            headers["X-CSRF-Token"] = csrf
+        if auth is not None:
+            headers["Authorization"] = "Bearer " + auth
+        if node_token is not None:
+            headers["X-Node-Token"] = node_token
+        self.conn.request(method, path, json.dumps(body or {}).encode(), headers)
+        response = self.conn.getresponse()
+        data = json.loads(response.read())
+        return response.status, data
+
+    def test_run_endpoint_enqueues_dispatch_job_without_local_execution(self):
+        status, data = self.request_json(
+            "POST", "/api/run", {"sites": ["伏枥"]}, self.app.csrf, auth=self.app.auth_token
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(data["mode"], "remote")
+        self.assertEqual(data["node"], "mac")
+        job = self.app.dispatch.get_job(data["job_id"])
+        self.assertEqual(job["kind"], "site")
+        self.assertEqual(job["sites"], ["伏枥"])
+        self.assertEqual(job["status"], "queued")
+        # Nothing was handed to the legacy in-process executor.
+        self.assertEqual(self.app.executor._queue.qsize(), 0)
+
+    def test_run_all_endpoint_enqueues_all_kind(self):
+        status, data = self.request_json(
+            "POST", "/api/run", {"sites": []}, self.app.csrf, auth=self.app.auth_token
+        )
+        self.assertEqual(status, 202)
+        job = self.app.dispatch.get_job(data["job_id"])
+        self.assertEqual(job["kind"], "all")
+
+    def test_multi_node_run_fans_out_per_node_jobs(self):
+        """Mixed Mac/Windows selection → one queued job per node (site_nodes map)."""
+        self.app.dispatch.add_node("win", "http://127.0.0.1:19778")
+        self.app.dispatch.set_site_node("hiyo", "win")
+        self.app.dispatch.set_site_node("relayfor", "win")
+        status, data = self.request_json(
+            "POST", "/api/run", {"sites": ["伏枥", "hiyo", "A", "relayfor"]},
+            self.app.csrf, auth=self.app.auth_token,
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(data["mode"], "remote")
+        # Two jobs, first-seen node order; back-compat top-level shape absent
+        # for multi-job responses (frontend reads data.jobs).
+        self.assertEqual(len(data["jobs"]), 2)
+        self.assertEqual(data["jobs"][0]["node"], "mac")
+        self.assertEqual(data["jobs"][0]["sites"], ["伏枥", "A"])
+        self.assertEqual(data["jobs"][1]["node"], "win")
+        self.assertEqual(data["jobs"][1]["sites"], ["hiyo", "relayfor"])
+        self.assertNotIn("job_id", data)
+        job_a = self.app.dispatch.get_job(data["jobs"][0]["job_id"])
+        job_b = self.app.dispatch.get_job(data["jobs"][1]["job_id"])
+        self.assertEqual(job_a["kind"], "site")
+        self.assertEqual(job_a["node"], "mac")
+        self.assertEqual(job_b["node"], "win")
+
+    def test_run_all_fans_out_to_every_registered_node(self):
+        """一次触发，多平台并行：run_all 为每个注册节点各入队一个全量批次作业。"""
+        self.app.dispatch.add_node("win", "http://127.0.0.1:19778")
+        status, data = self.request_json(
+            "POST", "/api/run", {"sites": []}, self.app.csrf, auth=self.app.auth_token
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(data["mode"], "remote")
+        self.assertEqual(
+            [(j["node"], j["sites"]) for j in data["jobs"]], [("mac", []), ("win", [])]
+        )
+        kinds = {self.app.dispatch.get_job(j["job_id"])["kind"] for j in data["jobs"]}
+        self.assertEqual(kinds, {"all"})
+
+    def test_state_merges_node_replica_tasks_with_channel_tags(self):
+        """统一清单：面板把其它节点的只读副本任务合并进 /api/state，
+        每行带 node 渠道参数（2026-11-06 win=system-win.db）。"""
+        day = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        self.store.upsert_task(day, "伏枥", "https://dash.free-ai.de5.net/profile")
+        win_replica = Path(self.td.name) / "system-win.db"
+        win_store = SystemStore(win_replica)
+        win_store.upsert_task(day, "hiyo", "https://hiyo.example")
+        os.environ["DAILY_CHECKIN_NODE_REPLICAS"] = f"win={win_replica}"
+        try:
+            _, state = self.request_json("GET", "/api/state", auth=self.app.auth_token)
+        finally:
+            os.environ.pop("DAILY_CHECKIN_NODE_REPLICAS", None)
+        nodes = {t["name"]: t["node"] for t in state["tasks"]}
+        # Primary replica rows tagged with the default node.
+        self.assertEqual(nodes.get("伏枥"), "mac")
+        # Second replica's rows merged and tagged with their channel.
+        self.assertEqual(nodes.get("hiyo"), "win")
+        # The panel must not have written to the replica (read-only merge).
+        self.assertEqual(
+            [t["status"] for t in win_store.tasks(day) if t["name"] == "hiyo"],
+            ["pending"],
+        )
+
+    def test_state_missing_replica_is_tolerated(self):
+        os.environ["DAILY_CHECKIN_NODE_REPLICAS"] = (
+            f"win={Path(self.td.name) / 'nonexistent.db'}"
+        )
+        try:
+            status, state = self.request_json("GET", "/api/state", auth=self.app.auth_token)
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                [t["node"] for t in state["tasks"]],
+                ["mac"] * len(state["tasks"]),
+            )
+        finally:
+            os.environ.pop("DAILY_CHECKIN_NODE_REPLICAS", None)
+
+    def test_single_node_run_keeps_backcompat_shape(self):
+        status, data = self.request_json(
+            "POST", "/api/run", {"sites": ["伏枥"]}, self.app.csrf, auth=self.app.auth_token
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(data["job_id"], data["jobs"][0]["job_id"])
+        self.assertEqual(data["node"], "mac")
+
+    def test_manual_complete_routes_via_site_node_map(self):
+        self.app.dispatch.add_node("win", "http://127.0.0.1:19778")
+        self.app.dispatch.set_site_node("hiyo", "win")
+        day = datetime.now().strftime("%Y-%m-%d")
+        self.store.upsert_task(day, "hiyo", "")
+        status, data = self.request_json(
+            "POST", "/api/tasks/complete", {"name": "hiyo", "day": day},
+            self.app.csrf, auth=self.app.auth_token,
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(data["node"], "win")
+        job = self.app.dispatch.get_job(data["job_id"])
+        self.assertEqual(job["node"], "win")
+        self.assertEqual(job["payload"], {"site": "hiyo", "day": day})
+
+    def test_tasks_complete_enqueues_manual_dispatch_job(self):
+        self.store.upsert_task(datetime.now().strftime("%Y-%m-%d"), "pmcat", "")
+        day = datetime.now().strftime("%Y-%m-%d")
+        status, data = self.request_json(
+            "POST", "/api/tasks/complete", {"name": "pmcat", "day": day},
+            self.app.csrf, auth=self.app.auth_token,
+        )
+        self.assertEqual(status, 202)
+        self.assertTrue(data["queued"])
+        self.assertEqual(data["mode"], "remote")
+        job = self.app.dispatch.get_job(data["job_id"])
+        self.assertEqual(job["kind"], "manual")
+        self.assertEqual(job["payload"], {"site": "pmcat", "day": day})
+        # The replica DB must stay untouched by the panel itself.
+        row = self.store.tasks(day)
+        statuses = [t["status"] for t in row if t["name"] == "pmcat"]
+        self.assertEqual(statuses, ["pending"])
+
+    def test_remote_mode_blocks_authoritative_writes(self):
+        """Only Obsidian sync stays hard-blocked: everything else now
+        dispatches a job to the owning node instead of refusing."""
+        status, data = self.request_json(
+            "POST", "/api/sync/obsidian", {"day": "2026-11-06"},
+            self.app.csrf, auth=self.app.auth_token,
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("执行节点", data["error"])
+
+    def test_authoritative_writes_dispatch_instead_of_blocking(self):
+        """Every panel write to the authoritative DB / keychain enqueues a
+        job for the owning node and returns 202 with dispatch metadata."""
+        day = datetime.now().strftime("%Y-%m-%d")
+        cases = (
+            ("/api/tasks", {"name": "newsite", "url": "https://a.example"}, "add_site"),
+            ("/api/sites/update", {"name": "newsite", "checkin_mode": "manual"}, "update_site"),
+            ("/api/credentials", {"site": "newsite", "kind": "token", "secret": "s3cret"}, "set_credential"),
+            ("/api/credentials/delete", {"ref": "site:newsite:token"}, "delete_credential"),
+            ("/api/config/update", {"configs": {"batch_timeout_s": 600}}, "update_config"),
+            ("/api/sites/balance", {"name": "newsite", "amount": "12.5"}, "update_balance"),
+        )
+        for path, body, expected_kind in cases:
+            status, data = self.request_json(
+                "POST", path, body, self.app.csrf, auth=self.app.auth_token
+            )
+            self.assertEqual(status, 202, path)
+            self.assertTrue(data["queued"], path)
+            self.assertEqual(data["mode"], "remote", path)
+            job = self.app.dispatch.get_job(data["job_id"])
+            self.assertEqual(job["kind"], expected_kind, path)
+            self.assertEqual(job["status"], "queued", path)
+
+    def test_sites_delete_enqueues_delete_site_dispatch_job(self):
+        """Remote deletion dispatches to the executor node owning the
+        authoritative DB + credentials backend; the panel replica stays
+        untouched until the node executes and syncs back."""
+        self.app.dispatch.add_node("win", "http://127.0.0.1:19778")
+        self.app.dispatch.set_site_node("hiyo", "win")
+        status, data = self.request_json(
+            "POST", "/api/sites/delete", {"name": "hiyo"},
+            self.app.csrf, auth=self.app.auth_token,
+        )
+        self.assertEqual(status, 202)
+        self.assertTrue(data["queued"])
+        self.assertEqual(data["mode"], "remote")
+        self.assertEqual(data["node"], "win")
+        job = self.app.dispatch.get_job(data["job_id"])
+        self.assertEqual(job["kind"], "delete_site")
+        self.assertEqual(job["payload"], {"site": "hiyo", "ignore_missing": False})
+
+    def test_node_callback_requires_token(self):
+        status, data = self.request_json("POST", "/api/dispatch/result", {"job_id": 1, "status": "done"})
+        self.assertEqual(status, 401)
+        self.assertEqual(data["error"], "auth")
+        status, _ = self.request_json(
+            "POST", "/api/dispatch/result", {"job_id": 1, "status": "done"},
+            node_token="wrong-token",
+        )
+        self.assertEqual(status, 401)
+
+    def test_node_result_rejects_invalid_status_and_job_id(self):
+        status, data = self.request_json(
+            "POST", "/api/dispatch/result", {"job_id": 1, "status": "running"},
+            node_token=self.node_token,
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("status", data["error"])
+        status, data = self.request_json(
+            "POST", "/api/dispatch/result", {"job_id": "abc", "status": "done"},
+            node_token=self.node_token,
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("job_id", data["error"])
+
+    def test_run_validation_still_enforced_in_remote_mode(self):
+        status, data = self.request_json(
+            "POST", "/api/run", {"sites": "not-a-list"}, self.app.csrf, auth=self.app.auth_token
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("list", data["error"])
+        status, data = self.request_json(
+            "POST", "/api/run", {"sites": ["A,B"]}, self.app.csrf, auth=self.app.auth_token
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("comma", data["error"])
+        # Nothing was enqueued by the rejected payloads.
+        self.assertEqual(self.app.dispatch.jobs(10), [])
+
+    def test_tasks_complete_validation_enforced_in_remote_mode(self):
+        status, data = self.request_json(
+            "POST", "/api/tasks/complete", {"name": "pmcat", "day": "2026/11/06"},
+            self.app.csrf, auth=self.app.auth_token,
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("day format", data["error"])
+        self.assertEqual(self.app.dispatch.jobs(10), [])
+
+    def test_state_does_not_materialize_replica(self):
+        """Panel host treats system.db as a read-only replica: /api/state must
+        not create pending rows (materialize=False), while the executor-side
+        default snapshot() still materializes."""
+        day = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        with self.store.connect() as db:
+            db.execute(
+                """INSERT INTO sites(name,url,provider,checkin_mode,enabled,created_at,updated_at)
+                   VALUES('新站X','https://x.example','legacy_browser','auto',1,?,?)""",
+                (now, now),
+            )
+        _, state = self.request_json("GET", "/api/state", auth=self.app.auth_token)
+        self.assertEqual([t["name"] for t in state["tasks"] if t["name"] == "新站X"], [])
+        # Default snapshot() (executor-local web UI behaviour) still materializes.
+        self.store.snapshot(day)
+        _, state2 = self.request_json("GET", "/api/state", auth=self.app.auth_token)
+        self.assertIn("新站X", [t["name"] for t in state2["tasks"]])
+
+    def test_node_result_finishes_delivered_job(self):
+        _, data = self.request_json(
+            "POST", "/api/run", {"sites": ["伏枥"]}, self.app.csrf, auth=self.app.auth_token
+        )
+        job_id = data["job_id"]
+        # Ownership guard still holds from 'queued' (2026-11-06 race fix lets
+        # the owning node close an accepted-but-undelivered job, so prove
+        # non-owners cannot via store-level ownership, then use the real token
+        # for the HTTP path).
+        self.assertFalse(self.app.dispatch.finish(job_id, "other-node", "done", 0, "forged"))
+        self.assertEqual(self.app.dispatch.get_job(job_id)["status"], "queued")
+        # Outcome callback beats the delivery CAS (fast node): result wins.
+        status, data = self.request_json(
+            "POST", "/api/dispatch/result",
+            {"job_id": job_id, "status": "done", "exit_code": 0,
+             "message": "[伏枥] ALREADY (4.6s)"},
+            node_token=self.node_token,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        job = self.app.dispatch.get_job(job_id)
+        self.assertEqual(job["status"], "done")
+        self.assertIn("ALREADY", job["message"])
+        # Late delivery CAS must not resurrect a terminal job.
+        self.assertFalse(self.app.dispatch.mark_delivered(job_id))
+        self.assertEqual(self.app.dispatch.get_job(job_id)["status"], "done")
+        # A second callback must not overwrite the terminal state.
+        status, _ = self.request_json(
+            "POST", "/api/dispatch/result",
+            {"job_id": job_id, "status": "failed", "exit_code": 2, "message": "double"},
+            node_token=self.node_token,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(
+            self.app.dispatch.get_job(job_id)["message"], "[伏枥] ALREADY (4.6s)"
+        )
+
+    def test_node_heartbeat_marks_node_online_in_state(self):
+        status, _ = self.request_json(
+            "POST", "/api/dispatch/heartbeat", {}, node_token=self.node_token
+        )
+        self.assertEqual(status, 200)
+        status, state = self.request_json(
+            "GET", "/api/state", auth=self.app.auth_token
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(state["dispatch"]["mode"], "remote")
+        nodes = state["dispatch"]["nodes"]
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0]["name"], "mac")
+        self.assertTrue(nodes[0]["online"])
+        self.assertNotIn("token", nodes[0])
+        self.assertNotIn("token_hash", nodes[0])
+
+    def test_state_jobs_come_from_dispatch_queue(self):
+        self.request_json(
+            "POST", "/api/run", {"sites": ["伏枥"]}, self.app.csrf, auth=self.app.auth_token
+        )
+        status, state = self.request_json(
+            "GET", "/api/state", auth=self.app.auth_token
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(state["jobs"]), 1)
+        job = state["jobs"][0]
+        self.assertEqual(job["kind"], "site")
+        self.assertEqual(job["node"], "mac")
+        self.assertEqual(job["status"], "queued")
+
+    def test_full_dispatch_loop_with_mock_agent(self):
+        """End-to-end over real HTTP: panel enqueue → DeliveryWorker._deliver_http
+        → mock node agent → agent posts result via /api/dispatch/result → done."""
+        import threading
+        import urllib.request
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        received = []
+
+        class MockAgent(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                if self.path != "/dispatch":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                if (self.headers.get("X-Node-Token") or "") != self.node_token_ref[0]:
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                received.append(body)
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                # Node reports back over the public callback (real HTTP).
+                panel_port = self.panel_port_ref[0]
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{panel_port}/api/dispatch/result",
+                    data=json.dumps({
+                        "job_id": body["job_id"],
+                        "status": "done",
+                        "exit_code": 0,
+                        "message": "[伏枥] ALREADY (4.6s)",
+                    }).encode(),
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Node-Token": self.node_token_ref[0],
+                    },
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=5).read()
+
+            # per-server references wired after construction
+            node_token_ref = [None]
+            panel_port_ref = [None]
+
+        agent_server = ThreadingHTTPServer(("127.0.0.1", 0), MockAgent)
+        MockAgent.node_token_ref[0] = self.node_token
+        MockAgent.panel_port_ref[0] = self.server.server_port
+        agent_thread = threading.Thread(target=agent_server.serve_forever, daemon=True)
+        agent_thread.start()
+        try:
+            # Point the registered node at the mock agent and re-enqueue.
+            self.app.dispatch.remove_node("mac")
+            mock_token = self.app.dispatch.add_node(
+                "mac", f"http://127.0.0.1:{agent_server.server_port}"
+            )
+            MockAgent.node_token_ref[0] = mock_token
+            _, data = self.request_json(
+                "POST", "/api/run", {"sites": ["伏枥"]}, self.app.csrf, auth=self.app.auth_token
+            )
+            job_id = data["job_id"]
+            pushed = self.app.delivery.sweep()
+            self.assertEqual(pushed, 1)
+            # Wait for the async node callback to land.
+            for _ in range(50):
+                job = self.app.dispatch.get_job(job_id)
+                if job["status"] == "done":
+                    break
+                time.sleep(0.1)
+            self.assertEqual(job["status"], "done")
+            self.assertEqual(job["exit_code"], 0)
+            self.assertIn("ALREADY", job["message"])
+            self.assertEqual(received[0]["sites"], ["伏枥"])
+            self.assertEqual(received[0]["kind"], "site")
+        finally:
+            agent_server.shutdown()
+            agent_server.server_close()
+            agent_thread.join(3)
 
 
 if __name__ == "__main__":

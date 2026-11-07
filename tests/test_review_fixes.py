@@ -1130,7 +1130,10 @@ class AuthGateTests(unittest.TestCase):
         async def no_captcha(*a, **k): return None
         async def any_visible_none(*a, **k): return (None, None)
 
-        async def sso(page, force=False, browser=None):
+        async def sso(page, force=False, browser=None, allow_linuxdo=True):
+            # 与生产签名对齐:站点级禁用 LinuxDO 时由账密兜底(NO_BUTTON)
+            if not allow_linuxdo:
+                return "NO_BUTTON"
             return sso_force_status if force else None
 
         old = {name: getattr(m, name) for name in (
