@@ -1,0 +1,5 @@
+# Test-only dependencies (production runtime deps stay in requirements.txt).
+# CI installs this file in the macOS job; Windows job installs pytest directly.
+pytest>=8.0
+pytest-xdist>=3.5
+pytest-timeout>=2.3

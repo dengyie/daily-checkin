@@ -1,0 +1,13 @@
+# Test-engineering config (pytest is the single canonical runner for all suites;
+# see tests/_support.py for shared harness and docs/dispatch-test-plan.md §5).
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Per-test watchdog: a hung test fails in ≤120s instead of burning the CI job
+# timeout (15min). Global guard — individual suites must stay well under this.
+timeout = 120
+timeout_method = "thread"
+addopts = "-ra"
+markers = [
+    "runner: stealth_checkin_runner adapter/flow tests (heavier module re-exec)",
+    "ops: ops-script source-contract tests (morning-batch / sync / dispatch launchers)",
+]

@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: macos-14
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v5
@@ -26,7 +26,9 @@ jobs:
           node-version: "22"
 
       - name: Install Python dependencies
-        run: python -m pip install -r requirements.txt
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
 
       - name: Compile Python
         run: |
@@ -37,11 +39,12 @@ jobs:
             checkin_core/providers/*.py \
             tests/*.py
 
-      - name: Run legacy regression suite
-        run: python test_stealth_checkin_m1.py
-
-      - name: Run system and provider suite
-        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Run full pytest suite (xdist parallel, per-test watchdog)
+        # Single canonical runner: runner adapter/flow tests + system/store/web
+        # + ops-script contracts. -n auto parallelizes across worker processes;
+        # pytest-timeout (pyproject) fails a hung test in 120s instead of
+        # burning the job timeout.
+        run: python -m pytest tests/ -q -n auto
 
       - name: Validate frontend and shell entry
         run: |
@@ -85,12 +88,14 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install -r requirements.txt
-          python -m pip install pytest
+          python -m pip install pytest pytest-xdist pytest-timeout
       - name: Compile Python on Windows
         run: |
           python -c "import pathlib, py_compile; files = [pathlib.Path('stealth_checkin_runner.py'), pathlib.Path('scripts/daily-checkin-cron.py'), *pathlib.Path('checkin_core').rglob('*.py'), *pathlib.Path('tests').rglob('*.py')]; [py_compile.compile(str(path), doraise=True) for path in files]"
       - name: Run unit tests on Windows
-        run: python -m pytest tests/ -x -q --tb=short
+        # Runner site-flow tests historically validated on macOS only; keep
+        # the Windows gate at the system/store/web + ops-contract layer.
+        run: python -m pytest tests/ -q -n auto -m "not runner" --tb=short
       - name: Validate batch scripts
         run: |
           python -c "

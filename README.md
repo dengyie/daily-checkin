@@ -301,7 +301,7 @@ sites:
 2. **添加/测试站点**：在 `sites.yaml` 中添加规则并使用 `--only "YourSite"` 验证
 3. **运行测试套件**：
    ```bash
-   PYTHONPATH=. python -m unittest discover -s tests -p 'test_*.py'
+   python3.12 -m pytest tests/ -q -n auto
    ```
 4. **提交代码** 并发起 Pull Request 🚀
 
