@@ -2524,6 +2524,7 @@ class DispatchRemoteWebTests(unittest.TestCase):
                 "DAILY_CHECKIN_DISPATCH_MODE",
                 "DAILY_CHECKIN_DISPATCH_DB",
                 "DAILY_CHECKIN_DISPATCH_SWEEP_INTERVAL",
+                "DAILY_CHECKIN_DISPATCH_AUTO_WAKE",
                 "DAILY_CHECKIN_WEB_PASSWORD",
             )
         }
@@ -2533,6 +2534,7 @@ class DispatchRemoteWebTests(unittest.TestCase):
         # Keep the background delivery thread idle for the whole test; the
         # sweeper is exercised directly in tests/test_dispatch.py.
         os.environ["DAILY_CHECKIN_DISPATCH_SWEEP_INTERVAL"] = "3600"
+        os.environ["DAILY_CHECKIN_DISPATCH_AUTO_WAKE"] = "0"
         self.store = SystemStore(Path(self.td.name) / "system.db")
         self.creds = FakeCredentials()
         self.app = CheckinWebApp(self.store, self.creds)
@@ -2653,6 +2655,73 @@ class DispatchRemoteWebTests(unittest.TestCase):
         self.assertEqual(
             [t["status"] for t in win_store.tasks(day) if t["name"] == "hiyo"],
             ["pending"],
+        )
+
+    def test_state_dedupes_site_across_nodes_by_pinned_owner(self):
+        """同一站点在两个节点的目录里都 enabled 时，清单只保留归属节点那一行。
+
+        2026-11-09：hiyo/relayfor 在 Mac staging DB 里也 enabled，面板"全部"
+        视图会渲染成两张同名卡片；site_nodes 的 pin 才是唯一归属。
+        """
+        day = datetime.now().strftime("%Y-%m-%d")
+        self.store.upsert_task(day, "hiyo", "https://hiyo.example")
+        win_replica = Path(self.td.name) / "system-win.db"
+        win_store = SystemStore(win_replica)
+        win_store.upsert_task(day, "hiyo", "https://hiyo.example")
+        self.app.dispatch.set_site_node("hiyo", "win")
+        os.environ["DAILY_CHECKIN_NODE_REPLICAS"] = f"win={win_replica}"
+        try:
+            _, state = self.request_json("GET", "/api/state", auth=self.app.auth_token)
+        finally:
+            os.environ.pop("DAILY_CHECKIN_NODE_REPLICAS", None)
+        rows = [t for t in state["tasks"] if t["name"] == "hiyo"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["node"], "win")
+
+    def test_state_keeps_default_row_when_owner_has_no_replica(self):
+        """pin 到 win 但 win 副本还没有该行时，不能把站点从清单里弄丢。"""
+        day = datetime.now().strftime("%Y-%m-%d")
+        self.store.upsert_task(day, "hiyo", "https://hiyo.example")
+        win_replica = Path(self.td.name) / "system-win.db"
+        SystemStore(win_replica)  # empty replica (schema only, no rows)
+        self.app.dispatch.set_site_node("hiyo", "win")
+        os.environ["DAILY_CHECKIN_NODE_REPLICAS"] = f"win={win_replica}"
+        try:
+            _, state = self.request_json("GET", "/api/state", auth=self.app.auth_token)
+        finally:
+            os.environ.pop("DAILY_CHECKIN_NODE_REPLICAS", None)
+        rows = [t for t in state["tasks"] if t["name"] == "hiyo"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["node"], "mac")
+        self.app.dispatch.set_site_node("hiyo", "")
+
+    def test_dedupe_by_owner_pure_function(self):
+        """Pure helper semantics: pin wins; otherwise last seen; order stable."""
+        from checkin_core.web import _dedupe_tasks_by_owner
+
+        rows = [
+            {"name": "a", "node": "mac", "status": "done"},
+            {"name": "b", "node": "mac", "status": "pending"},
+            {"name": "a", "node": "win", "status": "failed"},
+            {"name": "b", "node": "win", "status": "done"},
+            {"name": "c", "node": "mac", "status": "pending"},
+            {"name": "c", "node": "win", "status": "done"},
+        ]
+        out = _dedupe_tasks_by_owner(rows, {"a": "mac", "b": "win"})
+        self.assertEqual([t["name"] for t in out], ["a", "b", "c"])
+        self.assertEqual({t["name"]: (t["node"], t["status"]) for t in out}, {
+            "a": ("mac", "done"),   # pinned row, even though win row came later
+            "b": ("win", "done"),   # pinned row
+            "c": ("win", "done"),   # unpinned -> last seen
+        })
+        # Pinned owner has no row: keep a row instead of dropping the site.
+        out = _dedupe_tasks_by_owner(rows, {"b": "missing"})
+        self.assertEqual([t["name"] for t in out], ["a", "b", "c"])
+        self.assertEqual({t["name"]: t["node"] for t in out}["b"], "win")
+        # Rows without a name are dropped, not rendered as blank tiles.
+        self.assertEqual(
+            _dedupe_tasks_by_owner([{"name": "a", "node": "mac"}, {"node": "mac"}], {}),
+            [{"name": "a", "node": "mac"}],
         )
 
     def test_state_missing_replica_is_tolerated(self):

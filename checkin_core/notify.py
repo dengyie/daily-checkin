@@ -10,7 +10,7 @@ TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 MAX_TG_TEXT_LEN = 4000
 
 # AutoNexus Agent 告警委派配置
-AUTONEXUS_ALERT_URL = os.environ.get("AUTONEXUS_ALERT_URL", "https://monitor.mangoqwq.com/api/v1/alerts/ingest")
+AUTONEXUS_ALERT_URL = os.environ.get("AUTONEXUS_ALERT_URL", "http://10.144.144.31:9230/api/v1/alerts/ingest")
 AUTONEXUS_ALERT_TOKEN = os.environ.get("AUTONEXUS_ALERT_TOKEN") or os.environ.get("FLEET_AUTH_TOKEN") or ""
 AUTONEXUS_AGENT_ENABLED = os.environ.get("AUTONEXUS_AGENT_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 

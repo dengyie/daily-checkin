@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -231,6 +232,56 @@ class DeliveryWorkerTests(unittest.TestCase):
         worker = DeliveryWorker(self.store, deliver_fn=fake_deliver, start_worker=False)
         self.assertEqual(worker.sweep(), 0)
         self.assertEqual(calls, [])
+
+    def test_delivery_worker_wakes_immediately_on_enqueue(self):
+        delivered = threading.Event()
+        self.store.add_node("mac", "http://10.144.144.100:9777")
+
+        def fake_deliver(job, node, timeout_s):
+            delivered.set()
+            return True
+
+        worker = DeliveryWorker(
+            self.store, deliver_fn=fake_deliver, interval_s=60.0,
+            start_worker=True, auto_wake=True,
+        )
+        try:
+            # Same wiring make_delivery_worker() sets up in production.
+            self.store.on_enqueue = worker.wake
+            self.store.enqueue("site", site_names=["快速直推"], node="mac")
+            # Should deliver in milliseconds instead of waiting 60s
+            self.assertTrue(delivered.wait(timeout=2.0), "Worker did not wake up promptly on enqueue")
+        finally:
+            worker.stop()
+            # Join the daemon before tearDown drops the temp dir: a sweep in
+            # flight can still open the SQLite handle and recreate WAL files,
+            # which makes shutil.rmtree fail with "Directory not empty".
+            if worker._thread is not None:
+                worker._thread.join(timeout=5.0)
+
+    def test_make_delivery_worker_wires_enqueue_wake_by_default(self):
+        from checkin_core.dispatch import make_delivery_worker
+
+        worker = make_delivery_worker(self.store)
+        try:
+            self.assertTrue(worker.auto_wake)
+            self.assertIsNotNone(self.store.on_enqueue, "default must wake the sweeper on enqueue")
+        finally:
+            worker.stop()
+            if worker._thread is not None:
+                worker._thread.join(timeout=5.0)
+
+    def test_make_delivery_worker_auto_wake_disabled_leaves_enqueue_quiet(self):
+        from checkin_core.dispatch import make_delivery_worker
+
+        worker = make_delivery_worker(self.store, auto_wake=False)
+        try:
+            self.assertFalse(worker.auto_wake)
+            self.assertIsNone(self.store.on_enqueue, "auto_wake=False must not wire a wake-up")
+        finally:
+            worker.stop()
+            if worker._thread is not None:
+                worker._thread.join(timeout=5.0)
 
 
 class DispatchConfigTests(unittest.TestCase):
@@ -479,6 +530,80 @@ class SyncScriptGuardTests(unittest.TestCase):
         self.assertIn("daily-checkin-staging/env.sh", text)
         self.assertIn("-m checkin_core.dispatch_agent", text)
         self.assertIn("exec", text)
+
+
+class AgentLifecycleGuardTests(unittest.TestCase):
+    """Single-instance lock + stale-tunnel sweep (2026-11-09 win outage)."""
+
+    def test_tunnel_specs_match_ssh_forwarding_shapes(self):
+        from checkin_core.dispatch_agent import (
+            forward_tunnel_spec, reverse_tunnel_spec,
+        )
+
+        self.assertEqual(
+            reverse_tunnel_spec(19778, 9777), "127.0.0.1:19778:127.0.0.1:9777"
+        )
+        self.assertEqual(
+            forward_tunnel_spec(19780), "127.0.0.1:19780:127.0.0.1:8765"
+        )
+
+    def test_single_instance_lock_is_exclusive_across_processes(self):
+        from checkin_core.dispatch_agent import acquire_single_instance
+
+        with TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "agent.lock"
+            holder_code = (
+                "import sys, time\n"
+                "from pathlib import Path\n"
+                "from checkin_core.dispatch_agent import acquire_single_instance\n"
+                "state, fh = acquire_single_instance(Path(sys.argv[1]))\n"
+                "print(state, flush=True)\n"
+                "time.sleep(30)\n"
+            )
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(ROOT)
+            holder = subprocess.Popen(
+                [sys.executable, "-c", holder_code, str(lock)],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                self.assertEqual(holder.stdout.readline().strip(), "ok")
+                state, fh = acquire_single_instance(lock)
+                self.assertEqual(state, "busy")
+                self.assertIsNone(fh)
+            finally:
+                holder.terminate()
+                try:
+                    holder.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    holder.kill()
+            state, fh = acquire_single_instance(lock)
+            self.assertEqual(state, "ok")
+            fh.close()
+
+    def test_kill_stale_tunnels_ignores_unrelated_spec(self):
+        from checkin_core.dispatch_agent import kill_stale_tunnels
+
+        # A spec nobody forwards -> zero kills (pkill exits 1 / PS prints none).
+        self.assertEqual(kill_stale_tunnels(["127.0.0.1:59999:127.0.0.1:59998"]), 0)
+
+    def test_serve_forever_acquires_lock_and_sweeps_before_tunnels(self):
+        text = (ROOT / "checkin_core" / "dispatch_agent.py").read_text(encoding="utf-8")
+        body = text.split("def serve_forever(self)", 1)[1].split("def main()", 1)[0]
+        self.assertIn("acquire_single_instance(_agent_lock_path())", body)
+        self.assertIn("kill_stale_tunnels(specs)", body)
+        self.assertLess(
+            body.index("kill_stale_tunnels(specs)"),
+            body.index("_tunnel_loop"),
+            "stale tunnels must be swept before new tunnel threads start",
+        )
+
+    def test_watchdog_supervises_agent_not_local_ui(self):
+        text = (ROOT / "scripts" / "watchdog-bg.pyw").read_text(encoding="utf-8")
+        self.assertIn('start-dispatch-agent-win-hidden.vbs', text)
+        self.assertIn('checkin_core.dispatch_agent', text)
+        self.assertNotIn('launch-bg.pyw', text)
+        self.assertNotIn('("api", 8765)', text)
 
 
 if __name__ == "__main__":

@@ -13,10 +13,12 @@ no scheduled wakeups, no outbound traffic until a job actually arrives.
 from __future__ import annotations
 
 import argparse
+import atexit
 import datetime
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -75,6 +77,10 @@ AGENT_LOG_FILE_ENV = "DAILY_CHECKIN_AGENT_LOG_FILE"
 # is always the panel host's loopback API port 8765.
 CALLBACK_TUNNEL_ALIAS_ENV = "DAILY_CHECKIN_CALLBACK_TUNNEL_ALIAS"
 CALLBACK_TUNNEL_LOCAL_PORT_ENV = "DAILY_CHECKIN_CALLBACK_TUNNEL_LOCAL_PORT"
+# Single-instance lock: two agents fighting over the same reverse port is the
+# 2026-11-09 outage mode ("remote port forwarding failed for listen port 19778").
+# The lock file lives next to the durable agent log by default.
+AGENT_LOCK_ENV = "DAILY_CHECKIN_AGENT_LOCK_FILE"
 DEFAULT_CALLBACK_TUNNEL_LOCAL_PORT = 19780
 DEFAULT_BIND = "10.144.144.100"
 DEFAULT_PORT = 9777
@@ -185,6 +191,105 @@ def runner_lock_probe() -> bool:
             pass
 
 
+def _agent_lock_path() -> Path:
+    raw = os.environ.get(AGENT_LOCK_ENV, "").strip()
+    if raw:
+        return Path(raw)
+    log_dir = os.environ.get("DAILY_CHECKIN_LOG_DIR", "").strip()
+    base = Path(log_dir) if log_dir else Path.home() / ".hermes" / "checkin"
+    return base / "dispatch-agent.lock"
+
+
+def acquire_single_instance(path: Path):
+    """Hold an exclusive lock for the agent's lifetime.
+
+    Returns (state, handle) where state is "ok" (handle must stay open), "busy"
+    (another agent owns it) or "unavailable" (no usable lock primitive/path —
+    proceed anyway, the old behaviour).
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(path, "a+")
+    except OSError:
+        return "unavailable", None
+    try:
+        if msvcrt is not None:  # Windows: lock byte 0 without blocking
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        elif fcntl is not None:  # POSIX: flock is released on process exit
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            fh.close()
+        except OSError:
+            pass
+        return "busy", None
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()))
+        fh.flush()
+    except OSError:
+        pass
+    return "ok", fh
+
+
+def reverse_tunnel_spec(remote_port: int, port: int) -> str:
+    """ssh -R spec: panel-host ``remote_port`` -> node agent ``port``."""
+    return f"127.0.0.1:{remote_port}:127.0.0.1:{port}"
+
+
+def forward_tunnel_spec(callback_port: int) -> str:
+    """ssh -L spec: node ``callback_port`` -> panel-host API 8765."""
+    return f"127.0.0.1:{callback_port}:127.0.0.1:8765"
+
+
+def kill_stale_tunnels(specs: list[str]) -> int:
+    """Kill ssh children left behind by a previous agent process.
+
+    Windows has no parent-death signal: when the agent is killed hard its
+    `ssh -R` child survives and keeps the panel's remote port bound forever, so
+    every new agent dies with "remote port forwarding failed for listen port
+    19778" (2026-11-09 outage). Sweep by the exact forwarding spec before this
+    process starts its own tunnels. Safe because the single-instance lock is
+    acquired first, so any match is an orphan.
+    """
+    killed = 0
+    for spec in specs:
+        try:
+            if msvcrt is not None:  # Windows
+                ps = (
+                    "Get-CimInstance Win32_Process -Filter \"Name='ssh.exe'\" "
+                    f"| Where-Object {{ $_.CommandLine -like '*{spec}*' }} "
+                    "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force; "
+                    "Write-Output $_.ProcessId }"
+                )
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps],
+                    capture_output=True, text=True, timeout=20,
+                )
+                killed += sum(
+                    1 for line in (proc.stdout or "").splitlines() if line.strip().isdigit()
+                )
+            else:  # POSIX: pgrep the exact spec so we count every orphan, not 0/1
+                proc = subprocess.run(
+                    ["pgrep", "-f", re.escape(spec)], capture_output=True, text=True, timeout=10
+                )
+                for pid in (proc.stdout or "").split():
+                    if not pid.isdigit():
+                        continue
+                    try:
+                        os.kill(int(pid), signal.SIGTERM)
+                        killed += 1
+                    except OSError as exc:
+                        _log(f"cannot kill stale tunnel pid {pid}: {exc}")
+        except Exception as exc:
+            _log(f"stale tunnel sweep failed for {spec}: {type(exc).__name__}: {exc}")
+    if killed:
+        _log(f"killed {killed} stale tunnel process(es)")
+        time.sleep(1.0)  # let the panel's sshd release the forwarded ports
+    return killed
+
+
 class DispatchAgent:
     def __init__(self):
         self.tunnel_alias = (os.environ.get(TUNNEL_ALIAS_ENV) or "").strip()
@@ -212,7 +317,13 @@ class DispatchAgent:
             raise SystemExit(f"FATAL: {TOKEN_ENV} is required (0600 env, never commit)")
         self._job_mutex = threading.Lock()
         self._stop = threading.Event()
-        self._tunnel_proc: subprocess.Popen | None = None
+        # Job completion and the day-rollover heartbeat both trigger a DB
+        # sync. It is best-effort and posts to one fixed remote temp path,
+        # so overlapping copies must be skipped rather than raced.
+        self._sync_lock = threading.Lock()
+        self._tunnel_procs: list[subprocess.Popen] = []
+        self._tunnel_procs_lock = threading.Lock()
+        self._lock_handle = None
 
     def in_quiet_window_now(self) -> bool:
         """True when local time is inside the morning-batch quiet window."""
@@ -336,19 +447,24 @@ class DispatchAgent:
             _log(f"job #{job_id} crashed: {exc}")
         finally:
             # Report-then-release must be fault-isolated: an unexpected crash
-            # in _post_result (or _sync_db) must never skip the mutex release,
+            # in _post_result must never skip the mutex release,
             # or the node stops accepting jobs until the agent restarts
             # (reproduced: one raising _post_result left the lock held and the
             # next dispatch got 503 busy forever).
             try:
                 self._post_result(job_id, status, exit_code, message)
-                self._sync_db()
             except Exception as exc:
                 _log(f"post-job reporting crashed (job #{job_id}): {type(exc).__name__}: {exc}")
             finally:
                 if self._job_mutex.locked():
                     self._job_mutex.release()
                 _log(f"job #{job_id} finished: {status} exit={exit_code}")
+            # Mutex is freed so the node can accept incoming jobs immediately;
+            # DB sync follows without keeping the node in a false busy state.
+            try:
+                self._sync_db()
+            except Exception as exc:
+                _log(f"post-job db sync error (job #{job_id}): {type(exc).__name__}: {exc}")
 
     def _terminate_process_tree(self, process: subprocess.Popen, timeout_s: float = 10.0) -> None:
         """Kill the runner process tree, cross-platform (mirrors legacy JobExecutor).
@@ -655,22 +771,30 @@ class DispatchAgent:
     def _sync_db(self) -> None:
         # Per-node replica sync to the panel; platform twin scripts keep the
         # same atomic scp+mv contract (Windows: sync-db-to-panel.ps1).
-        if sys.platform == "win32":
-            script = ROOT / "scripts" / "sync-db-to-panel.ps1"
-            cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
-        else:
-            script = ROOT / "scripts" / "sync-db-to-pxed.sh"
-            if not script.is_file():
-                return
-            cmd = ["/bin/zsh", str(script)]
+        # Best-effort by contract: a skipped/concurrent sync is fine (the
+        # panel just shows the previous snapshot until the next trigger).
+        if not self._sync_lock.acquire(blocking=False):
+            _log("panel DB sync already in flight; skipping duplicate trigger")
+            return
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if proc.returncode == 0:
-                _log("panel DB sync ok")
+            if sys.platform == "win32":
+                script = ROOT / "scripts" / "sync-db-to-panel.ps1"
+                cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
             else:
-                _log(f"panel DB sync failed rc={proc.returncode}: {(proc.stderr or '')[-300:]}")
-        except Exception as exc:
-            _log(f"panel DB sync error: {type(exc).__name__}: {exc}")
+                script = ROOT / "scripts" / "sync-db-to-pxed.sh"
+                if not script.is_file():
+                    return
+                cmd = ["/bin/zsh", str(script)]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if proc.returncode == 0:
+                    _log("panel DB sync ok")
+                else:
+                    _log(f"panel DB sync failed rc={proc.returncode}: {(proc.stderr or '')[-300:]}")
+            except Exception as exc:
+                _log(f"panel DB sync error: {type(exc).__name__}: {exc}")
+        finally:
+            self._sync_lock.release()
 
     # ------------------------------------------------------------- heartbeat
 
@@ -732,25 +856,64 @@ class DispatchAgent:
             else:
                 cmd.append(self.callback_tunnel_alias)
             _log(f"{'forward' if forward else 'reverse'} tunnel {spec} -> {self.tunnel_alias if not forward else self.callback_tunnel_alias}")
+            proc = None
             try:
                 proc = subprocess.Popen(cmd)
+                with self._tunnel_procs_lock:
+                    self._tunnel_procs.append(proc)
                 while proc.poll() is None and not self._stop.is_set():
                     time.sleep(2)
             except Exception as exc:
                 _log(f"tunnel spawn failed: {type(exc).__name__}: {exc}")
-                proc = None
-            if proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+            if proc is not None:
+                with self._tunnel_procs_lock:
+                    try:
+                        self._tunnel_procs.remove(proc)
+                    except ValueError:
+                        pass
+                if proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
             if self._stop.is_set():
                 return
             time.sleep(5)
 
+    def _shutdown_tunnels(self) -> None:
+        """Terminate tracked ssh children (atexit; hard-kill orphans are swept
+        by the next agent via kill_stale_tunnels)."""
+        with self._tunnel_procs_lock:
+            procs = list(self._tunnel_procs)
+            self._tunnel_procs.clear()
+        for proc in procs:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except Exception:
+                        proc.kill()
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------ main
 
     def serve_forever(self) -> None:
+        lock_state, self._lock_handle = acquire_single_instance(_agent_lock_path())
+        if lock_state == "busy":
+            _log("another dispatch-agent instance is running; exiting")
+            return
+        # Orphans from a hard-killed predecessor must go before we bind the
+        # same remote/local ports, otherwise ssh exits on every attempt.
+        specs = []
+        if self.tunnel_alias:
+            specs.append(reverse_tunnel_spec(self.tunnel_remote_port, self.port))
+        if self.callback_tunnel_alias:
+            specs.append(forward_tunnel_spec(self.callback_tunnel_port))
+        kill_stale_tunnels(specs)
+        atexit.register(self._shutdown_tunnels)
+
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
         if self.tunnel_alias:
             threading.Thread(

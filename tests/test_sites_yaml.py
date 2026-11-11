@@ -939,6 +939,111 @@ class TestSitesYaml(unittest.TestCase):
         # LinuxDO OAuth 站:不应登记账密
         self.assertIsNone(get_account_credential("3sbqs"))
 
+    def test_yaml_registers_qingniaocoding_entry(self):
+        """qingniaocoding(qingniaocoding.space) 2026-11-09 接入:标准
+        LinuxDO + New API 站(version=v1.2.1, checkin_enabled=true),
+        newapi_profile 通道,/wallet,prefer_catalog_url,无自定义选择器。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "qingniaocoding"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 qingniaocoding 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://qingniaocoding.space/wallet")
+        self.assertEqual(a.login_url, "")
+        self.assertIn("签到", " ".join(a.sign_selectors))
+        self.assertIn("已签到", " ".join(a.already_selectors))
+        self.assertTrue(a.prefer_catalog_url)
+        resolved = resolve_site("qingniaocoding", "https://qingniaocoding.space/wallet")
+        self.assertEqual(resolved.url, "https://qingniaocoding.space/wallet")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "qingniaocoding"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 qingniaocoding")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://qingniaocoding.space/wallet")
+        # LinuxDO OAuth 站:不应登记账密
+        self.assertIsNone(get_account_credential("qingniaocoding"))
+
+    def test_yaml_registers_apikey_casa_entry(self):
+        """apikey.casa(福利 apikey.casa) 2026-11-10 接入:标准
+        LinuxDO + New API 站(version=v1.0.0-rc.49, checkin_enabled=true),
+        newapi_profile 通道,/profile,prefer_catalog_url,无自定义选择器。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "apikey.casa"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 apikey.casa 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://apikey.casa/profile")
+        self.assertEqual(a.login_url, "")
+        self.assertIn("签到", " ".join(a.sign_selectors))
+        self.assertIn("已签到", " ".join(a.already_selectors))
+        self.assertTrue(a.prefer_catalog_url)
+        resolved = resolve_site("apikey.casa", "https://apikey.casa/profile")
+        self.assertEqual(resolved.url, "https://apikey.casa/profile")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "apikey.casa"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 apikey.casa")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://apikey.casa/profile")
+        # LinuxDO OAuth 站:不应登记账密
+        self.assertIsNone(get_account_credential("apikey.casa"))
+
+    def test_yaml_registers_teleai_entry(self):
+        """teleai(TeleAgent 星辰超级智能体 agent.teleai.com.cn/teleagent)
+        2026-11-12 接入:中国电信自研 SPA(opencowork),非 New API、无
+        LinuxDO OAuth,登录态走共享 9222 会话。「积分福利社」每日
+        100 积分 button「立即领取」,点击 → /superCowork/sapi/user/portal/
+        companyStore/checkTask?type=daily_login,已领显示「已领 N 天
+        累计X积分」。kind=browser + prefer_catalog_url,不登记账密。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "teleai"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 teleai 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://agent.teleai.com.cn/teleagent")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertEqual(a.ready_rounds, 20)
+        self.assertIn('button:has-text("立即领取")', " ".join(a.sign_selectors))
+        joined_already = " ".join(a.already_selectors)
+        # 2026-11-12 真机实测:已领态按钮/文案翻成「今日已领」(非「已领取，明天再来」),
+        # 首跑 already 未命中落 no_button,补「今日已领」后幂等 ALREADY。
+        self.assertIn("text=今日已领", joined_already)
+        self.assertIn("text=已领取，明天再来", joined_already)
+        resolved = resolve_site("teleai", "https://agent.teleai.com.cn/teleagent")
+        self.assertEqual(resolved.url, "https://agent.teleai.com.cn/teleagent")
+        self.assertEqual(resolved.kind, "browser")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "teleai"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 teleai(兜底守卫)")
+        self.assertEqual(builtin_entry.kind, "browser")
+        self.assertEqual(builtin_entry.url, "https://agent.teleai.com.cn/teleagent")
+        self.assertEqual(builtin_entry.sign_selectors, a.sign_selectors)
+        self.assertEqual(builtin_entry.already_selectors, a.already_selectors)
+        # 电信站,无 LinuxDO/账密:不应登记凭据
+        self.assertIsNone(get_account_credential("teleai"))
+
     def test_yaml_registers_fuli_entry(self):
         """伏枥(dash.free-ai.de5.net) 2026-11-05 接入:标准 LinuxDO + New API 站,
         newapi_profile 通道,/profile,prefer_catalog_url,无自定义选择器。"""

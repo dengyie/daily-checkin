@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -25,6 +26,9 @@ import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 DISPATCH_DB_ENV = "DAILY_CHECKIN_DISPATCH_DB"
 DISPATCH_MODE_ENV = "DAILY_CHECKIN_DISPATCH_MODE"
@@ -32,8 +36,13 @@ SWEEP_INTERVAL_ENV = "DAILY_CHECKIN_DISPATCH_SWEEP_INTERVAL"
 DELIVER_TIMEOUT_ENV = "DAILY_CHECKIN_DISPATCH_DELIVER_TIMEOUT"
 MAX_ATTEMPTS_ENV = "DAILY_CHECKIN_DISPATCH_MAX_DELIVERY_ATTEMPTS"
 STALE_RUNNING_S_ENV = "DAILY_CHECKIN_DISPATCH_STALE_RUNNING_S"
+AUTO_WAKE_ENV = "DAILY_CHECKIN_DISPATCH_AUTO_WAKE"
 
 DEFAULT_NODE = "mac"
+# Newly enqueued jobs wake the delivery thread immediately, so this interval
+# only governs retry cadence against unreachable nodes. A 5s floor hammered
+# a down node with failed 10s pushes; 30s keeps the same 2h retry budget
+# (240 attempts) with far less traffic.
 DEFAULT_SWEEP_INTERVAL_S = 30.0
 DEFAULT_DELIVER_TIMEOUT_S = 10.0
 DEFAULT_MAX_DELIVERY_ATTEMPTS = 240  # ~2h at 30s sweeps
@@ -101,9 +110,10 @@ class DispatchStore:
     replacement by the executor never invalidates an open reader.
     """
 
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, *, on_enqueue: Callable[[int], None] | None = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.on_enqueue = on_enqueue
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -182,7 +192,14 @@ class DispatchStore:
                     _now(),
                 ),
             )
-            return int(cur.lastrowid)
+            job_id = int(cur.lastrowid)
+        if self.on_enqueue is not None:
+            try:
+                self.on_enqueue(job_id)
+            except Exception:
+                # A wake-up hint must never make an enqueue look failed.
+                logger.exception("dispatch on_enqueue callback failed for job #%s", job_id)
+        return job_id
 
     def _row_to_job(self, row) -> dict:
         job = dict(row)
@@ -495,12 +512,17 @@ class DeliveryWorker:
         max_attempts: int | None = None,
         stale_max_age_s: int | None = None,
         start_worker: bool = True,
+        auto_wake: bool | None = None,
     ):
         self.store = store
         self._stop = threading.Event()
+        self._wake_event = threading.Event()
         self.interval_s = float(
             interval_s if interval_s is not None
             else os.environ.get(SWEEP_INTERVAL_ENV, DEFAULT_SWEEP_INTERVAL_S)
+        )
+        self.auto_wake = (
+            _env_flag(AUTO_WAKE_ENV, True) if auto_wake is None else bool(auto_wake)
         )
         self.deliver_timeout_s = float(
             deliver_timeout_s if deliver_timeout_s is not None
@@ -520,18 +542,27 @@ class DeliveryWorker:
             self._thread = threading.Thread(target=self._work, daemon=True)
             self._thread.start()
 
+    def wake(self, _job_id: int | None = None) -> None:
+        """Immediately wake the sweeper to push newly enqueued jobs without polling delay.
+
+        The optional argument lets this be wired directly as
+        ``DispatchStore.on_enqueue`` (which passes the new job id).
+        """
+        self._wake_event.set()
+
     def stop(self) -> None:
         self._stop.set()
+        self._wake_event.set()
 
     def _work(self) -> None:
         while not self._stop.is_set():
             try:
                 self.sweep()
             except Exception:
-                import logging
-
                 logging.exception("dispatch delivery sweep failed")
-            self._stop.wait(self.interval_s)
+            # Sleep up to interval_s, or wake immediately if wake() was called.
+            self._wake_event.wait(self.interval_s)
+            self._wake_event.clear()
 
     def sweep(self) -> int:
         """One delivery pass; returns the number of jobs pushed successfully.
@@ -615,15 +646,32 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def make_delivery_worker(store: DispatchStore) -> DeliveryWorker:
-    """DeliveryWorker configured from DAILY_CHECKIN_DISPATCH_* env vars."""
-    return DeliveryWorker(
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw not in ("0", "false", "no", "off")
+
+
+def make_delivery_worker(store: DispatchStore, auto_wake: bool | None = None) -> DeliveryWorker:
+    """DeliveryWorker configured from DAILY_CHECKIN_DISPATCH_* env vars.
+
+    Wires ``store.on_enqueue`` to ``worker.wake`` so a newly enqueued job is
+    pushed immediately instead of waiting for the sweep interval. Set
+    ``DAILY_CHECKIN_DISPATCH_AUTO_WAKE=0`` (or pass ``auto_wake=False``) to
+    keep enqueueing fire-and-forget; tests use that to hold the worker idle.
+    """
+    worker = DeliveryWorker(
         store,
         interval_s=_env_float(SWEEP_INTERVAL_ENV, DEFAULT_SWEEP_INTERVAL_S),
         deliver_timeout_s=_env_float(DELIVER_TIMEOUT_ENV, DEFAULT_DELIVER_TIMEOUT_S),
         max_attempts=_env_int(MAX_ATTEMPTS_ENV, DEFAULT_MAX_DELIVERY_ATTEMPTS),
         stale_max_age_s=_env_int(STALE_RUNNING_S_ENV, DEFAULT_STALE_RUNNING_S),
+        auto_wake=auto_wake,
     )
+    if worker.auto_wake:
+        store.on_enqueue = worker.wake
+    return worker
 
 
 def main() -> None:

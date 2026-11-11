@@ -1575,3 +1575,47 @@ sites:
       - 'button:text-is("今日已签到")'
       - 'text=已领取，明天再来'
       - 'text=签到成功，10 积分已到账'
+  # qingniaocoding(青鸟 qingniaocoding.space)—— 2026-11-09 接入。
+  # /api/status 实测: system_name=QINGNIAO API, version=v1.2.1,
+  # checkin_enabled=true, linuxdo_oauth=true, github_oauth=false,
+  # password_login_enabled=true, turnstile_check=false, quota_per_unit=500000。
+  # 标准 New API /api/user/checkin(GET/POST)存在,未登录返回 401 AUTH_UNAUTHORIZED。
+  # 签到入口 /wallet,通用 newapi_profile 通道。
+  # LinuxDO OAuth 站: 不登记账密、不登录;会话失效时
+  # FAIL:auth_required,需人工在 9222 补登。
+  - name: 'qingniaocoding'
+    url: https://qingniaocoding.space/wallet
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # apikey.casa(福利 apikey.casa)—— 2026-11-10 接入。
+  # /api/status 实测: system_name=福利, version=v1.0.0-rc.49,
+  # checkin_enabled=true, linuxdo_oauth=true, github_oauth=false,
+  # password_login_enabled=true, turnstile_check=false, quota_per_unit=500000 USD。
+  # 标准 New API /api/user/checkin(GET 未登录 401 AUTH_UNAUTHORIZED)。
+  # 签到入口 /profile,通用 newapi_profile 通道。
+  # LinuxDO OAuth 站: 不登记账密、不登录、不代填;依赖共享 9222 既有会话,
+  # 失效时通用通道无 SSO 兜底会 FAIL:auth_required,需人工在 9222 补登。
+  - name: 'apikey.casa'
+    url: https://apikey.casa/profile
+    kind: newapi_profile
+    prefer_catalog_url: true
+  # teleai(TeleAgent 星辰超级智能体 agent.teleai.com.cn/teleagent)—— 2026-11-12 接入。
+  # 中国电信 TeleAgent 自研 SPA(opencowork),非 New API(/api/status 404),
+  # 无 LinuxDO OAuth;登录态在共享 9222 会话(localStorage opencowork-auth +
+  # console_token,用户79B9LXLP),失效需人工补登。
+  # 左侧栏底部「积分福利社」卡片:「每日可领100积分」+ button「立即领取」,
+  # 点击 → GET /superCowork/sapi/user/portal/companyStore/checkTask?type=daily_login
+  # (+ v3/checkDayTask 查询),已领翻「领取中|disabled」后显示「已领 N 天累计X积分」。
+  # 无 turnstile/滑块。DB site_id=190(实际以 upsert 为准)。
+  - name: 'teleai'
+    url: https://agent.teleai.com.cn/teleagent
+    kind: browser
+    prefer_catalog_url: true
+    ready_rounds: 20
+    signs:
+      - 'button:has-text("立即领取")'
+    already:
+      - 'text=今日已领'
+      - 'text=已领取，明天再来'
+      - 'text=今日已签到'
+      - 'text=签到成功'

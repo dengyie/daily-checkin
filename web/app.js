@@ -639,6 +639,15 @@ async function api(path, payload, method = "POST", isRetry = false) {
 }
 
 let isLoadingState = false;
+let pollingTimer = null;
+
+function scheduleNextLoad(delayMs) {
+  if (pollingTimer) clearTimeout(pollingTimer);
+  pollingTimer = setTimeout(async () => {
+    await load();
+  }, delayMs);
+}
+
 async function load() {
   if (isLoadingState) return;
   isLoadingState = true;
@@ -661,6 +670,12 @@ async function load() {
     console.error("Failed to load state:", error);
   } finally {
     isLoadingState = false;
+    // Adaptive polling: while jobs are queued/delivering/running poll at 2s,
+    // otherwise 10s. Don't fast-poll a failing API based on stale job state.
+    const hasActiveJobs = serverOnline && (state?.jobs || []).some(
+      (j) => j.status === "queued" || j.status === "delivering" || j.status === "running"
+    );
+    scheduleNextLoad(hasActiveJobs ? 2000 : 10000);
   }
 }
 
@@ -1367,8 +1382,8 @@ function openSiteDetailDrawer(siteName) {
         <button class="btn success" id="site-drawer-mark-complete-btn">${isDone ? uiIcon("undo", { size: 13 }) + " 取消打卡 (恢复未完成)" : uiIcon("check", { size: 13 }) + " 标记为已完成"}</button>
       </div>
     `;
-    $("#site-drawer-run-btn")?.addEventListener("click", () => {
-      triggerRun([task.name]);
+    $("#site-drawer-run-btn")?.addEventListener("click", (e) => {
+      triggerRun([task.name], e.currentTarget);
       showToast(`已触发站点 ${task.name} 的自动化签到作业`);
     });
     $("#site-drawer-manual-checkin-btn")?.addEventListener("click", () => {
@@ -2639,7 +2654,7 @@ function initTileActionDelegation() {
     const runBtn = e.target.closest("[data-run-site]");
     if (runBtn) {
       e.stopPropagation();
-      triggerRun([runBtn.dataset.runSite]);
+      triggerRun([runBtn.dataset.runSite], runBtn);
       return;
     }
     const openSiteBtn = e.target.closest("[data-open-site-detail]");
@@ -2779,7 +2794,13 @@ async function markTaskManuallyComplete(siteName, clickedBtn = null) {
   }
 }
 
-async function triggerRun(sites) {
+async function triggerRun(sites, clickedBtn = null) {
+  let originalHtml = "";
+  if (clickedBtn) {
+    clickedBtn.disabled = true;
+    originalHtml = clickedBtn.innerHTML;
+    clickedBtn.innerHTML = `${uiIcon("loader", { size: 12, className: "spin" })} 启动中...`;
+  }
   try {
     updateServerStatus("busy");
     const data = await api("/api/run", { sites });
@@ -2791,9 +2812,14 @@ async function triggerRun(sites) {
     } else {
       showToast(`作业 #${data.job_id} 已入队执行...`, "success");
     }
-    setTimeout(load, 800);
+    scheduleNextLoad(300);
   } catch (error) {
     showToast(`触发失败：${error.message}`, "error");
+  } finally {
+    if (clickedBtn) {
+      clickedBtn.disabled = false;
+      clickedBtn.innerHTML = originalHtml;
+    }
   }
 }
 
@@ -2802,7 +2828,7 @@ $("#global-refresh-btn")?.addEventListener("click", () => {
   load();
 });
 
-$("#global-run-all-btn")?.addEventListener("click", async () => {
+$("#global-run-all-btn")?.addEventListener("click", async (e) => {
   const confirmed = await showConfirm({
     title: "批量自动签到确认",
     message: "确定立即触发全量待办站点的自动签到批次？",
@@ -2811,7 +2837,7 @@ $("#global-run-all-btn")?.addEventListener("click", async () => {
     danger: false,
     icon: "zap",
   });
-  if (confirmed) triggerRun([]);
+  if (confirmed) triggerRun([], e.currentTarget);
 });
 
 /* ==========================================================================
@@ -3377,5 +3403,3 @@ load().then(() => {
 }).catch((error) => {
   console.log("Initial state load:", error.message);
 });
-
-setInterval(load, 10000);

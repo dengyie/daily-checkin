@@ -182,6 +182,33 @@ def include_cors_headers(handler) -> None:
         handler.send_header("Vary", "Origin")
 
 
+def _dedupe_tasks_by_owner(
+    rows: list[dict], pinned: dict[str, str],
+) -> list[dict]:
+    """Collapse multi-node task rows so each site name appears exactly once.
+
+    A site has one owner (the ``site_nodes`` pin). The pinned node's row wins
+    when present; otherwise the last-seen row is kept, so a pinned-but-not-yet-
+    synced site never vanishes (replica rows are appended after the default
+    node's rows, so "last seen" prefers the replica).
+    """
+    chosen: dict[str, dict] = {}
+    locked: set[str] = set()
+    for task in rows:
+        name = str(task.get("name") or "")
+        if not name:
+            continue
+        owner = pinned.get(name)
+        if owner and str(task.get("node")) != owner:
+            if name not in locked:
+                chosen[name] = task  # fallback until the owner row arrives
+            continue
+        chosen[name] = task
+        if owner:
+            locked.add(name)
+    return list(chosen.values())
+
+
 class JobExecutor:
     def __init__(
         self,
@@ -371,6 +398,11 @@ class CheckinWebApp:
     })
     REMOTE_BLOCKED_MESSAGE = "看板模式下该操作需在执行节点本地完成（权威数据在 Mac 节点）"
 
+    def _wake_delivery(self) -> None:
+        """Nudge the dispatch sweeper so a new job/result is handled at once."""
+        if self.delivery is not None and self.delivery.auto_wake:
+            self.delivery.wake()
+
     def _dispatch_write(self, kind: str, payload: dict, node_hint: str | None = None):
         """Enqueue an authoritative-write job for the owning executor node and
         return the 202 payload the frontend's dispatch-tracking toast expects.
@@ -383,6 +415,7 @@ class CheckinWebApp:
         if not node:
             node = self.dispatch.default_node()
         job_id = self.dispatch.enqueue(kind, payload=payload, node=node)
+        self._wake_delivery()
         return {
             "ok": True,
             "queued": True,
@@ -506,6 +539,7 @@ class CheckinWebApp:
                             HTTPStatus.CONFLICT,
                         )
                         return
+                    app._wake_delivery()
                     self.send_json({"ok": True, "job_id": job_id, "status": status})
                     return
                 self.send_error(HTTPStatus.NOT_FOUND)
@@ -552,12 +586,18 @@ class CheckinWebApp:
                         # its execution channel in "node".
                         for t in data["tasks"]:
                             t["node"] = default_node
-                        merged = list(data["tasks"])
+                        rows = list(data["tasks"])
                         for node, replica_path in node_replicas().items():
                             for t in read_only_tasks(replica_path, day):
                                 t["node"] = node
-                                merged.append(t)
-                        data["tasks"] = merged
+                                rows.append(t)
+                        # Collapse duplicated names: a site has exactly ONE
+                        # owner (the site_nodes pin), otherwise the same
+                        # enabled site renders twice (hiyo/relayfor were
+                        # enabled on both mac and win on 2026-11-09).
+                        data["tasks"] = _dedupe_tasks_by_owner(
+                            rows, app.dispatch.site_node_map()
+                        )
                         data["dispatch"] = {
                             "mode": "remote",
                             "default_node": default_node,
@@ -683,6 +723,7 @@ class CheckinWebApp:
                                 # Back-compat single-job shape for the frontend.
                                 payload["job_id"] = jobs[0]["job_id"]
                                 payload["node"] = jobs[0]["node"]
+                            app._wake_delivery()
                             self.send_json(payload, HTTPStatus.ACCEPTED)
                             return
                         self.send_json({"job_id": app.executor.submit(names)}, HTTPStatus.ACCEPTED)

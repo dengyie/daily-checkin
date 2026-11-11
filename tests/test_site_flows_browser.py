@@ -1708,6 +1708,99 @@ class TestPipiwangcomSpaLogin(unittest.TestCase):
         self.assertIn("_pipiwangcom_dismiss_notice(page)", block.group(0))
 
 
+class TestHiyoAnnouncementPopup(unittest.TestCase):
+    """hiyo(free.hiyo.top) 公告弹窗遮罩清理 (2026-11-08 FAIL:no_confirm 修复)。"""
+
+    def setUp(self):
+        self.m = load_mod()
+
+    def test_dismiss_clicks_popup_mark_read_button(self):
+        import asyncio
+
+        m = self.m
+
+        class Btn:
+            def __init__(self):
+                self.clicked = False
+
+            async def count(self):
+                return 1
+
+            async def click(self, timeout=0):
+                self.clicked = True
+
+        class Overlay:
+            def __init__(self, visible):
+                self.visible = visible
+                self.btn = Btn()
+                self.removed = False
+
+            async def count(self):
+                return 0 if self.removed else 1
+
+            async def is_visible(self, timeout=0):
+                return self.visible and not self.removed
+
+            def locator(self, selector):
+                return type("W", (), {"last": self.btn})()
+
+        class FakePage:
+            def __init__(self, visible):
+                self.overlay = Overlay(visible)
+
+            def locator(self, selector):
+                return type("W", (), {"first": self.overlay})()
+
+            async def evaluate(self, js):
+                # 兜底分支:若走到这里说明点击没清掉遮罩
+                self.overlay.removed = True
+                return 1
+
+        page = FakePage(True)
+        n = asyncio.run(m._hiyo_dismiss_announcement(page))
+        self.assertGreaterEqual(n, 1)
+        self.assertTrue(page.overlay.btn.clicked, "必须点「标记已读」按钮关闭弹窗")
+
+    def test_dismiss_noop_without_overlay(self):
+        import asyncio
+
+        m = self.m
+
+        class Overlay:
+            async def count(self):
+                return 0
+
+            async def is_visible(self, timeout=0):
+                return False
+
+            def locator(self, selector):
+                raise AssertionError("must not click when overlay absent")
+
+        class FakePage:
+            def locator(self, selector):
+                return type("W", (), {"first": Overlay()})()
+
+            async def evaluate(self, js):
+                raise AssertionError("must not run fallback without overlay")
+
+        self.assertEqual(asyncio.run(m._hiyo_dismiss_announcement(FakePage())), 0)
+
+    def test_source_wires_hiyo_dismiss_into_generic_dialogs(self):
+        """hiyo 公告遮罩必须在通用 dismiss 里接入(否则 CTA 被拦截)。"""
+        src = TARGET.read_text(encoding="utf-8")
+        block = re.search(
+            r"async def dismiss_obstructing_dialogs.*?return total_closed",
+            src,
+            re.S,
+        )
+        self.assertIsNotNone(block)
+        self.assertIn('if "hiyo.top" in url_str:', block.group(0))
+        self.assertIn("_hiyo_dismiss_announcement(page)", block.group(0))
+        # 遮罩选择器必须是公告弹窗的 z-[120],不能误伤其他弹层
+        self.assertIn('div[class*="z-[120]"]', src)
+
+
+
 class TestJianzhileCheckin(unittest.TestCase):
     """简直了 (jianzhile.vip) 专属图形验证码签到测试."""
 

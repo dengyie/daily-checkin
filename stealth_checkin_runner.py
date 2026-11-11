@@ -1637,6 +1637,36 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         ],
         prefer_catalog_url=True,
     ),
+    # qingniaocoding(青鸟 qingniaocoding.space)—— 2026-11-09 接入。标准
+    # New API(version=v1.2.1,checkin_enabled=true,linuxdo_oauth=true,
+    # github_oauth=false,turnstile_check=false),签到入口 /wallet,
+    # 通用 newapi_profile 通道,不登记账密、不登录。
+    _N("qingniaocoding", "https://qingniaocoding.space/wallet", prefer_catalog_url=True),
+    # apikey.casa(福利 apikey.casa)—— 2026-11-10 接入。标准 New API
+    # (version=v1.0.0-rc.49,checkin_enabled=true,linuxdo_oauth=true,
+    # github_oauth=false,turnstile_check=false,quota_per_unit=500000 USD),
+    # 签到入口 /profile,通用 newapi_profile 通道,不登记账密、不登录。
+    # LinuxDO OAuth 站,会话失效 FAIL:auth_required 需人工在 9222 补登。
+    _N("apikey.casa", "https://apikey.casa/profile", prefer_catalog_url=True),
+    # teleai(TeleAgent 星辰超级智能体 agent.teleai.com.cn/teleagent)——
+    # 2026-11-12 接入。中国电信自研 SPA(opencowork),非 New API、无
+    # LinuxDO OAuth,登录态走共享 9222 会话。左侧栏底部「积分福利社」
+    # 「每日可领100积分」button「立即领取」→ GET /superCowork/sapi/
+    # user/portal/companyStore/checkTask?type=daily_login,已领后显示
+    # 「已领 N 天累计X积分」。无 turnstile。
+    _B(
+        "teleai",
+        "https://agent.teleai.com.cn/teleagent",
+        signs=['button:has-text("立即领取")'],
+        already=[
+            'text=今日已领',
+            'text=已领取，明天再来',
+            'text=今日已签到',
+            'text=签到成功',
+        ],
+        prefer_catalog_url=True,
+        ready_rounds=20,
+    ),
 ]
 
 
@@ -10480,7 +10510,7 @@ def solve_captcha_with_vision(image_bytes: bytes, timeout: float = 10.0) -> str:
     if not image_bytes:
         return ""
 
-    api_base = os.getenv("DAILY_CHECKIN_VISION_API_BASE", "https://api.mangoqwq.com/v1").rstrip("/")
+    api_base = os.getenv("DAILY_CHECKIN_VISION_API_BASE", "http://10.144.144.32:3000/v1").rstrip("/")
     if api_base.endswith("/chat/completions"):
         endpoint = api_base
     else:
@@ -13052,6 +13082,11 @@ async def dismiss_obstructing_dialogs(page, stage: str = "interaction") -> int:
             # 控制台公告 (#noticeModal) 盖在签到按钮上,且不在通用 dismiss 选择器内;
             # 漏掉它会在后续 CTA 点击时被 mask 拦截 15s(2026-10-25 实证)。
             await _pipiwangcom_dismiss_notice(page)
+        if "hiyo.top" in url_str:
+            # 公告弹窗(AnnouncementPopup,div.fixed.inset-0.z-[120])有未读 popup
+            # 公告时盖住「立即签到」,其「标记已读」按钮不在通用 dismiss 选择器内,
+            # 点击被遮罩拦截 → FAIL:no_confirm(2026-11-08 实证)。点掉后顺带标记已读。
+            total_closed += await _hiyo_dismiss_announcement(page)
     except Exception:
         pass
 
@@ -13425,6 +13460,87 @@ async def _pipiwangcom_dismiss_notice(page) -> None:
             return
         except Exception:
             continue
+
+
+async def _hiyo_dismiss_announcement(page) -> int:
+    """hiyo(free.hiyo.top) 公告弹窗(AnnouncementPopup)遮罩。
+
+    `/api/v1/announcements` 返回 `notify_mode=popup` 且未读的公告时,前端渲染
+    全屏遮罩 `div.fixed.inset-0.z-[120]` 盖住「立即签到」;其「标记已读」按钮
+    不在通用 dismiss 选择器内,点击会被遮罩拦截(2026-11-08 实证 FAIL:no_confirm)。
+    这里点掉弹窗按钮(顺带服务端标记已读),多条排队公告逐个关闭;按钮点不动时
+    兜底移除残留遮罩并把未读 popup 公告标记已读,避免反复拦截 CTA。
+    """
+    if page is None:
+        return 0
+    closed = 0
+    overlay_sel = 'div[class*="z-[120]"]'
+    for _ in range(4):  # 可能有多条排队 popup 公告
+        overlay = page.locator(overlay_sel).first
+        visible = False
+        for _ in range(6):  # 公告数据异步加载,最多等 1.5s
+            try:
+                if await overlay.count() > 0 and await overlay.is_visible(timeout=250):
+                    visible = True
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+        if not visible:
+            break
+        clicked = False
+        try:
+            btn = overlay.locator("button").last
+            if await btn.count() > 0:
+                await btn.click(timeout=2000)
+                clicked = True
+                closed += 1
+                print("  hiyo: announcement popup dismissed", flush=True)
+                await asyncio.sleep(0.5)
+        except Exception:
+            pass
+        if not clicked:
+            break
+    # 兜底:仍有遮罩则移除 DOM,并把未读 popup 公告标记已读(防下次再弹)。
+    try:
+        still = page.locator(overlay_sel).first
+        if await still.count() == 0 or not await still.is_visible(timeout=200):
+            return closed
+    except Exception:
+        return closed
+    try:
+        n = await page.evaluate(
+            """async () => {
+              const els = [...document.querySelectorAll('div')].filter(e => {
+                const c = e.className || '';
+                return typeof c === 'string' && c.includes('z-[120]')
+                  && c.includes('fixed') && c.includes('inset-0');
+              });
+              els.forEach(e => e.remove());
+              if (els.length) document.body.style.overflow = '';
+              let marked = 0;
+              try {
+                const t = localStorage.getItem('auth_token');
+                if (t) {
+                  const h = {'Authorization': 'Bearer ' + t};
+                  const r = await fetch('/api/v1/announcements', {headers: h});
+                  const j = await r.json();
+                  for (const a of ((j && j.data) || [])) {
+                    if (a.notify_mode === 'popup' && !a.read_at) {
+                      await fetch('/api/v1/announcements/' + a.id + '/read',
+                                  {method: 'POST', headers: h});
+                      marked++;
+                    }
+                  }
+                }
+              } catch (e) {}
+              return els.length + marked;
+            }"""
+        )
+        closed += int(n or 0)
+    except Exception:
+        pass
+    return closed
 
 
 async def _pipiwangcom_login(page) -> str:
