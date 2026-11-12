@@ -220,8 +220,15 @@ class DispatchStore:
             ).fetchone()
             return self._row_to_job(row) if row else None
 
-    def queued_jobs(self, node: str | None = None) -> list[dict]:
-        """Oldest-first queued jobs for the delivery sweeper."""
+    def queued_jobs(self, node: str | None = None, *, backoff: bool = False) -> list[dict]:
+        """Oldest-first queued jobs for the delivery sweeper.
+
+        backoff=True skips jobs whose next retry is not due yet: a failing
+        push (node busy / quiet window / tunnel down) is retried with an
+        exponential delay instead of hammering the node every sweep. The
+        2026-11-12 quiet-window storm pushed a single manual job 19 times
+        (30s sweep × the whole 07:30-08:45 window) before it was accepted.
+        """
         with self.connect() as db:
             if node:
                 rows = db.execute(
@@ -232,7 +239,25 @@ class DispatchStore:
                 rows = db.execute(
                     "SELECT * FROM dispatch_jobs WHERE status='queued' ORDER BY id ASC"
                 ).fetchall()
+        if not backoff:
             return [self._row_to_job(r) for r in rows]
+        now = datetime.now()
+        due: list[dict] = []
+        for r in rows:
+            job = self._row_to_job(r)
+            attempts = int(job.get("delivery_attempts") or 0)
+            last = job.get("last_delivery_at")
+            if attempts and last:
+                try:
+                    age = (now - datetime.fromisoformat(last)).total_seconds()
+                except (TypeError, ValueError):
+                    age = None
+                # First retry after 30s, then 1m, 2m, 4m ... capped at 10m.
+                delay = min(30.0 * (2 ** max(0, attempts - 1)), 600.0)
+                if age is not None and age < delay:
+                    continue
+            due.append(job)
+        return due
 
     def jobs(self, limit: int = 30) -> list[dict]:
         """Newest-first list for the panel; shape-compatible with legacy jobs()."""
@@ -513,6 +538,7 @@ class DeliveryWorker:
         stale_max_age_s: int | None = None,
         start_worker: bool = True,
         auto_wake: bool | None = None,
+        retry_backoff: bool | None = None,
     ):
         self.store = store
         self._stop = threading.Event()
@@ -535,6 +561,12 @@ class DeliveryWorker:
         self.stale_max_age_s = int(
             stale_max_age_s if stale_max_age_s is not None
             else os.environ.get(STALE_RUNNING_S_ENV, DEFAULT_STALE_RUNNING_S)
+        )
+        # Retry backoff for failing pushes (exponential, capped 10m). Tests
+        # pass retry_backoff=False to sweep in a tight loop without wall time.
+        self.backoff = (
+            retry_backoff if retry_backoff is not None
+            else _env_flag("DAILY_CHECKIN_DISPATCH_RETRY_BACKOFF", True)
         )
         self._deliver_fn = deliver_fn or self._deliver_http
         self._thread: threading.Thread | None = None
@@ -576,7 +608,7 @@ class DeliveryWorker:
         """
         self.store.reap_stale_running(self.stale_max_age_s)
         pushed = 0
-        for job in self.store.queued_jobs():
+        for job in self.store.queued_jobs(backoff=self.backoff):
             node = self.store.node_record(job["node"])
             if not node:
                 self.store.increment_delivery_attempt(job["id"], self.max_attempts)

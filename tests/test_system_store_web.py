@@ -2868,6 +2868,102 @@ class DispatchRemoteWebTests(unittest.TestCase):
         # Nothing was enqueued by the rejected payloads.
         self.assertEqual(self.app.dispatch.jobs(10), [])
 
+    def test_manual_done_result_echoes_to_panel_replica(self):
+        """A manual completion reported done by the node is replayed on the
+        panel replica immediately, so the UI flips without waiting for the
+        node's scp DB sync (~2-10s). Echo must be idempotent-safe: the later
+        sync carries identical state."""
+        day = datetime.now().strftime("%Y-%m-%d")
+        # The panel replica in production already carries the site row plus
+        # today's pending daily_task; /api/state only shows sites that have a
+        # daily_tasks row for the day (tasks() joins on it).
+        self.store.upsert_task(day, "echo-site", "https://echo.example",
+                               checkin_mode="manual", tags="manual",
+                               status="pending", source="manual")
+        status, data = self.request_json(
+            "POST", "/api/tasks/complete", {"name": "echo-site", "day": day},
+            self.app.csrf, auth=self.app.auth_token,
+        )
+        self.assertEqual(status, 202)
+        self.assertTrue(data["queued"])
+        job_id = data["job_id"]
+        self.assertEqual(self.app.dispatch.get_job(job_id)["kind"], "manual")
+        # Replica untouched while the job is only queued.
+        task = next(t for t in self.store.tasks(day) if t["name"] == "echo-site")
+        self.assertEqual(task["status"], "pending")
+        # Node reports done → panel echoes the write locally.
+        status, data = self.request_json(
+            "POST", "/api/dispatch/result",
+            {"job_id": job_id, "status": "done", "exit_code": 0,
+             "message": "[echo-site] manual done"},
+            node_token=self.node_token,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        state = self.request_json("GET", "/api/state", auth=self.app.auth_token)[1]
+        task = next(t for t in state["tasks"] if t["name"] == "echo-site")
+        self.assertEqual(task["status"], "done")
+        self.assertEqual(task["last_reason"], "manual_confirmed")
+        # Echo is toggle-safe: a second complete (already done) would revert
+        # on the node, but the echo must never crash the result endpoint.
+        status, data = self.request_json(
+            "POST", "/api/tasks/complete", {"name": "echo-site", "day": day},
+            self.app.csrf, auth=self.app.auth_token,
+        )
+        job_id2 = data["job_id"]
+        # A failed manual result must NOT echo anything.
+        status, _ = self.request_json(
+            "POST", "/api/dispatch/result",
+            {"job_id": job_id2, "status": "failed", "exit_code": 2, "message": "boom"},
+            node_token=self.node_token,
+        )
+        self.assertEqual(status, 200)
+        state = self.request_json("GET", "/api/state", auth=self.app.auth_token)[1]
+        task = next(t for t in state["tasks"] if t["name"] == "echo-site")
+        self.assertEqual(task["status"], "done")
+
+    def test_update_site_result_echoes_to_panel_replica(self):
+        """update_site reported done is replayed locally (same contract as
+        manual completion) so config toggles flip without the scp sync."""
+        day = datetime.now().strftime("%Y-%m-%d")
+        self.store.upsert_task(day, "echo-config-site", "https://c.example",
+                               checkin_mode="auto", status="pending", source="system")
+        status, data = self.request_json(
+            "POST", "/api/sites/update", {"name": "echo-config-site", "checkin_mode": "manual"},
+            self.app.csrf, auth=self.app.auth_token,
+        )
+        self.assertEqual(status, 202)
+        job_id = data["job_id"]
+        self.assertEqual(self.app.dispatch.get_job(job_id)["kind"], "update_site")
+        status, _ = self.request_json(
+            "POST", "/api/dispatch/result",
+            {"job_id": job_id, "status": "done", "exit_code": 0, "message": "ok"},
+            node_token=self.node_token,
+        )
+        self.assertEqual(status, 200)
+        state = self.request_json("GET", "/api/state", auth=self.app.auth_token)[1]
+        task = next(t for t in state["tasks"] if t["name"] == "echo-config-site")
+        self.assertEqual(task["checkin_mode"], "manual")
+
+    def test_failed_update_site_result_does_not_echo(self):
+        day = datetime.now().strftime("%Y-%m-%d")
+        self.store.upsert_task(day, "no-echo-site", "https://n.example",
+                               checkin_mode="auto", status="pending", source="system")
+        status, data = self.request_json(
+            "POST", "/api/sites/update", {"name": "no-echo-site", "checkin_mode": "manual"},
+            self.app.csrf, auth=self.app.auth_token,
+        )
+        job_id = data["job_id"]
+        status, _ = self.request_json(
+            "POST", "/api/dispatch/result",
+            {"job_id": job_id, "status": "failed", "exit_code": 2, "message": "boom"},
+            node_token=self.node_token,
+        )
+        self.assertEqual(status, 200)
+        state = self.request_json("GET", "/api/state", auth=self.app.auth_token)[1]
+        task = next(t for t in state["tasks"] if t["name"] == "no-echo-site")
+        self.assertEqual(task["checkin_mode"], "auto")
+
     def test_tasks_complete_validation_enforced_in_remote_mode(self):
         status, data = self.request_json(
             "POST", "/api/tasks/complete", {"name": "pmcat", "day": "2026/11/06"},

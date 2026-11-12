@@ -539,10 +539,92 @@ class CheckinWebApp:
                             HTTPStatus.CONFLICT,
                         )
                         return
+                    if status == "done":
+                        self._echo_remote_write(job_id, node)
                     app._wake_delivery()
                     self.send_json({"ok": True, "job_id": job_id, "status": status})
                     return
                 self.send_error(HTTPStatus.NOT_FOUND)
+
+            def _echo_remote_write(self, job_id: int, node: str) -> None:
+                """Replay a fast config write locally the moment a node reports done.
+
+                The panel replica would otherwise stay stale until the node's
+                scp DB sync lands (~2-10s), which is the whole wait behind a
+                manual completion click. Replaying the same write here is
+                idempotent — the later scp carries identical state.
+                """
+                try:
+                    job = app.dispatch.get_job(job_id)
+                except Exception:
+                    job = None
+                if not job:
+                    return
+                kind = job.get("kind")
+                payload = job.get("payload") or {}
+                message = str(job.get("message") or "")
+                try:
+                    if kind == "manual":
+                        day = str(payload.get("day") or "").strip()
+                        site = str(payload.get("site") or "").strip()
+                        if not (re.fullmatch(r"^\d{4}-\d{2}-\d{2}$", day) and site):
+                            return
+                        # complete_task_manually is a TOGGLE; blind replay could
+                        # land the opposite of what the node actually did when
+                        # the replica lags. The agent reports its resolved
+                        # action in the result message JSON — replay that.
+                        action = None
+                        try:
+                            action = str(json.loads(message).get("action") or "")
+                        except (TypeError, ValueError):
+                            pass
+                        if action == "revert":
+                            app.store.revert_task_manually(day, site, project_obsidian=False)
+                        else:
+                            # No parseable message → assume the common path
+                            # (mark_done); a stale-replica revert would then be
+                            # corrected by the scp sync seconds later.
+                            app.store.complete_task_manually(day, site, project_obsidian=False)
+                        self._checkpoint_replica_wal()
+                    elif kind == "update_site":
+                        site = str(payload.get("site") or "").strip()
+                        if not site:
+                            return
+                        updates = {
+                            k: payload[k]
+                            for k in ("checkin_mode", "tags", "enabled", "url", "provider")
+                            if k in payload
+                        }
+                        if updates:
+                            app.store.update_site_config(site, **updates)
+                            self._checkpoint_replica_wal()
+                    elif kind == "delete_site":
+                        site = str(payload.get("site") or "").strip()
+                        if site:
+                            app.store.delete_site(
+                                site,
+                                ignore_missing=bool(payload.get("ignore_missing", False)),
+                            )
+                            self._checkpoint_replica_wal()
+                except Exception:
+                    # Echo is an optimization; the scp sync is the source of truth.
+                    logging.exception(
+                        "echo replay of job #%s from node %s failed", job_id, node
+                    )
+
+            def _checkpoint_replica_wal(self) -> None:
+                """Flush the replica WAL after an echo write.
+
+                The per-node sync dance (sync-db-to-pxed.sh) atomically mv's a
+                whole new system.db over the replica while deliberately leaving
+                any system.db-wal in place — safe only while the panel never
+                writes. Echo writes break that premise: an un-checkpointed WAL
+                would replay stale echo-era pages over the freshly synced DB.
+                """
+                try:
+                    app.store.checkpoint_wal()
+                except Exception:
+                    logging.exception("replica WAL checkpoint after echo failed")
 
             def do_HEAD(self):
                 if not self.allowed_host():

@@ -1148,13 +1148,16 @@ class SystemStore:
                 logger.warning("failed to project manual done to %s: %s", p, e)
         return projected
 
-    def complete_task_manually(self, day: str, name: str) -> dict[str, Any]:
+    def complete_task_manually(self, day: str, name: str, *, project_obsidian: bool = True) -> dict[str, Any]:
         """Toggle a site task's manual status for the given day.
         If the task is already completed it reverts to pending (un-do), otherwise marks it done,
-        updates health, records a run item, and syncs obsidian if the file exists."""
+        updates health, records a run item, and syncs obsidian if the file exists.
+        project_obsidian=False is for the panel-side echo replay: the panel host
+        has no vault, and its write is re-synced from the node's authoritative
+        projection anyway."""
         import re
         if not re.fullmatch(r"^\d{4}-\d{2}-\d{2}$", day):
-            raise ValueError(f"invalid day format (expected YYYY-MM-DD): {day}")
+            raise ValueError(f"invalid day format for manual completion: {day}")
         now = self.now()
         # Toggle: an already-completed task is reverted back to pending (未打卡).
         with self.connect() as db:
@@ -1165,7 +1168,7 @@ class SystemStore:
             ).fetchone()
             already_done = bool(cur and cur["status"] in ("done", "OK", "ALREADY"))
         if already_done:
-            return self.revert_task_manually(day, name)
+            return self.revert_task_manually(day, name, project_obsidian=project_obsidian)
         with self.connect() as db:
             site = db.execute("SELECT id, url, provider FROM sites WHERE name=?", (name,)).fetchone()
             if not site:
@@ -1211,11 +1214,11 @@ class SystemStore:
                 (run_id, site_id, name, provider, json.dumps(evidence, ensure_ascii=False), now),
             )
 
-        projected = self._project_obsidian_manual_done(day, name)
+        projected = self._project_obsidian_manual_done(day, name) if project_obsidian else False
         return {"ok": True, "site": name, "day": day, "status": "done", "action": "mark_done", "obsidian_projected": projected}
 
 
-    def revert_task_manually(self, day: str, name: str) -> dict[str, Any]:
+    def revert_task_manually(self, day: str, name: str, *, project_obsidian: bool = True) -> dict[str, Any]:
         """Revert a manually completed site task back to pending for the given day, and sync obsidian if file exists."""
         import re
         if not re.fullmatch(r"^\d{4}-\d{2}-\d{2}$", day):
@@ -1246,7 +1249,7 @@ class SystemStore:
                 (run_id, site_id, name, provider, now),
             )
 
-        projected = self._project_obsidian_manual_revert(day, name)
+        projected = self._project_obsidian_manual_revert(day, name) if project_obsidian else False
         return {"ok": True, "site": name, "day": day, "status": "pending", "action": "revert", "obsidian_projected": projected}
 
 
@@ -1332,6 +1335,16 @@ class SystemStore:
         with self.connect() as db:
             row = db.execute("SELECT COUNT(*) FROM runs").fetchone()
             return int(row[0]) if row else 0
+
+    def checkpoint_wal(self) -> None:
+        """Flush the WAL into the main DB file so an external whole-file
+        replacement (per-node scp+mv sync) can never replay stale WAL frames
+        over the incoming database."""
+        db = sqlite3.connect(self.path, timeout=10)
+        try:
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            db.close()
 
     def snapshot(self, day: str, materialize: bool = True) -> dict[str, Any]:
         if materialize:

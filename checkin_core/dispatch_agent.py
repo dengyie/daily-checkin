@@ -334,6 +334,18 @@ class DispatchAgent:
         """True when local time is inside the morning-batch quiet window."""
         return in_quiet_window(datetime.datetime.now().time(), self.quiet_window)
 
+    def quiet_window_blocks(self, kind: str) -> bool:
+        """Whether an incoming job of this kind must be refused during the
+        morning-batch quiet window.
+
+        The window protects the 08:10 cron batch's runner lock. Only kinds
+        that would run the check-in runner (site/all) can contend for that
+        lock — config writes and manual completions execute inline in
+        milliseconds and never touch the runner, so refusing them there just
+        strands a user's UI click for the whole window (observed 2026-11-12:
+        manual jobs queued 07:30-08:45 with repeated 503s)."""
+        return kind in ("site", "all")
+
     # ------------------------------------------------------------------ HTTP
 
     def handler(self):
@@ -407,7 +419,7 @@ class DispatchAgent:
                 # (another job running or the 08:10 morning batch holds the
                 # runner lock) → 503 so the panel keeps the job queued and
                 # redelivers later instead of failing it.
-                if agent.in_quiet_window_now():
+                if agent.quiet_window_blocks(kind) and agent.in_quiet_window_now():
                     self._send_json(
                         {"error": "busy", "reason": "quiet_window"},
                         HTTPStatus.SERVICE_UNAVAILABLE,

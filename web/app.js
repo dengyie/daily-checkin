@@ -657,6 +657,7 @@ async function load() {
     const ping = Math.round(performance.now() - t0);
     state = data;
     serverOnline = true;
+    applyOptimisticToggles();
     updateServerStatus("online", "API 正常", ping);
     render();
   } catch (error) {
@@ -2729,11 +2730,15 @@ function getTodayString() {
 // Poll /api/state until the given dispatch job reaches a terminal state
 // (done/failed) or the deadline passes. Returns the job record, or null on
 // timeout. Each cycle refreshes state, so task cards update live as the
-// node executes and syncs its DB back to the panel.
+// node executes and syncs its DB back to the panel. Fast jobs (manual
+// completion, config writes) finish in ~1s, so the first poll fires after
+// 400ms and the interval backs off to the 2s idle cadence.
 async function trackDispatchJob(jobId, timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
+  let delayMs = 400;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, delayMs));
+    delayMs = Math.min(delayMs * 2, 2000);
     try {
       await load();
       const job = (state.jobs || []).find((j) => j.id === jobId);
@@ -2743,6 +2748,37 @@ async function trackDispatchJob(jobId, timeoutMs = 20000) {
     } catch {}
   }
   return null;
+}
+
+// Optimistic manual-completion overlay. load() wholesale-replaces `state`,
+// so a one-shot mutation would flash green for ~0.2s and then revert until
+// the echo lands. Instead the intent is recorded here and re-applied to
+// every freshly fetched state inside load(), until the dispatch job
+// settles and the overlay is cleared.
+const optimisticManualToggles = new Map(); // siteName -> {done, until}
+
+function applyOptimisticToggles() {
+  const now = Date.now();
+  for (const [siteName, toggle] of optimisticManualToggles) {
+    if (now > toggle.until) {
+      optimisticManualToggles.delete(siteName);
+      continue;
+    }
+    const task = (state.tasks || []).find((t) => t.name === siteName);
+    if (!task) continue;
+    task.status = toggle.done ? "done" : "pending";
+    task.last_reason = toggle.done ? "manual_confirmed" : "manual_reverted";
+  }
+}
+
+function optimisticToggleTask(siteName, done, ttlMs = 25000) {
+  optimisticManualToggles.set(siteName, { done, until: Date.now() + ttlMs });
+  applyOptimisticToggles();
+  render();
+}
+
+function clearOptimisticToggle(siteName) {
+  optimisticManualToggles.delete(siteName);
 }
 
 async function markTaskManuallyComplete(siteName, clickedBtn = null) {
@@ -2757,20 +2793,26 @@ async function markTaskManuallyComplete(siteName, clickedBtn = null) {
     const today = getTodayString();
     const res = await api("/api/tasks/complete", { name: siteName, day: today });
     if (res.queued && res.mode === "remote") {
-      // Dispatch mode: the command is pushed to the executor node and only
-      // lands in the panel replica after the node runs it and syncs the DB
-      // back (~2-10s). Reload right away for the queued state, then keep
-      // polling until the job settles so the card flips without waiting for
-      // the 10s idle interval (the reported "toast ok but card unchanged").
+      // Dispatch mode: the command is pushed to the executor node. The panel
+      // echoes the write locally the moment the node reports done, so the
+      // card flips within ~1s; the node's scp DB sync later confirms it.
+      const wasDone = isDoneTask((state.tasks || []).find((t) => t.name === siteName) || {});
+      optimisticToggleTask(siteName, !wasDone);
       showToast(`已发布手动完成指令至节点 ${res.node || "mac"}（作业 #${res.job_id}），正在等待执行回显...`, "info");
-      await load();
-      const settled = await trackDispatchJob(res.job_id, 20000);
-      if (settled && settled.status === "done") {
-        showToast(`站点「${siteName}」已由节点 ${res.node || "mac"} 执行完成。`, "success");
-      } else if (settled) {
-        showToast(`节点 ${res.node || "mac"} 执行失败（作业 #${res.job_id}）：${settled.message || settled.status}`, "error");
-      } else {
-        showToast(`作业 #${res.job_id} 仍在节点执行中，结果稍后会显示在卡片上。`, "info");
+      try {
+        await load();
+        const settled = await trackDispatchJob(res.job_id, 20000);
+        if (settled && settled.status === "done") {
+          showToast(`站点「${siteName}」已由节点 ${res.node || "mac"} 执行完成。`, "success");
+        } else if (settled) {
+          optimisticToggleTask(siteName, wasDone);
+          showToast(`节点 ${res.node || "mac"} 执行失败（作业 #${res.job_id}）：${settled.message || settled.status}`, "error");
+        } else {
+          showToast(`作业 #${res.job_id} 仍在节点执行中，结果稍后会显示在卡片上。`, "info");
+        }
+      } finally {
+        // Terminal or timed out: let the authoritative replica state show.
+        clearOptimisticToggle(siteName);
       }
       return;
     }

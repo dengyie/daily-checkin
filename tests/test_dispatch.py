@@ -198,7 +198,8 @@ class DeliveryWorkerTests(unittest.TestCase):
         self.store.add_node("mac", "http://10.144.144.100:9777")
         job_id = self.store.enqueue("all", node="mac")
         worker = DeliveryWorker(
-            self.store, deliver_fn=lambda *a: False, max_attempts=3, start_worker=False
+            self.store, deliver_fn=lambda *a: False, max_attempts=3, start_worker=False,
+            retry_backoff=False,
         )
         self.assertEqual(worker.sweep(), 0)
         job = self.store.get_job(job_id)
@@ -208,6 +209,30 @@ class DeliveryWorkerTests(unittest.TestCase):
         for _ in range(2):
             worker.sweep()
         self.assertEqual(self.store.get_job(job_id)["status"], "failed")
+
+    def test_sweep_backs_off_failing_push(self):
+        """A repeatedly failing push is retried with exponential backoff
+        instead of every sweep (2026-11-12: quiet-window storm pushed one
+        manual job 19 times before acceptance)."""
+        self.store.add_node("mac", "http://10.144.144.100:9777")
+        job_id = self.store.enqueue("all", node="mac")
+        worker = DeliveryWorker(
+            self.store, deliver_fn=lambda *a: False, max_attempts=99, start_worker=False,
+            retry_backoff=True,
+        )
+        self.assertEqual(worker.sweep(), 0)
+        self.assertEqual(self.store.get_job(job_id)["delivery_attempts"], 1)
+        # Second sweep right away: the 30s first-retry delay holds it back.
+        self.assertEqual(worker.sweep(), 0)
+        self.assertEqual(self.store.get_job(job_id)["delivery_attempts"], 1)
+        # Once the retry delay has elapsed the push is attempted again.
+        last = (datetime.now() - timedelta(seconds=31)).strftime("%Y-%m-%dT%H:%M:%S")
+        with self.store.connect() as db:
+            db.execute(
+                "UPDATE dispatch_jobs SET last_delivery_at=? WHERE id=?", (last, job_id)
+            )
+        self.assertEqual(worker.sweep(), 0)
+        self.assertEqual(self.store.get_job(job_id)["delivery_attempts"], 2)
 
     def test_sweep_reaps_stale_before_delivery(self):
         job_id = self.store.enqueue("all", node="mac")
