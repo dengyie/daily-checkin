@@ -62,12 +62,17 @@ class TestDoctorHelpers(unittest.TestCase):
             # exit 推到 1。投影检查不在本测试语义内，指到临时目录假 vault
             # 内的 Task/daily 保证该项 OK，断言只关注 8765/8766 的 SKIP。
             fake_vault = self._projection_root(td)
+            # 状态文件新鲜度同理：CI runner 默认日志目录没有 last-run.json
+            # 也会 WARN。指到临时目录并放入新文件，隔离机器状态。
+            (P(td) / "last-run.json").write_text("{}", encoding="utf-8")
+            (P(td) / "last-attempt.json").write_text("{}", encoding="utf-8")
             with mock.patch.object(self.m, "discover_cdp_endpoint",
                                    return_value={"http": "http://127.0.0.1:9222", "headless": False}), \
                  mock.patch.object(self.m, "_doctor_http_status", side_effect=fake_status), \
                  mock.patch.object(self.m, "store_from_env",
                                    return_value=SystemStore(P(td) / "system.db")), \
-                 mock.patch.dict(os.environ, {"OBSIDIAN_VAULT_ROOT": fake_vault}):
+                 mock.patch.dict(os.environ, {"OBSIDIAN_VAULT_ROOT": fake_vault,
+                                              "DAILY_CHECKIN_LOG_DIR": td}):
                 # 迁移模式: 8765/8766 → SKIP, 不产生 FAIL
                 os.environ["DAILY_CHECKIN_WEB_MIGRATED_REMOTE"] = "1"
                 try:
