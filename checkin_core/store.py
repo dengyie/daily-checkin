@@ -103,13 +103,17 @@ def read_only_tasks(db_path: str | Path, day: str) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     uri = f"file:{path}?mode=ro&immutable=1"
+    db = sqlite3.connect(uri, uri=True, timeout=5)
     try:
-        with sqlite3.connect(uri, uri=True, timeout=5) as db:
-            db.row_factory = sqlite3.Row
-            rows = db.execute(_TASKS_SQL, (day,)).fetchall()
-            return [dict(r) for r in rows]
+        db.row_factory = sqlite3.Row
+        rows = db.execute(_TASKS_SQL, (day,)).fetchall()
+        return [dict(r) for r in rows]
     except sqlite3.Error:
         return []  # replica mid-replacement or unreadable: skip, stay empty
+    finally:
+        # sqlite3 的 `with` 只提交/回滚，从不 close。Windows 上一个未 close 的
+        # ro 连接会让文件句柄滞留到 GC，副本/测试 teardown 即撞 WinError 32。
+        db.close()
 
 
 class SystemStore:

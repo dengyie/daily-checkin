@@ -515,6 +515,10 @@ class SyncScriptGuardTests(unittest.TestCase):
     """scripts/sync-db-to-pxed.sh guard paths (no network involved)."""
 
     def test_missing_db_env_exits_zero_silently(self):
+        if sys.platform == "win32":
+            # The script is POSIX/zsh; on Windows runners only the guard
+            # contract matters, which the source assertions below pin.
+            self.skipTest("zsh script is POSIX-only; guard covered by source assertions")
         env = dict(os.environ)
         env.pop("DAILY_CHECKIN_DB", None)
         proc = subprocess.run(

@@ -31,6 +31,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+
 import checkin_core.dispatch_agent as agent_module
 from checkin_core.dispatch_agent import DispatchAgent, runner_lock_probe
 
@@ -196,19 +201,25 @@ class DispatchEndpointTests(AgentTestBase):
             self.agent._job_mutex.release()
 
     def test_dispatch_busy_runner_lock_returns_503(self):
-        # Simulate the 08:10 morning batch holding the runner lock.
+        # Simulate the 08:10 morning batch holding the runner lock. Locking
+        # primitive mirrors checkin_core.dispatch_agent: msvcrt on Windows,
+        # fcntl on POSIX (fcntl does not exist on Windows).
         lock_path = self.log_dir / "daily-checkin.lock"
         with open(lock_path, "a+") as fh:
-            import fcntl
-
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if agent_module.msvcrt is not None:
+                agent_module.msvcrt.locking(fh.fileno(), agent_module.msvcrt.LK_NBLCK, 1)
+            elif agent_module.fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                self.skipTest("no file-locking primitive on this platform")
             try:
                 status, _ = self.post("/dispatch", {"job_id": 7, "kind": "site", "sites": ["A"]})
                 self.assertEqual(status, 503)
             finally:
-                import fcntl
-
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                if agent_module.msvcrt is not None:
+                    agent_module.msvcrt.locking(fh.fileno(), agent_module.msvcrt.LK_UNLCK, 1)
+                elif agent_module.fcntl is not None:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
     def test_unknown_path_is_404(self):
         status, _ = self.post("/nope", {})
@@ -460,8 +471,15 @@ class RunnerInvocationTests(AgentTestBase):
         idx = cmd.index("--only")
         self.assertEqual(cmd[idx + 1], "伏枥,A")
         self.assertEqual((status, code), ("done", 0))
-        # POSIX: runner runs in its own session so the tree is killable.
-        self.assertIn("start_new_session", captured["kwargs"])
+        # Runner runs in its own session/process group so the tree is killable:
+        # start_new_session on POSIX, CREATE_NEW_PROCESS_GROUP on Windows.
+        if agent_module.subprocess.CREATE_NEW_PROCESS_GROUP and agent_module.sys.platform == "win32":
+            self.assertEqual(
+                captured["kwargs"]["creationflags"],
+                agent_module.subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+        else:
+            self.assertIn("start_new_session", captured["kwargs"])
 
     def test_agent_cdp_env_pins_strict_attach_only(self):
         """DAILY_CHECKIN_AGENT_CDP 必须显式下传 --cdp（P0: 节点侧永不拉起 Chrome，
@@ -623,13 +641,19 @@ class RunnerLockProbeTests(unittest.TestCase):
         self.assertTrue(runner_lock_probe())
 
     def test_probe_false_when_morning_batch_holds_lock(self):
-        import fcntl
-
         lock_path = self.log_dir / "daily-checkin.lock"
         with open(lock_path, "a+") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if agent_module.msvcrt is not None:
+                agent_module.msvcrt.locking(fh.fileno(), agent_module.msvcrt.LK_NBLCK, 1)
+            elif fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                self.skipTest("no file-locking primitive on this platform")
             self.assertFalse(runner_lock_probe())
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            if agent_module.msvcrt is not None:
+                agent_module.msvcrt.locking(fh.fileno(), agent_module.msvcrt.LK_UNLCK, 1)
+            elif fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         self.assertTrue(runner_lock_probe())
 
 

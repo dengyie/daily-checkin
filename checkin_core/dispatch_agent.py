@@ -214,6 +214,11 @@ def acquire_single_instance(path: Path):
         return "unavailable", None
     try:
         if msvcrt is not None:  # Windows: lock byte 0 without blocking
+            # "a+" 在非空文件上位置停在 EOF；msvcrt.locking 锁的是当前位置起
+            # 的区间。不先 seek(0)，第一个 agent 写入 pid 后第二个 agent 锁
+            # 的是 EOF 字节，与 holder 的字节 0 区间不冲突——单实例锁失效
+            # （2026-11-11 windows-smoke 实测锁形同虚设）。
+            fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
         elif fcntl is not None:  # POSIX: flock is released on process exit
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

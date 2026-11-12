@@ -19,6 +19,13 @@ class TestDoctorHelpers(unittest.TestCase):
     def setUp(self):
         self.m = __import__("stealth_checkin_runner")
 
+    @staticmethod
+    def _projection_root(td) -> str:
+        """临时假 vault：Note/Task/daily 存在，doctor 投影项报 OK。"""
+        d = __import__("pathlib").Path(td) / "Note" / "Task" / "daily"
+        d.mkdir(parents=True, exist_ok=True)
+        return str(__import__("pathlib").Path(td))
+
     def test_recent_failure_summary_groups_and_truncates(self):
         rows = [("no_button", "a"), ("no_button", "b"), ("timeout", "c")]
         lines = self.m._summarize_recent_failures(rows)
@@ -51,11 +58,16 @@ class TestDoctorHelpers(unittest.TestCase):
                     return 200
                 return None  # 8765/8766 无本地监听(已迁移)
 
+            # Obsidian 投影目录仅在 Mac vault 存在；CI/Windows 上必 WARN 把
+            # exit 推到 1。投影检查不在本测试语义内，指到临时目录假 vault
+            # 内的 Task/daily 保证该项 OK，断言只关注 8765/8766 的 SKIP。
+            fake_vault = self._projection_root(td)
             with mock.patch.object(self.m, "discover_cdp_endpoint",
                                    return_value={"http": "http://127.0.0.1:9222", "headless": False}), \
                  mock.patch.object(self.m, "_doctor_http_status", side_effect=fake_status), \
                  mock.patch.object(self.m, "store_from_env",
-                                   return_value=SystemStore(P(td) / "system.db")):
+                                   return_value=SystemStore(P(td) / "system.db")), \
+                 mock.patch.dict(os.environ, {"OBSIDIAN_VAULT_ROOT": fake_vault}):
                 # 迁移模式: 8765/8766 → SKIP, 不产生 FAIL
                 os.environ["DAILY_CHECKIN_WEB_MIGRATED_REMOTE"] = "1"
                 try:
