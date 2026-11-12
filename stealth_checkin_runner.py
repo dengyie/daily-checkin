@@ -1660,6 +1660,21 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         ],
         prefer_catalog_url=True,
     ),
+    # apikey.casa-2(apikey.casa 第二账号)—— 2026-11-13 接入,仅 Windows 节点
+    # (dispatch site_nodes 指派 win)。与主条目同构,登录态在 home-win 9222
+    # 会话;Mac 不登记任务行避免双跑,不投影 Obsidian(用户决策)。
+    _B(
+        "apikey.casa-2",
+        "https://apikey.casa/redeem",
+        signs=[
+            'button:has-text("立即签到"):not([disabled])',
+        ],
+        already=[
+            'button:has-text("今日已签到")',
+            'text=今日已签到',
+        ],
+        prefer_catalog_url=True,
+    ),
     # teleai(TeleAgent 星辰超级智能体 agent.teleai.com.cn/teleagent)——
     # 2026-11-12 接入。中国电信自研 SPA(opencowork),非 New API、无
     # LinuxDO OAuth,登录态走共享 9222 会话。左侧栏底部「积分福利社」

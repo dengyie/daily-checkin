@@ -1007,6 +1007,39 @@ class TestSitesYaml(unittest.TestCase):
         # LinuxDO OAuth 站:不应登记账密
         self.assertIsNone(get_account_credential("apikey.casa"))
 
+    def test_yaml_registers_apikey_casa_2_entry(self):
+        """apikey.casa-2(第二账号) 2026-11-13 接入:仅 Windows 节点执行
+        (dispatch site_nodes 指派 win),与主条目同构(/redeem + browser 通道),
+        登录态在 home-win 9222 会话;Mac 不登记任务行避免双跑,不投影 Obsidian。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "apikey.casa-2"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 apikey.casa-2 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://apikey.casa/redeem")
+        self.assertIn('button:has-text("立即签到"):not([disabled])', a.sign_selectors)
+        self.assertIn("今日已签到", " ".join(a.already_selectors))
+        self.assertTrue(a.prefer_catalog_url)
+        resolved = resolve_site("apikey.casa-2", "https://apikey.casa/redeem")
+        self.assertEqual(resolved.url, "https://apikey.casa/redeem")
+        self.assertEqual(resolved.kind, "browser")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "apikey.casa-2"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 apikey.casa-2")
+        self.assertEqual(builtin_entry.kind, "browser")
+        # 主条目与第二账号条目同构(选择器完全一致)
+        main_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "apikey.casa"), None)
+        self.assertEqual(builtin_entry.sign_selectors, main_entry.sign_selectors)
+        self.assertEqual(builtin_entry.already_selectors, main_entry.already_selectors)
+        # 无账密凭据(会话依赖站)
+        self.assertIsNone(get_account_credential("apikey.casa-2"))
+
     def test_yaml_registers_teleai_entry(self):
         """teleai(TeleAgent 星辰超级智能体 agent.teleai.com.cn/teleagent)
         2026-11-12 接入:中国电信自研 SPA(opencowork),非 New API、无
