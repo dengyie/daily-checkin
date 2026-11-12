@@ -25,7 +25,11 @@ export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 DB="${DAILY_CHECKIN_DB:-}"
 SSH_ALIAS="${DAILY_CHECKIN_SYNC_SSH_ALIAS:-pxed-direct}"
 REMOTE_PATH="${DAILY_CHECKIN_SYNC_REMOTE_PATH:-/data/daily-checkin/data/system.db}"
-REMOTE_DIR="${REMOTE_PATH:h}"
+# POSIX dirname, not zsh's `${path}` + history-modifier syntax: the shebang
+# only governs direct execution — `bash script.sh` (e.g. an operator one-liner
+# sourcing env.sh) would die with "h: unbound variable" under `set -u`
+# (2026-11-13).
+REMOTE_DIR="$(dirname "$REMOTE_PATH")"
 REMOTE_TMP="${REMOTE_DIR}/.system.db.incoming"
 
 if [[ -z "$DB" || ! -f "$DB" ]]; then

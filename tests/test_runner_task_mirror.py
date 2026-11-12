@@ -148,6 +148,27 @@ class TestEnsureDailyTask(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 self.m.ensure_daily_task_file(str(target), "2026-07-12")
 
+    def test_resurrect_warning_scenarios(self):
+        """Re-seed with prior DB rows must warn; first materialize and
+        plain reads must stay silent (iCloud rollback of 2026-11-13)."""
+        import contextlib
+        import io
+
+        def capture(path, day, prior, created):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.m.warn_if_task_file_resurrected(path, day, prior, created)
+            return buf.getvalue()
+
+        # vanished mid-day (DB rows exist) -> loud warning
+        out = capture("/x/2026-11-13 每日任务.md", "2026-11-13", 121, True)
+        self.assertIn("vanished and was re-seeded", out)
+        self.assertIn("121", out)
+        # first materialize of the day (no DB rows yet) -> silent
+        self.assertEqual(capture("/x/2026-11-14 每日任务.md", "2026-11-14", 0, True), "")
+        # file existed (read-only path) -> silent regardless of DB rows
+        self.assertEqual(capture("/x/2026-11-13 每日任务.md", "2026-11-13", 121, False), "")
+
 
 class TestResultBridge(unittest.TestCase):
     def setUp(self):

@@ -38,6 +38,16 @@ class SyncDbToPxedContractTests(unittest.TestCase):
         self.assertIn("DAILY_CHECKIN_DB", text)
         self.assertIn("skip", text)
 
+    def test_no_zsh_only_parameter_expansions(self):
+        """The shebang only governs direct execution; the script must also
+        survive `bash script.sh` / `sh script.sh` invocations (an operator
+        sourcing env.sh in bash hit "h: unbound variable" on 2026-11-13 via
+        `${REMOTE_PATH:h}`). Ban zsh modifiers and keep the POSIX dirname."""
+        text = _read("sync-db-to-pxed.sh")
+        for bad in (":h}", ":t}", ":r}", ":e}"):
+            self.assertNotIn(bad, text)
+        self.assertIn('dirname "$REMOTE_PATH"', text)
+
 
 class SyncDbToPanelContractTests(unittest.TestCase):
     """Windows -> panel atomic sync (twin of sync-db-to-pxed.sh)."""

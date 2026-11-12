@@ -16266,6 +16266,30 @@ def print_run_summary(results: list[CheckinResult]) -> None:
         print("  ALREADY: " + ", ".join(r.site for r in already if r.site), flush=True)
 
 
+def warn_if_task_file_resurrected(
+    task_file_path: str, today_str: str, prior_task_count: int, created: bool
+) -> None:
+    """Loud warning when a vanished daily task file was re-seeded mid-day.
+
+    A fresh seed is normal on first materialize (no DB rows yet). But if the
+    DB already had task rows for today, the file existed earlier and was
+    deleted out-of-band — iCloud sync rollback did exactly that to
+    2026-11-13: the vanished file left dangling obsidian_path links and the
+    re-seed silently restored a stale snapshot. Check-in behavior itself
+    stays seed-driven and safe; this only surfaces the loss to the operator.
+    """
+    if not created or prior_task_count <= 0:
+        return
+    print(
+        f"  !! daily task file vanished and was re-seeded: {task_file_path}"
+        f" ({prior_task_count} DB task rows for {today_str} already existed)."
+        " If this day already ran, reconcile the file against the"
+        " panel/DB (checkboxes, URLs, rewards) — the fresh seed"
+        " may have resurrected stale rows.",
+        flush=True,
+    )
+
+
 async def run(argv: list[str] | None = None) -> int:
     """Run check-in batch. Returns process exit code (0/1/2)."""
     args = parse_cli_args(argv)
@@ -16287,6 +16311,11 @@ async def run(argv: list[str] | None = None) -> int:
         projection_available = True
         if created:
             print(f"Task file ready: {task_file_path}", flush=True)
+        try:
+            prior_task_count = len(store.tasks(today_str))
+        except Exception:
+            prior_task_count = 0
+        warn_if_task_file_resurrected(task_file_path, today_str, prior_task_count, created)
         # The task file is the durable projection sink for every entry point.
         # Web jobs must import it too: import_obsidian_tasks never overwrites
         # authoritative system status (ON CONFLICT keeps current status), so
