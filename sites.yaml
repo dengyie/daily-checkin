@@ -1587,18 +1587,25 @@ sites:
     url: https://qingniaocoding.space/wallet
     kind: newapi_profile
     prefer_catalog_url: true
-  # apikey.casa(福利 apikey.casa)—— 2026-11-10 接入。
-  # /api/status 实测: system_name=福利, version=v1.0.0-rc.49,
-  # checkin_enabled=true, linuxdo_oauth=true, github_oauth=false,
-  # password_login_enabled=true, turnstile_check=false, quota_per_unit=500000 USD。
-  # 标准 New API /api/user/checkin(GET 未登录 401 AUTH_UNAUTHORIZED)。
-  # 签到入口 /profile,通用 newapi_profile 通道。
+  # apikey.casa(apikey.casa)—— 2026-11-10 接入,2026-11-13 站点改版重适配。
+  # 旧版是标准 New API(system_name=福利,/profile);新版自研 SPA(axios baseURL
+  # /api/v1,/api/status 404,/api/user/checkin 已不存在)。LinuxDO OAuth 登录。
+  # 签到页 /redeem:「每日签到」,GET/POST /api/v1/redeem/checkin →
+  # {checked_in,reward,...},奖励按美元计余额;button 三态:
+  #   未签「立即签到」→ 已签「今日已签到」→ reward<=0「签到暂未开启」(disabled)。
+  # 注意:加载中(u.value=null)按钮也 disabled 且文案仍是「立即签到」,
+  # signs 必须 :not([disabled]),否则首屏即空点(同 qulink/zerocat 坑)。
   # LinuxDO OAuth 站: 不登记账密、不登录、不代填;依赖共享 9222 既有会话,
-  # 失效时通用通道无 SSO 兜底会 FAIL:auth_required,需人工在 9222 补登。
+  # 失效时通用通道 SSO 兜底,再不行 FAIL:auth_required 需人工在 9222 补登。
   - name: 'apikey.casa'
-    url: https://apikey.casa/profile
-    kind: newapi_profile
+    url: https://apikey.casa/redeem
+    kind: browser
     prefer_catalog_url: true
+    signs:
+      - 'button:has-text("立即签到"):not([disabled])'
+    already:
+      - 'button:has-text("今日已签到")'
+      - 'text=今日已签到'
   # teleai(TeleAgent 星辰超级智能体 agent.teleai.com.cn/teleagent)—— 2026-11-12 接入。
   # 中国电信 TeleAgent 自研 SPA(opencowork),非 New API(/api/status 404),
   # 无 LinuxDO OAuth;登录态在共享 9222 会话(localStorage opencowork-auth +
@@ -1619,3 +1626,27 @@ sites:
       - 'text=已领取，明天再来'
       - 'text=今日已签到'
       - 'text=签到成功'
+  # ajimage(image.a-j.app, Aj生图)—— 2026-11-12 接入。
+  # 自研 TanStack Start SPA(标题「工作台 · Aj生图」),非 New API
+  # (/api/status 返回 HTML,不是 JSON)。LinuxDO OAuth 登录,共享 9222
+  # 会话已绑定 mangoqwq(linuxdo id 429883),无账密、不代登录,失效时
+  # FAIL:auth_required 需人工在 9222 补登。
+  # 签到页 /checkin:GET /api/user/check-in 返回
+  # {checked_in,can_claim,reward_points,consecutive_days,checked_in_days,...},
+  # button「立即签到 +10 积分」→ POST /api/user/check-in {turnstile_token}。
+  # 实测当前未启用 Turnstile(profile 无 turnstile_site_key,页面无
+  # challenges.cloudflare.com iframe),点击成功弹窗「签到成功 +10」。
+  # 已签判据只认标题「今日已签到」:签到日历图例里就有「● 已签到」,
+  # 绝不能写泛化的 text=已签到,否则首屏即假 ALREADY。
+  - name: 'ajimage'
+    url: https://image.a-j.app/checkin
+    kind: browser
+    prefer_catalog_url: true
+    ready_rounds: 20
+    signs:
+      - 'button:has-text("立即签到")'
+      - 'button:text-is("立即签到")'
+      - 'text=立即签到'
+    already:
+      - 'text=今日已签到'
+      - 'button:has-text("今日已签到")'

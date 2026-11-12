@@ -972,9 +972,10 @@ class TestSitesYaml(unittest.TestCase):
         self.assertIsNone(get_account_credential("qingniaocoding"))
 
     def test_yaml_registers_apikey_casa_entry(self):
-        """apikey.casa(福利 apikey.casa) 2026-11-10 接入:标准
-        LinuxDO + New API 站(version=v1.0.0-rc.49, checkin_enabled=true),
-        newapi_profile 通道,/profile,prefer_catalog_url,无自定义选择器。"""
+        """apikey.casa 2026-11-10 接入(标准 New API /profile),2026-11-13
+        站点改版重适配:自研 SPA,签到页 /redeem,GET/POST /api/v1/redeem/checkin,
+        browser 通道 + 立即签到(not[disabled]) / 今日已签到,prefer_catalog_url,
+        无账密凭据(LinuxDO OAuth 站)。"""
         import yaml
         yaml_path = ROOT / "sites.yaml"
         self.assertTrue(yaml_path.exists())
@@ -987,19 +988,22 @@ class TestSitesYaml(unittest.TestCase):
             _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
         )
         a = _adapter_from_yaml_entry(entry)
-        self.assertEqual(a.kind, "newapi_profile")
-        self.assertEqual(a.url, "https://apikey.casa/profile")
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://apikey.casa/redeem")
         self.assertEqual(a.login_url, "")
-        self.assertIn("签到", " ".join(a.sign_selectors))
-        self.assertIn("已签到", " ".join(a.already_selectors))
+        # 加载中按钮也是「立即签到」且 disabled:signs 必须排除 disabled(qulink 坑)
+        self.assertIn('button:has-text("立即签到"):not([disabled])', a.sign_selectors)
+        self.assertIn("今日已签到", " ".join(a.already_selectors))
         self.assertTrue(a.prefer_catalog_url)
-        resolved = resolve_site("apikey.casa", "https://apikey.casa/profile")
-        self.assertEqual(resolved.url, "https://apikey.casa/profile")
-        self.assertEqual(resolved.kind, "newapi_profile")
+        resolved = resolve_site("apikey.casa", "https://apikey.casa/redeem")
+        self.assertEqual(resolved.url, "https://apikey.casa/redeem")
+        self.assertEqual(resolved.kind, "browser")
         builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "apikey.casa"), None)
         self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 apikey.casa")
-        self.assertEqual(builtin_entry.kind, "newapi_profile")
-        self.assertEqual(builtin_entry.url, "https://apikey.casa/profile")
+        self.assertEqual(builtin_entry.kind, "browser")
+        self.assertEqual(builtin_entry.url, "https://apikey.casa/redeem")
+        self.assertEqual(builtin_entry.sign_selectors, a.sign_selectors)
+        self.assertEqual(builtin_entry.already_selectors, a.already_selectors)
         # LinuxDO OAuth 站:不应登记账密
         self.assertIsNone(get_account_credential("apikey.casa"))
 
@@ -1043,6 +1047,44 @@ class TestSitesYaml(unittest.TestCase):
         self.assertEqual(builtin_entry.already_selectors, a.already_selectors)
         # 电信站,无 LinuxDO/账密:不应登记凭据
         self.assertIsNone(get_account_credential("teleai"))
+
+    def test_yaml_registers_ajimage_entry(self):
+        """ajimage(image.a-j.app, Aj生图) 2026-11-12 接入:自研 SPA,非
+        New API;LinuxDO OAuth 走共享 9222 会话。/checkin「立即签到」
+        → POST /api/user/check-in。签到日历图例含「已签到」,already
+        必须只认「今日已签到」,不能落泛化选择器。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "ajimage"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 ajimage 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://image.a-j.app/checkin")
+        self.assertTrue(a.prefer_catalog_url)
+        self.assertEqual(a.ready_rounds, 20)
+        self.assertIn('button:has-text("立即签到")', " ".join(a.sign_selectors))
+        joined_already = " ".join(a.already_selectors)
+        self.assertIn("text=今日已签到", joined_already)
+        # 日历图例「● 已签到」会让裸 text=已签到 在首屏命中 → 假 ALREADY。
+        self.assertNotIn("text=已签到", a.already_selectors)
+        resolved = resolve_site("ajimage", "https://image.a-j.app/checkin")
+        self.assertEqual(resolved.url, "https://image.a-j.app/checkin")
+        self.assertEqual(resolved.kind, "browser")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "ajimage"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 ajimage(兜底守卫)")
+        self.assertEqual(builtin_entry.kind, "browser")
+        self.assertEqual(builtin_entry.url, "https://image.a-j.app/checkin")
+        self.assertEqual(builtin_entry.sign_selectors, a.sign_selectors)
+        self.assertEqual(builtin_entry.already_selectors, a.already_selectors)
+        # LinuxDO OAuth 站,无账密:不应登记凭据
+        self.assertIsNone(get_account_credential("ajimage"))
 
     def test_yaml_registers_fuli_entry(self):
         """伏枥(dash.free-ai.de5.net) 2026-11-05 接入:标准 LinuxDO + New API 站,

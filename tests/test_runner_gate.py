@@ -461,6 +461,84 @@ class TestSuccessGate(unittest.TestCase):
         # 点击回执 toast 为强确认
         self.assertTrue(self.m.is_valid_checkin_confirm("签到成功！获得 ¥0.0079"))
 
+    def test_calendar_legend_not_today_confirm(self):
+        # ajimage 2026-11-12 regression: 未签页常驻「今日 11 月签到日历 ● 已签到」
+        # 图例,被 today+已签到 弱启发式拼成假 ALREADY(首跑 4.2s 未点击就报
+        # ALREADY,实际 checked_in=false / balance 未变)。日历图例词必须中性化,
+        # 真已签标题「今日已签到」不带 签到日历,仍应正常确认。
+        ajimage_unsigned = (
+            "每日一签，灵感常在\n连续签到奖励逐日递增，断签将从第 1 天重新计算。\n"
+            "连续签到\n0\n天\n本月签到\n0 / 30\n立即签到\n+10 积分\n"
+            "连续签到奖励\n第 7 天\n+20\n"
+            "今日\n11 月签到日历\n● 已签到\n日\n一\n二\n三\n四\n五\n六\n"
+            "累计里程碑\n累计 7 天\n0 / 7\n奖励：20 积分"
+        )
+        self.assertFalse(self.m.is_valid_checkin_confirm(ajimage_unsigned))
+        self.assertEqual(self.m.confirm_signal(ajimage_unsigned), "")
+        # 真已签态:标题翻成「今日已签到」,图例仍在 → 仍需能确认
+        ajimage_signed = ajimage_unsigned.replace("每日一签，灵感常在", "今日已签到")
+        self.assertTrue(self.m.is_valid_checkin_confirm(ajimage_signed))
+
+    def test_ajimage_reward_uses_api_reward_points(self):
+        # ajimage 页面同时渲染「第 7 天 +20」「奖励:20 积分」,通用文本启发式
+        # 会把非当日金额采成 +20;当日真实发放以 /api/user/check-in 的
+        # reward_points 为准(2026-11-12 首跑实证 10)。
+        import asyncio
+
+        class FakePage:
+            def __init__(self, data):
+                self.data = data
+
+            async def evaluate(self, *_args, **_kwargs):
+                return self.data
+
+        fresh = asyncio.run(self.m._extract_ajimage_balance(
+            FakePage({"checked_in": True, "reward_points": 10, "balance_points": 20})
+        ))
+        self.assertIsNotNone(fresh)
+        self.assertEqual(fresh.reward_text, "+10 积分")
+        self.assertEqual(fresh.amount, None)  # 积分不是货币,不能写 amount/currency
+        # 未签/接口失败 → 不产生奖励证据
+        self.assertIsNone(asyncio.run(self.m._extract_ajimage_balance(
+            FakePage({"checked_in": False, "reward_points": 10})
+        )))
+        self.assertIsNone(asyncio.run(self.m._extract_ajimage_balance(FakePage(None))))
+
+    def test_apikeycasa_reward_uses_api_reward(self):
+        # apikey.casa redeem 版(2026-11-13 改版): 通用 DOM 启发式只采到侧栏
+        # 「当前余额 $20.00」,当日奖励误记 reward_text="+0";真实当日发放以
+        # /api/v1/redeem/checkin 的 reward(美元)为准。
+        import asyncio
+
+        class FakePage:
+            def __init__(self, data):
+                self.data = data
+
+            async def evaluate(self, *_args, **_kwargs):
+                return self.data
+
+        fresh = asyncio.run(self.m._extract_apikeycasa_balance(
+            FakePage({"code": 0, "message": "success",
+                      "data": {"reward": 10, "checked_in": True, "date": "2026-11-13"}})
+        ))
+        self.assertIsNotNone(fresh)
+        self.assertEqual(fresh.reward_text, "+$10")
+        self.assertEqual(fresh.amount, 10)
+        self.assertEqual(fresh.currency, "USD")
+        # 小数奖励不带多余 0
+        frac = asyncio.run(self.m._extract_apikeycasa_balance(
+            FakePage({"code": 0, "data": {"reward": 0.5, "checked_in": True}})
+        ))
+        self.assertEqual(frac.reward_text, "+$0.5")
+        # reward<=0(签到暂未开启)/未签/接口失败 → 不产生奖励证据
+        self.assertIsNone(asyncio.run(self.m._extract_apikeycasa_balance(
+            FakePage({"code": 0, "data": {"reward": 0, "checked_in": True}})
+        )))
+        self.assertIsNone(asyncio.run(self.m._extract_apikeycasa_balance(
+            FakePage({"code": 0, "data": {"reward": 0.5, "checked_in": False}})
+        )))
+        self.assertIsNone(asyncio.run(self.m._extract_apikeycasa_balance(FakePage(None))))
+
     # ---- 2026-10-27 审计修复:post-click 金额漏采 + 盲回退 CTA 守卫 ----
 
     def test_postclick_already_enriches_reward_from_wide_text(self):

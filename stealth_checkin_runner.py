@@ -1642,12 +1642,24 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     # github_oauth=false,turnstile_check=false),签到入口 /wallet,
     # 通用 newapi_profile 通道,不登记账密、不登录。
     _N("qingniaocoding", "https://qingniaocoding.space/wallet", prefer_catalog_url=True),
-    # apikey.casa(福利 apikey.casa)—— 2026-11-10 接入。标准 New API
-    # (version=v1.0.0-rc.49,checkin_enabled=true,linuxdo_oauth=true,
-    # github_oauth=false,turnstile_check=false,quota_per_unit=500000 USD),
-    # 签到入口 /profile,通用 newapi_profile 通道,不登记账密、不登录。
-    # LinuxDO OAuth 站,会话失效 FAIL:auth_required 需人工在 9222 补登。
-    _N("apikey.casa", "https://apikey.casa/profile", prefer_catalog_url=True),
+    # apikey.casa(apikey.casa)—— 2026-11-10 接入,2026-11-13 站点改版重适配。
+    # 旧版标准 New API(/profile)已下线,新版自研 SPA(axios baseURL /api/v1),
+    # 签到页 /redeem:GET/POST /api/v1/redeem/checkin,button 未签「立即签到」/
+    # 已签「今日已签到」/reward<=0「签到暂未开启」。加载中按钮也是「立即签到」
+    # 且 disabled,signs 带 :not([disabled])(同 qulink 假点击坑)。
+    # LinuxDO OAuth 站,不登记账密、不登录,会话失效需人工在 9222 补登。
+    _B(
+        "apikey.casa",
+        "https://apikey.casa/redeem",
+        signs=[
+            'button:has-text("立即签到"):not([disabled])',
+        ],
+        already=[
+            'button:has-text("今日已签到")',
+            'text=今日已签到',
+        ],
+        prefer_catalog_url=True,
+    ),
     # teleai(TeleAgent 星辰超级智能体 agent.teleai.com.cn/teleagent)——
     # 2026-11-12 接入。中国电信自研 SPA(opencowork),非 New API、无
     # LinuxDO OAuth,登录态走共享 9222 会话。左侧栏底部「积分福利社」
@@ -1663,6 +1675,27 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
             'text=已领取，明天再来',
             'text=今日已签到',
             'text=签到成功',
+        ],
+        prefer_catalog_url=True,
+        ready_rounds=20,
+    ),
+    # ajimage(image.a-j.app, Aj生图)—— 2026-11-12 接入。自研 TanStack
+    # Start SPA,非 New API(/api/status 返回 HTML)。LinuxDO OAuth,登录态
+    # 走共享 9222 会话。签到页 /checkin:button「立即签到 +10 积分」→
+    # POST /api/user/check-in {turnstile_token},成功弹窗「签到成功 +10」。
+    # 当前未启用 Turnstile(无 widget/iframe)。已签判据只认「今日已签到」:
+    # 日历图例含「● 已签到」,泛化 已签到 会首屏假 ALREADY。
+    _B(
+        "ajimage",
+        "https://image.a-j.app/checkin",
+        signs=[
+            'button:has-text("立即签到")',
+            'button:text-is("立即签到")',
+            'text=立即签到',
+        ],
+        already=[
+            'text=今日已签到',
+            'button:has-text("今日已签到")',
         ],
         prefer_catalog_url=True,
         ready_rounds=20,
@@ -3613,14 +3646,27 @@ def is_valid_checkin_confirm(text: str) -> bool:
     if money_jr and done_for_money:
         return True
     # weak token + today context (allow newlines between)
-    if any(k in t for k in WEAK_NEED_TODAY):
-        if re.search(r"今日|今天|today", t, re.I):
-            if re.search(r"今日已签|今天已签|今日签到成功|今天签到成功|今日已领取", t):
+    # 日历图例防假阳性: 未签页也常驻「今日 / 11 月签到日历 / ● 已签到」这类
+    # 图例(innerText 逐块换行),会让下面的 today+已签到 弱启发式在首屏就命中
+    # (ajimage 2026-11-12 实证: 未领取却 ALREADY 4.2s,真实按钮没点)。
+    # 把 签到日历 之后 40 字内的图例词中性化(跨行);真正的已签标题
+    # 「今日已签到」不带 签到日历,仍然正常命中。
+    weak_text = re.sub(
+        r"签到日历[\s\S]{0,40}?(?:已签到|已领取)",
+        lambda m: re.sub(r"已签到|已领取", "日历状态", m.group(0)),
+        t,
+    )
+    if any(k in weak_text for k in WEAK_NEED_TODAY):
+        if re.search(r"今日|今天|today", weak_text, re.I):
+            if re.search(r"今日已签|今天已签|今日签到成功|今天签到成功|今日已领取", weak_text):
                 return True
             # same-line nearby
-            if re.search(r"今日[^\n]{0,20}(已签到|已领取)|今天[^\n]{0,20}(已签到|已领取)", t):
+            if re.search(
+                r"今日[^\n]{0,20}(已签到|已领取)|今天[^\n]{0,20}(已签到|已领取)",
+                weak_text,
+            ):
                 return True
-            if re.search(r"(已签到|已领取)[^\n]{0,20}(今日|今天)", t):
+            if re.search(r"(已签到|已领取)[^\n]{0,20}(今日|今天)", weak_text):
                 return True
             # multi-line: 已签到 ... 今天 (within short window). 同月统计句
             # 「已签到 N 天」绝不与下方的「今天(还)未签到」跨行拼成假已签到
@@ -3631,13 +3677,13 @@ def is_valid_checkin_confirm(text: str) -> bool:
             if re.search(
                 r"已签到(?!\s*\d+\s*(?:天|次))(?!日期)(?:[\s\S]{0,40}?(?:今天|今日))"
                 r"|(?:今天|今日)[\s\S]{0,40}?已签到(?!\s*\d+\s*(?:天|次))(?!日期)",
-                t,
+                weak_text,
             ):
                 return True
             if re.search(
                 r"已领取(?!\s*\d+\s*(?:天|次|个))(?:[\s\S]{0,40}?(?:今天|今日))"
                 r"|(?:今天|今日)[\s\S]{0,40}?已领取(?!\s*\d+\s*(?:天|次|个))",
-                t,
+                weak_text,
             ):
                 return True
     return False
@@ -14749,12 +14795,106 @@ async def _extract_fengwind_balance(page) -> BalanceEvidence | None:
         return None
 
 
-async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | None:
+async def _extract_ajimage_balance(page) -> BalanceEvidence | None:
+    """ajimage(image.a-j.app): 会话内 GET /api/user/check-in 拿当日奖励与积分余额。
+
+    只在新领(PENDING→DONE)时调用: `reward_points` 是当日应发积分(实测 10),
+    而页面 DOM 里同时常驻「连续签到奖励 第 7 天 +20」「奖励:20 积分」等
+    非当日金额,通用文本启发式会误采成 +20(2026-11-12 首跑实证)。余额单位
+    是积分而非货币,所以这里只写 reward_text,不写 amount/currency。
+    """
+    try:
+        data = await page.evaluate(
+            """async () => {
+              try {
+                const r = await fetch('/api/user/check-in', {credentials: 'include'});
+                if (!r.ok) return null;
+                return await r.json();
+              } catch (e) { return null; }
+            }"""
+        )
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data.get("checked_in"):
+        return None
+    reward = data.get("reward_points")
+    if not isinstance(reward, (int, float)):
+        return None
+    shown = int(reward) if float(reward).is_integer() else reward
+    return BalanceEvidence(
+        reward_text=f"+{shown} 积分",
+        source="api",
+        captured_at=datetime.now().isoformat(timespec="seconds"),
+    )
+
+
+async def _extract_apikeycasa_balance(page) -> BalanceEvidence | None:
+    """apikey.casa(redeem 版): 会话内 GET /api/v1/redeem/checkin 拿当日美元奖励。
+
+    通用 DOM 启发式只能采到侧栏「当前余额 $20.00」(amount),当日奖励采成
+    reward_text="+0"(2026-11-13 首跑实证);真实当日发放以接口
+    `data.reward` 为准(美元计余额,页面文案「今日奖励：$N」,实测 10)。
+    响应包一层 {code,message,data:{reward,checked_in,date}};鉴权走
+    localStorage auth_token(Bearer JWT),裸 fetch 需手动带头。
+    只在新领(PENDING→DONE)时调用,ALREADY 复跑不得重复归因。
+    reward 单位是美元,写 amount+currency。
+    """
+    try:
+        data = await page.evaluate(
+            """async () => {
+              try {
+                const token = localStorage.getItem('auth_token');
+                const r = await fetch('/api/v1/redeem/checkin', {
+                  credentials: 'include',
+                  headers: token ? {'Authorization': 'Bearer ' + token} : {},
+                });
+                if (!r.ok) return null;
+                return await r.json();
+              } catch (e) { return null; }
+            }"""
+        )
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    payload = data.get("data") if isinstance(data.get("data"), dict) else data
+    if not payload.get("checked_in"):
+        return None
+    reward = payload.get("reward")
+    if not isinstance(reward, (int, float)) or reward <= 0:
+        return None
+    shown = f"{reward:.2f}".rstrip("0").rstrip(".") if isinstance(reward, float) else str(reward)
+    return BalanceEvidence(
+        reward_text=f"+${shown}",
+        amount=reward,
+        currency="USD",
+        source="api",
+        captured_at=datetime.now().isoformat(timespec="seconds"),
+    )
+
+
+async def _do_extract_balance(
+    page, adapter: SiteAdapter, result: CheckinResult | None = None
+) -> BalanceEvidence | None:
     kind = getattr(adapter, "kind", "browser")
     if kind == "glados":
         b = await _extract_glados_balance(page)
         if b:
             return b
+
+    if getattr(adapter, "name", "") == "ajimage":
+        # Fresh grant only; ALREADY reruns must not attribute reward_points.
+        if result is not None and result.pre_state == "PENDING":
+            b = await _extract_ajimage_balance(page)
+            if b:
+                return b
+
+    if getattr(adapter, "name", "") == "apikey.casa" or "apikey.casa" in getattr(adapter, "url", ""):
+        # Fresh grant only; ALREADY reruns must not re-attribute the daily reward.
+        if result is not None and result.pre_state == "PENDING":
+            b = await _extract_apikeycasa_balance(page)
+            if b:
+                return b
 
     if getattr(adapter, "name", "") == "emrank" or "emrank.tech" in getattr(adapter, "url", ""):
         b = await _extract_emrank_balance(page)
@@ -14791,12 +14931,16 @@ async def _do_extract_balance(page, adapter: SiteAdapter) -> BalanceEvidence | N
     return await _extract_dom_balance(page)
 
 
-async def extract_balance_safely(page, adapter: SiteAdapter) -> BalanceEvidence | None:
+async def extract_balance_safely(
+    page, adapter: SiteAdapter, result: CheckinResult | None = None
+) -> BalanceEvidence | None:
     """Safely extract account balance with strict 3.0s timeout and soft fallback."""
     if page is None:
         return None
     try:
-        return await asyncio.wait_for(_do_extract_balance(page, adapter), timeout=3.0)
+        return await asyncio.wait_for(
+            _do_extract_balance(page, adapter, result), timeout=3.0
+        )
     except Exception:
         return None
 
@@ -14806,7 +14950,7 @@ async def _enrich_result_balance(page, adapter: SiteAdapter, result: CheckinResu
     if not result.ok:
         return result
     try:
-        result.balance = await extract_balance_safely(page, adapter)
+        result.balance = await extract_balance_safely(page, adapter, result)
     except Exception:
         pass
     reward_candidate = _extract_reward_from_text(result.detail or "")
