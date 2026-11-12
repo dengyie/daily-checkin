@@ -16291,8 +16291,16 @@ async def run(argv: list[str] | None = None) -> int:
         # Web jobs must import it too: import_obsidian_tasks never overwrites
         # authoritative system status (ON CONFLICT keeps current status), so
         # this is safe for web/retries and makes preflight meaningful.
+        # Task files are seeded from the previous day's rows, so a note-row
+        # URL can trail the yaml catalog after a re-adaptation; hand the
+        # catalog map over so prefer_catalog_url sites are not rolled back
+        # (apikey.casa 2026-11-13: stale /profile row reverted a /redeem
+        # upsert in the same morning batch that applied it).
         store.import_obsidian_tasks(
-            today_str, parse_all_daily_tasks(tasks_content), task_file_path
+            today_str, parse_all_daily_tasks(tasks_content), task_file_path,
+            catalog_urls={
+                a.name: a.url for a in SITE_ADAPTERS if a.prefer_catalog_url
+            },
         )
         store.materialize_day(today_str)
     except (FileNotFoundError, OSError) as e:

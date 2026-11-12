@@ -401,6 +401,7 @@ class SystemStore:
 
     def import_obsidian_tasks(
         self, day: str, rows: Iterable[tuple[str, str, bool]], path: str,
+        catalog_urls: dict[str, str] | None = None,
     ) -> int:
         """Import new catalog rows without overriding authoritative system state.
 
@@ -410,15 +411,27 @@ class SystemStore:
         obsidian_path/obsidian_name. provider is preserved for existing sites
         (a hardcoded legacy_browser would clobber wisart/newapi/arkengine
         classifications set by other writers).
+
+        catalog_urls maps site names the runner's yaml catalog marks
+        prefer_catalog_url=True to their catalog URL. Daily task files are
+        seeded from the previous day's rows, so a note-row URL can stay stale
+        after a catalog re-adaptation; without this guard the import would
+        roll sites.url back to the dead URL every morning (apikey.casa
+        2026-11-13: /profile note row reverted a fresh /redeem upsert). For
+        those sites the catalog wins, mirroring resolve_site's navigation
+        precedence; other sites keep the note-URL-wins contract.
         """
         count = 0
         now = self.now()
+        catalog_urls = catalog_urls or {}
         with self.connect() as db:
             tombstones = {row[0] for row in db.execute("SELECT name FROM deleted_sites").fetchall()}
             for name, url, done in rows:
                 if name in tombstones:
                     logger.info("skipping tombstoned deleted site in obsidian import: %s", name)
                     continue
+                if name in catalog_urls:
+                    url = catalog_urls[name]
                 db.execute(
                     """INSERT INTO sites(name,url,provider,created_at,updated_at)
                        VALUES(?,?,?,?,?)

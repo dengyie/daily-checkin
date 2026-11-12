@@ -187,6 +187,47 @@ class StoreTests(unittest.TestCase):
             row = [t for t in store.tasks("2026-08-19") if t["name"] == "N"][0]
             self.assertEqual(row["provider"], "legacy_browser")
 
+    def test_import_obsidian_tasks_respects_catalog_authoritative_urls(self):
+        """Regression 2026-11-13: import must not roll a freshly updated catalog
+        URL back to the stale note-row URL.
+
+        Real failure: apikey.casa was re-adapted (/profile → /redeem) in yaml +
+        DB, then the daily import of the 11-13 task file (seeded from 11-12
+        rows still carrying /profile) overwrote sites.url back to /profile
+        (ON CONFLICT url CASE). resolve_site honors prefer_catalog_url so
+        navigation stayed correct, but the panel showed the dead URL and every
+        future task-file seed inherited the stale row URL.
+        Catalog-authoritative sites (prefer_catalog_url) must win over note
+        rows — same precedence resolve_site already applies at navigation.
+        """
+        with TemporaryDirectory() as td:
+            store = SystemStore(Path(td) / "system.db")
+            store.upsert_site("K", "https://k.example/redeem", provider="legacy_browser")
+            # Note row still carries the old URL (stale seed chain).
+            store.import_obsidian_tasks(
+                "2026-11-13", [("K", "https://k.example/profile", False)], "/obs.md",
+                catalog_urls={"K": "https://k.example/redeem"},
+            )
+            with store.connect() as db:
+                url = db.execute("SELECT url FROM sites WHERE name='K'").fetchone()[0]
+            self.assertEqual(url, "https://k.example/redeem")
+            # A non-catalog site keeps the existing note-URL-wins contract.
+            store.upsert_site("Z", "https://z.example/old")
+            store.import_obsidian_tasks(
+                "2026-11-13", [("Z", "https://z.example/new", False)], "/obs.md",
+                catalog_urls={"K": "https://k.example/redeem"},
+            )
+            with store.connect() as db:
+                url = db.execute("SELECT url FROM sites WHERE name='Z'").fetchone()[0]
+            self.assertEqual(url, "https://z.example/new")
+            # New sites from import are inserted with the note URL as before.
+            store.import_obsidian_tasks(
+                "2026-11-13", [("N", "https://n.example", False)], "/obs.md",
+                catalog_urls={"K": "https://k.example/redeem"},
+            )
+            row = [t for t in store.tasks("2026-11-13") if t["name"] == "N"][0]
+            self.assertEqual(row["name"], "N")
+
     def test_connect_rolls_back_partial_writes_on_exception(self):
         """A raise inside the with-block must not persist earlier statements."""
         with TemporaryDirectory() as td:
