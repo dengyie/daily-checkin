@@ -2257,3 +2257,11 @@ html[data-resolved-theme="light"] .balance-top-item:hover {
   border-color: rgba(59, 130, 246, 0.35);
   background: rgba(59, 130, 246, 0.10);
 }
+
+/* 跨节点同名冲突: 该行只代表一个节点，其他节点状态被折叠，必须显式可见 */
+.tile-category-tag.conflict {
+  color: var(--warning, #f59e0b);
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.14);
+  font-weight: 600;
+}

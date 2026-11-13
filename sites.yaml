@@ -1062,6 +1062,15 @@ sites:
       - 'button:has-text("已簽到")'
       - 'text=签到成功'
       - 'text=簽到成功'
+  # hiyo-2(free.hiyo.top 第二账号)—— 2026-11-14 接入,仅 Windows 节点执行。
+  # 与主条目完全同构,唯一区别是登录态:主账号 mango 在 Mac 共享 9222(LinuxDO
+  # OAuth),第二账号在 home-win 的 9222 浏览器会话(163 邮箱登录, uid=1237)。
+  # 命名遵循双账号后缀先例(apikey.casa/apikey.casa-2、nexavlinks-linuxdo/email)。
+  # 节点归属: dispatch site_nodes 指派 win;Mac staging DB 不登记任务行,
+  # 避免双跑。不投影 Obsidian 每日任务行(用户决策,同 apikey.casa-2 模式)。
+  # 选择器经 inherit 声明而非复制——主条目改版后本账号自动跟随,杜绝配置漂移。
+  - name: 'hiyo-2'
+    inherit: hiyo
   # aihappy(images.aihappy.indevs.in, 流光绘境 AI 生图站)—— 2026-09-12 接入。
   # 自定义 Vue SPA(hash 路由,非 New API),LinuxDO OAuth 登录(复用 9222 共享
   # profile 的 linux.do 会话;站方也有 GitHub OAuth)。签到在顶栏 UserQuotaBar
@@ -1665,3 +1674,13 @@ sites:
     already:
       - 'text=今日已签到'
       - 'button:has-text("今日已签到")'
+  # 91token(91token.com / 91Token工厂)—— 2026-11-13 接入。
+  # 标准 New API(version=v1.0.0-rc.40, checkin_enabled=true, linuxdo_oauth=true,
+  # github_oauth=true, password_login_enabled=true, turnstile_check=true)。
+  # /api/user/checkin 接口 401 AUTH_UNAUTHORIZED。
+  # 签到入口 /profile，走标准 newapi_profile 流程：/profile → 点「立即签到」+ 确认门。
+  # LinuxDO/GitHub OAuth 站，依赖共享 9222 会话，不登记账密。
+  - name: '91token'
+    url: https://91token.com/profile
+    kind: newapi_profile
+    prefer_catalog_url: true

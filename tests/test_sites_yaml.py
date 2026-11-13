@@ -1040,6 +1040,42 @@ class TestSitesYaml(unittest.TestCase):
         # 无账密凭据(会话依赖站)
         self.assertIsNone(get_account_credential("apikey.casa-2"))
 
+    def test_yaml_registers_hiyo_2_entry(self):
+        """hiyo-2(第二账号) 2026-11-14 接入:仅 Windows 节点执行
+        (dispatch site_nodes 指派 win),与主条目同构(/dashboard + browser 通道),
+        登录态在 home-win 9222 会话;Mac 不登记任务行避免双跑,不投影 Obsidian。
+
+        选择器经 `inherit: hiyo` 声明而非复制——主条目改版后本账号自动跟随。
+        """
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "hiyo-2"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 hiyo-2 条目")
+        # 必须用 inherit 而不是复制选择器,否则主站改版会留下配置漂移
+        self.assertEqual(entry.get("inherit"), "hiyo")
+        self.assertNotIn("signs", entry)
+        self.assertNotIn("already", entry)
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "browser")
+        self.assertEqual(a.url, "https://free.hiyo.top/dashboard")
+        self.assertIn("立即签到", " ".join(a.sign_selectors))
+        self.assertIn("今日已签到", " ".join(a.already_selectors))
+        resolved = resolve_site("hiyo-2", "https://free.hiyo.top/dashboard")
+        self.assertEqual(resolved.url, "https://free.hiyo.top/dashboard")
+        self.assertEqual(resolved.kind, "browser")
+        # 继承必须与主账号逐字段同源(而非与另一份拷贝同源)
+        main = resolve_site("hiyo", "https://free.hiyo.top/dashboard")
+        self.assertEqual(resolved.sign_selectors, main.sign_selectors)
+        self.assertEqual(resolved.already_selectors, main.already_selectors)
+        self.assertEqual(resolved.prefer_catalog_url, main.prefer_catalog_url)
+        self.assertIsNone(get_account_credential("hiyo-2"))
+
     def test_yaml_registers_teleai_entry(self):
         """teleai(TeleAgent 星辰超级智能体 agent.teleai.com.cn/teleagent)
         2026-11-12 接入:中国电信自研 SPA(opencowork),非 New API、无
@@ -1118,6 +1154,38 @@ class TestSitesYaml(unittest.TestCase):
         self.assertEqual(builtin_entry.already_selectors, a.already_selectors)
         # LinuxDO OAuth 站,无账密:不应登记凭据
         self.assertIsNone(get_account_credential("ajimage"))
+
+    def test_yaml_registers_91token_entry(self):
+        """91token(91token.com) 2026-11-13 接入:标准 LinuxDO/GitHub OAuth + New API 站,
+        newapi_profile 通道,/profile,prefer_catalog_url,无自定义选择器。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "91token"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 91token 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "newapi_profile")
+        self.assertEqual(a.url, "https://91token.com/profile")
+        self.assertEqual(a.login_url, "")
+        # 标准 New API 默认前端:走通用「签到/已签到」判定,无需自定义选择器
+        self.assertIn("签到", " ".join(a.sign_selectors))
+        self.assertIn("已签到", " ".join(a.already_selectors))
+        self.assertTrue(a.prefer_catalog_url)
+        resolved = resolve_site("91token", "https://91token.com/profile")
+        self.assertEqual(resolved.url, "https://91token.com/profile")
+        self.assertEqual(resolved.kind, "newapi_profile")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "91token"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 91token")
+        self.assertEqual(builtin_entry.kind, "newapi_profile")
+        self.assertEqual(builtin_entry.url, "https://91token.com/profile")
+        # LinuxDO/GitHub OAuth 站:不应登记账密(依赖共享 9222 会话)
+        self.assertIsNone(get_account_credential("91token"))
 
     def test_yaml_registers_fuli_entry(self):
         """伏枥(dash.free-ai.de5.net) 2026-11-05 接入:标准 LinuxDO + New API 站,

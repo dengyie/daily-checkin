@@ -51,7 +51,7 @@ import urllib.request
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import async_playwright
@@ -1715,13 +1715,74 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
         prefer_catalog_url=True,
         ready_rounds=20,
     ),
+    # 91token(91token.com)—— 2026-11-13 接入。标准 New API(v1.0.0-rc.40),
+    # LinuxDO/GitHub OAuth 登录,签到 /profile「立即签到」+ 确认门。通用 newapi_profile 通道。
+    _N("91token", "https://91token.com/profile", prefer_catalog_url=True),
 ]
 
 
-def _adapter_from_yaml_entry(entry: dict) -> SiteAdapter:
+def _adapter_from_yaml_entry(
+    entry: dict,
+    base_lookup: Callable[[str], SiteAdapter | None] | None = None,
+) -> SiteAdapter:
     """Build a SiteAdapter from one sites.yaml entry, using the original
-    _A / _N / _B factories to guarantee field-equivalence with the built-in list."""
+    _A / _N / _B factories to guarantee field-equivalence with the built-in list.
+
+    Supports 'inherit' / 'base' field: child sites (such as second accounts on
+    another node) inherit kind, selectors, and options from the base site.
+    """
     name = entry["name"]
+    inherit_from = entry.get("inherit") or entry.get("base")
+    if inherit_from:
+        base = None
+        if base_lookup:
+            base = base_lookup(str(inherit_from))
+        if not base:
+            base = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == str(inherit_from)), None)
+        if base:
+            url = entry.get("url") or base.url
+            kind = entry.get("kind") or base.kind
+            signs = entry.get("signs") if "signs" in entry else base.sign_selectors
+            already = entry.get("already") if "already" in entry else base.already_selectors
+            if isinstance(signs, str):
+                signs = [signs]
+            if isinstance(already, str):
+                already = [already]
+            prefer_catalog_url = entry.get("prefer_catalog_url", base.prefer_catalog_url)
+            try:
+                rr = int(entry.get("ready_rounds", base.ready_rounds))
+            except (TypeError, ValueError):
+                rr = base.ready_rounds
+            try:
+                site_timeout = float(entry.get("site_timeout_s", base.site_timeout_s) or 0)
+                if site_timeout < 0:
+                    site_timeout = 0.0
+            except (TypeError, ValueError):
+                site_timeout = base.site_timeout_s
+            login_url = entry.get("login_url", base.login_url)
+            return replace(
+                base,
+                name=name,
+                url=url,
+                kind=kind,
+                sign_selectors=list(signs or []),
+                already_selectors=list(already or []),
+                prefer_catalog_url=prefer_catalog_url,
+                ready_rounds=rr,
+                site_timeout_s=site_timeout,
+                login_url=login_url,
+            )
+        # inherit was declared but the base could not be resolved: never fall
+        # through to the url branch below (it would raise a bare KeyError for
+        # url-less entries and get swallowed as "skipping entry"). Fail loudly.
+        raise ValueError(
+            f"inherit target {str(inherit_from)!r} not found "
+            f"(not in sites.yaml and not in built-in catalog)"
+        )
+
+    if "url" not in entry:
+        raise ValueError("missing 'url' (required unless 'inherit'/'base' is set)")
+
     url = entry["url"]
     kind = entry.get("kind", "browser")
     signs = entry.get("signs")           # None = absent (use factory defaults)
@@ -2101,19 +2162,83 @@ def load_sites_from_yaml(path: Path | None = None) -> list[SiteAdapter]:
     if not isinstance(entries, list):
         print(f"  sites.yaml: 'sites' is {type(entries).__name__}, not list; using built-in catalog", flush=True)
         return list(_BUILTIN_SITE_ADAPTERS)
-    adapters: list[SiteAdapter] = []
+    # Two-phase load: collect every declaration first, then resolve inherit
+    # chains. A single ordered pass made inheritance depend on where the parent
+    # happened to sit in the file, and an unresolvable parent silently dropped
+    # the child site from the roster (no FAIL row, no dashboard signal — the
+    # site just stopped checking in). Both are now hard errors.
+    by_name: dict[str, dict] = {}
+    order: list[str] = []
+    errors: list[str] = []
     for e in entries:
-        try:
-            if not isinstance(e, dict) or not e.get("name") or not e.get("url"):
-                print(f"  sites.yaml: skipping malformed entry {e!r}", flush=True)
-                continue
-            adapters.append(_adapter_from_yaml_entry(e))
-        except Exception as exc:
-            # Individual entry errors (TypeError, ValueError, etc.) must not
-            # crash the whole catalog — skip the bad entry and continue.
-            print(f"  sites.yaml: skipping entry {e!r} ({exc})", flush=True)
+        if not isinstance(e, dict) or not e.get("name"):
+            print(f"  sites.yaml: skipping malformed entry {e!r}", flush=True)
             continue
-    return adapters
+        name = str(e["name"]).strip()
+        if not name:
+            print(f"  sites.yaml: skipping malformed entry {e!r}", flush=True)
+            continue
+        if name in by_name:
+            errors.append(f"duplicate site name {name!r}")
+            continue
+        by_name[name] = e
+        order.append(name)
+
+    builtin_names = {b.name for b in _BUILTIN_SITE_ADAPTERS}
+    resolved: dict[str, SiteAdapter] = {}
+    resolving: list[str] = []
+
+    def resolve_one(name: str) -> SiteAdapter:
+        if name in resolved:
+            return resolved[name]
+        if name in resolving:
+            raise ValueError("circular inherit: " + " -> ".join(resolving + [name]))
+        entry = by_name[name]
+        inherit_from = entry.get("inherit") or entry.get("base")
+        resolving.append(name)
+        try:
+            if inherit_from:
+                base_name = str(inherit_from).strip()
+                if base_name in by_name:
+                    resolve_one(base_name)
+            adapter = _adapter_from_yaml_entry(
+                entry, base_lookup=lambda n: resolved.get(n)
+            )
+            resolved[name] = adapter
+            return adapter
+        finally:
+            resolving.pop()
+
+    for name in order:
+        entry = by_name[name]
+        inherit_from = entry.get("inherit") or entry.get("base")
+        if not entry.get("url") and not inherit_from:
+            print(f"  sites.yaml: skipping malformed entry {entry!r}", flush=True)
+            continue
+        if inherit_from:
+            base_name = str(inherit_from).strip()
+            if base_name not in by_name and base_name not in builtin_names:
+                errors.append(
+                    f"site {name!r}: inherit target {base_name!r} not found "
+                    f"(not in sites.yaml and not in built-in catalog)"
+                )
+                continue
+        try:
+            resolve_one(name)
+        except Exception as exc:
+            errors.append(f"site {name!r}: {exc}")
+
+    if errors:
+        detail = "\n".join(f"  - {msg}" for msg in errors)
+        print(
+            f"  sites.yaml: {len(errors)} configuration error(s):\n{detail}",
+            flush=True,
+        )
+        raise ValueError(
+            f"sites.yaml has {len(errors)} configuration error(s):\n{detail}\n"
+            "refusing to load a partial catalog"
+        )
+    return [resolved[name] for name in order if name in resolved]
 
 
 SITE_ADAPTERS = load_sites_from_yaml()
@@ -15578,6 +15703,37 @@ def clear_auto_fail(tasks_content: str, name: str) -> str:
     )
 
 
+def _site_host(url: str) -> str:
+    """Lower-cased hostname of a URL, or '' when it has none (defensive parse)."""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        return (urlparse(raw).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def resolve_derivative_base_name(name: str) -> str | None:
+    """Extract candidate base site name for multi-account / multi-node derivatives.
+
+    Matches patterns like:
+      - site-2, site-3, site-10 (numeric account suffixes)
+      - site-win, site_win, site-mac, site-windows, site-darwin (node-pinned suffixes)
+      - site-linuxdo, site-email, site-oauth, site-pwd (auth channel suffixes)
+    """
+    m = re.search(
+        r"^(.*?)(?:[-_#](?:[0-9]+|win|mac|windows|darwin|linux|linuxdo|email|oauth|pwd|acc\d*|user\d*))$",
+        str(name or "").strip(),
+        re.IGNORECASE,
+    )
+    if m:
+        base = m.group(1).strip()
+        if base and base != name:
+            return base
+    return None
+
+
 def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
     """Prefer note URL for navigation; catalog supplies kind + selectors."""
     for a in SITE_ADAPTERS:
@@ -15597,6 +15753,36 @@ def resolve_site(name: str, url_from_note: str) -> SiteAdapter | None:
                 # 悄悄丢一个(xmiaom 的 site_timeout_s 就曾因此退回批次默认值)。
                 return replace(a, url=url)
             return a
+
+    # 多账号/多节点衍生条目自动继承基础站点适配配置:
+    # 例如 hiyo-2 / hiyo-win 自动继承 hiyo; apikey.casa-2 / apikey.casa-win 自动继承 apikey.casa
+    base_name = resolve_derivative_base_name(name)
+    if base_name:
+        base_adapter = next((a for a in SITE_ADAPTERS if a.name == base_name), None)
+        if not base_adapter:
+            base_adapter = next((a for a in _BUILTIN_SITE_ADAPTERS if a.name == base_name), None)
+        if base_adapter:
+            # 名字只是线索，域名才是证据: 一个叫 foo-2 的独立站点若指向别的
+            # 主机，套用 foo 的选择器会把签到打到错误的页面上。任务行/note 有
+            # URL 且主机不同时，放弃继承，交回下面的 URL 启发式判定。
+            note_host = _site_host(url_from_note)
+            base_host = _site_host(base_adapter.url)
+            if note_host and base_host and note_host != base_host:
+                print(
+                    f"  ! {name} looks like a derivative of {base_name} but its URL points at "
+                    f"{note_host}, not {base_host}; not inheriting {base_name}'s selectors",
+                    flush=True,
+                )
+                base_adapter = None
+        if base_adapter:
+            url = base_adapter.url if base_adapter.prefer_catalog_url else ((url_from_note or "").strip() or base_adapter.url)
+            if url != base_adapter.url and not base_adapter.prefer_catalog_url:
+                print(
+                    f"  ! site URL mismatch {name} (inherited from {base_name}): note/task={url} vs yaml={base_adapter.url}"
+                    f" (using {url}; sync task row + DB upsert_site, or the yaml entry)",
+                    flush=True,
+                )
+            return replace(base_adapter, name=name, url=url)
     if url_from_note:
         if is_bohe_site(url_from_note):
             return SiteAdapter(

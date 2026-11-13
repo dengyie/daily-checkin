@@ -1868,6 +1868,7 @@ function renderTile(task, showAction = true) {
               <span class="tile-title">${esc(task.name)}</span>
               <span class="tile-category-tag">${esc(category)}</span>
               ${task.node ? `<span class="tile-category-tag node" title="执行渠道（节点）: ${esc(task.node)}">${uiIcon("monitor", { size: 11 })} ${esc(task.node)}</span>` : ""}
+              ${task.cross_node_conflict ? `<span class="tile-category-tag conflict" title="同名站点在多个节点同时上报（${esc((task.competing_nodes || []).join(" / "))}），当前仅展示 ${esc(task.node || "默认节点")} 的状态，其他节点的结果可能被遮蔽">${uiIcon("alert-triangle", { size: 11 })} 跨节点冲突</span>` : ""}
               ${isManual ? `<span class="tile-category-tag manual">${uiIcon("user-check", { size: 11 })} 人工签到</span>` : ""}
               ${(isDone && (task.task_reward_text || task.last_reward_text)) ? `<span class="tile-reward-badge" title="本次签到所获奖励: ${esc(task.task_reward_text || task.last_reward_text)}">${uiIcon("gift", { size: 11 })} ${esc(task.task_reward_text || task.last_reward_text)}</span>` : ""}
               ${task.last_balance_text ? `<span class="tile-balance-badge" title="账户余额 (更新于 ${esc(task.balance_updated_at || '最近')})">${uiIcon("coin", { size: 11 })} ${esc(task.last_balance_text)}</span>` : ""}

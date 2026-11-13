@@ -24,6 +24,7 @@ from checkin_core.store import SystemStore, store_from_env, obsidian_daily_task_
 from checkin_core.dispatch import (
     DeliveryWorker,
     DispatchStore,
+    convention_node_for_site,
     dispatch_db_path,
     dispatch_mode,
     make_delivery_worker,
@@ -187,18 +188,29 @@ def _dedupe_tasks_by_owner(
 ) -> list[dict]:
     """Collapse multi-node task rows so each site name appears exactly once.
 
-    A site has one owner (the ``site_nodes`` pin). The pinned node's row wins
-    when present; otherwise the last-seen row is kept, so a pinned-but-not-yet-
-    synced site never vanishes (replica rows are appended after the default
-    node's rows, so "last seen" prefers the replica).
+    A site has one owner (the ``site_nodes`` pin, falling back to convention_node_for_site).
+    The pinned node's row wins when present; otherwise the last-seen row is kept,
+    so a pinned-but-not-yet-synced site never vanishes (replica rows are appended
+    after the default node's rows, so "last seen" prefers the replica).
+
+    When a site name appears across multiple executor nodes, cross-node collision
+    is detected and tagged with ``cross_node_conflict=True`` and ``competing_nodes``
+    so that multi-account masking is observable in the dashboard / API.
     """
+    node_names_by_site: dict[str, set[str]] = {}
+    for task in rows:
+        name = str(task.get("name") or "")
+        node = str(task.get("node") or "")
+        if name and node:
+            node_names_by_site.setdefault(name, set()).add(node)
+
     chosen: dict[str, dict] = {}
     locked: set[str] = set()
     for task in rows:
         name = str(task.get("name") or "")
         if not name:
             continue
-        owner = pinned.get(name)
+        owner = pinned.get(name) or convention_node_for_site(name)
         if owner and str(task.get("node")) != owner:
             if name not in locked:
                 chosen[name] = task  # fallback until the owner row arrives
@@ -206,7 +218,21 @@ def _dedupe_tasks_by_owner(
         chosen[name] = task
         if owner:
             locked.add(name)
-    return list(chosen.values())
+
+    # Tag conflicts if a site had multiple competing nodes
+    tagged: list[dict] = []
+    for name, task in chosen.items():
+        competing = node_names_by_site.get(name) or set()
+        if len(competing) > 1:
+            # Copy before tagging: `chosen` holds the caller's own row dicts,
+            # and silently adding keys to them is a hidden side effect on the
+            # /api/state payload built earlier in the same request.
+            task = dict(task)
+            task["cross_node_conflict"] = True
+            task["competing_nodes"] = sorted(competing)
+        tagged.append(task)
+
+    return tagged
 
 
 class JobExecutor:

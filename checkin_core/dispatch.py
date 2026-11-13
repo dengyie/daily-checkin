@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -98,6 +99,24 @@ def _parse_ts(value: str | None) -> datetime | None:
 
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def convention_node_for_site(site_name: str) -> str | None:
+    """Infer target executor node from site naming convention.
+
+    Rules:
+      - Suffix -win, _win, -windows -> 'win'
+      - Suffix -mac, _mac, -darwin -> 'mac'
+      - Suffix -linux -> 'linux'
+    """
+    name = str(site_name or "").strip()
+    if re.search(r"[-_](?:win|windows)$", name, re.IGNORECASE):
+        return "win"
+    if re.search(r"[-_](?:mac|darwin)$", name, re.IGNORECASE):
+        return "mac"
+    if re.search(r"[-_](?:linux)$", name, re.IGNORECASE):
+        return "linux"
+    return None
 
 
 class DispatchStore:
@@ -403,11 +422,36 @@ class DispatchStore:
             )
 
     def node_for_site(self, site_name: str) -> str | None:
+        name = str(site_name or "").strip()
+        if not name:
+            return None
         with self.connect() as db:
             row = db.execute(
-                "SELECT node FROM site_nodes WHERE site_name=?", (str(site_name).strip(),)
+                "SELECT node FROM site_nodes WHERE site_name=?", (name,)
             ).fetchone()
-            return str(row["node"]) if row else None
+            if row:
+                return str(row["node"])
+            # Convention routing is a hint, not an authority: an inferred node
+            # must actually be registered. Handing back an unregistered name
+            # queues the job to a node that can never claim it, so it burns
+            # every delivery attempt and dies as "delivery failed" — which
+            # sends operators hunting the network instead of the config.
+            inferred = convention_node_for_site(name)
+            if not inferred:
+                return None
+            registered = db.execute(
+                "SELECT 1 FROM dispatch_nodes WHERE name=?", (inferred,)
+            ).fetchone()
+            if registered:
+                return inferred
+        logger.warning(
+            "site %r implies node %r by naming convention, but no such node is "
+            "registered; falling back to the default node (pin it with site_nodes "
+            "or register the node)",
+            name,
+            inferred,
+        )
+        return None
 
     def site_node_map(self) -> dict[str, str]:
         with self.connect() as db:
