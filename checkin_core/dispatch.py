@@ -129,10 +129,15 @@ class DispatchStore:
     replacement by the executor never invalidates an open reader.
     """
 
-    def __init__(self, path: Path | str, *, on_enqueue: Callable[[int], None] | None = None):
+    def __init__(self, path: Path | str, *, on_enqueue: Callable[[int], None] | None = None,
+                 node_sites_provider: Callable[[], dict[str, set[str]]] | None = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.on_enqueue = on_enqueue
+        # Returns {node: {site names that node actually runs}}. Only the panel
+        # knows this (it reads each node's read-only replica); dispatch uses it
+        # to keep naming-convention routing honest.
+        self.node_sites_provider = node_sites_provider
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -442,16 +447,62 @@ class DispatchStore:
             registered = db.execute(
                 "SELECT 1 FROM dispatch_nodes WHERE name=?", (inferred,)
             ).fetchone()
-            if registered:
-                return inferred
-        logger.warning(
-            "site %r implies node %r by naming convention, but no such node is "
-            "registered; falling back to the default node (pin it with site_nodes "
-            "or register the node)",
-            name,
-            inferred,
-        )
-        return None
+            if not registered:
+                logger.warning(
+                    "site %r implies node %r by naming convention, but no such node is "
+                    "registered; falling back to the default node (pin it with site_nodes "
+                    "or register the node)",
+                    name,
+                    inferred,
+                )
+                return None
+        # A suffix is a guess; the node's own site list is evidence. yunzhi_win
+        # is the live counter-example: it carries a _win suffix but runs on mac,
+        # so convention alone would hand it to a node that has no such site.
+        provider = self.node_sites_provider
+        if provider is not None:
+            try:
+                known = provider() or {}
+            except Exception:
+                logger.exception("node_sites_provider failed; trusting naming convention")
+                known = {}
+            owned = known.get(inferred)
+            if owned is not None and name not in owned:
+                logger.warning(
+                    "site %r looks like it belongs to node %r by name, but that node "
+                    "does not run it; falling back to the default node",
+                    name,
+                    inferred,
+                )
+                return None
+        return inferred
+
+    def _memoize_node_sites(
+        self, provider: Callable[[], dict[str, set[str]]], ttl_s: float = 30.0
+    ) -> Callable[[], dict[str, set[str]]]:
+        """Wrap a node_sites provider with a small TTL cache.
+
+        node_for_site() runs per site per dispatch batch; re-reading every
+        node replica on each call turns one batch into N redundant SQLite
+        opens for unchanged data. Exceptions from the underlying provider are
+        surfaced here (callers already decide how to degrade); the cache only
+        guards against repeated reads.
+        """
+        cache: dict = {"at": 0.0, "data": None}
+        lock = threading.Lock()
+
+        def wrapped() -> dict[str, set[str]]:
+            now = time.monotonic()
+            with lock:
+                if cache["data"] is not None and now - cache["at"] < ttl_s:
+                    return cache["data"]
+            data = provider()
+            with lock:
+                cache["at"] = time.monotonic()
+                cache["data"] = data
+            return data
+
+        return wrapped
 
     def site_node_map(self) -> dict[str, str]:
         with self.connect() as db:

@@ -8,10 +8,12 @@ import os
 import queue
 import re
 import secrets
-import subprocess
 import signal
+import sqlite3
+import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -402,6 +404,11 @@ class CheckinWebApp:
         self.delivery: DeliveryWorker | None = None
         if self.dispatch_mode == "remote":
             self.dispatch = DispatchStore(dispatch_db_path(self.store.path))
+            # Naming-convention routing gets a reality check against what each
+            # node actually runs: the panel can read every node's replica, so
+            # a `_win`-suffixed site that lives on mac (yunzhi_win) is routed
+            # by evidence, not by its name.
+            self.dispatch.node_sites_provider = self._make_node_sites_provider()
             self.executor = JobExecutor(self.store, start_worker=False)
             self.delivery = make_delivery_worker(self.dispatch)
         else:
@@ -423,6 +430,49 @@ class CheckinWebApp:
         # update_config (/api/config/update), delete_site (/api/sites/delete).
     })
     REMOTE_BLOCKED_MESSAGE = "看板模式下该操作需在执行节点本地完成（权威数据在 Mac 节点）"
+
+    def _make_node_sites_provider(self):
+        """Build the DispatchStore.node_sites_provider callback.
+
+        Returns ``{node: set(site names that node actually runs)}`` gathered
+        from the primary store (default node) and each node's read-only
+        replica. Memoization (TTL) lives in DispatchStore._memoize_node_sites;
+        this function only does the raw reads.
+        """
+        store = self.store
+        dispatch = self.dispatch
+
+        def _read_sites_sqlite(path: Path, ro: bool) -> set[str]:
+            if ro:
+                uri = f"file:{path}?mode=ro&immutable=1"
+                db = sqlite3.connect(uri, uri=True, timeout=5)
+            else:
+                db = sqlite3.connect(path, timeout=5)
+            try:
+                rows = db.execute("SELECT name FROM sites WHERE enabled=1").fetchall()
+                return {str(r[0]) for r in rows}
+            finally:
+                db.close()
+
+        def provider() -> dict[str, set[str]]:
+            data: dict[str, set[str]] = {}
+            try:
+                default_node = dispatch.default_node()
+            except Exception:
+                default_node = None
+            if default_node:
+                try:
+                    data[str(default_node)] = _read_sites_sqlite(store.path, ro=False)
+                except sqlite3.Error:
+                    pass
+            for node, replica_path in node_replicas().items():
+                try:
+                    data[node] = _read_sites_sqlite(replica_path, ro=True)
+                except sqlite3.Error:
+                    continue  # replica mid-replacement: leave it unknown
+            return data
+
+        return dispatch._memoize_node_sites(provider)
 
     def _wake_delivery(self) -> None:
         """Nudge the dispatch sweeper so a new job/result is handled at once."""

@@ -418,6 +418,63 @@ class TestNodeRoutingAgainstRegistry(unittest.TestCase):
         self.assertEqual(self.store.node_for_site("site-win"), "mac")
 
 
+class TestNodeSitesProviderRouting(unittest.TestCase):
+    """Convention routing must defer to what each node actually runs.
+
+    yunzhi_win is the live counter-example: it carries a `_win` suffix but its
+    site row exists only on mac — a name-only route would hand it to a node
+    that has never run it.
+    """
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.store = DispatchStore(Path(self.td.name) / "dispatch.db")
+        self.store.add_node("mac", "http://10.144.144.100:9777")
+        self.store.add_node("win", "http://10.144.144.101:9778")
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _attach(self, owned):
+        self.store.node_sites_provider = lambda: owned
+
+    def test_suffix_site_not_owned_by_implied_node_falls_back(self):
+        self._attach({"win": {"hiyo-2", "relayfor", "apikey.casa-2"}})
+        self.assertIsNone(self.store.node_for_site("yunzhi_win"))
+        groups = self.store.resolve_nodes_for_sites(["yunzhi_win"])
+        self.assertEqual(groups.get(self.store.default_node()), ["yunzhi_win"])
+        self.assertNotIn("win", groups)
+
+    def test_suffix_site_owned_by_implied_node_keeps_convention(self):
+        self._attach({"win": {"91token-win"}})
+        self.assertEqual(self.store.node_for_site("91token-win"), "win")
+
+    def test_unknown_node_map_leaves_convention_intact(self):
+        """Provider with no data for the implied node must not veto routing."""
+        self._attach({"mac": {"some-site"}})
+        self.assertEqual(self.store.node_for_site("site-win"), "win")
+
+    def test_provider_exception_is_swallowed_and_convention_trusted(self):
+        def broken():
+            raise RuntimeError("replica read exploded")
+
+        self.store.node_sites_provider = broken
+        self.assertEqual(self.store.node_for_site("site-win"), "win")
+
+    def test_provider_result_is_cached_within_ttl(self):
+        calls = {"n": 0}
+
+        def counting():
+            calls["n"] += 1
+            return {"win": {"site-win", "another-win"}}
+
+        provider = self.store._memoize_node_sites(counting, ttl_s=60.0)
+        self.store.node_sites_provider = provider
+        self.assertEqual(self.store.node_for_site("site-win"), "win")
+        self.assertEqual(self.store.node_for_site("another-win"), "win")
+        self.assertEqual(calls["n"], 1, "provider must be memoized within ttl")
+
+
 class TestDedupeDoesNotMutateInput(unittest.TestCase):
     def test_conflict_tagging_copies_rows(self):
         rows = [
