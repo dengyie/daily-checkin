@@ -73,26 +73,38 @@ class TestDoctorHelpers(unittest.TestCase):
                                    return_value=SystemStore(P(td) / "system.db")), \
                  mock.patch.dict(os.environ, {"OBSIDIAN_VAULT_ROOT": fake_vault,
                                               "DAILY_CHECKIN_LOG_DIR": td}):
-                # 迁移模式: 8765/8766 → SKIP, 不产生 FAIL
-                os.environ["DAILY_CHECKIN_WEB_MIGRATED_REMOTE"] = "1"
-                try:
-                    buf = io.StringIO()
-                    with contextlib.redirect_stdout(buf):
-                        code = self.m.run_doctor()
-                    out = buf.getvalue()
-                finally:
-                    os.environ.pop("DAILY_CHECKIN_WEB_MIGRATED_REMOTE", None)
-                self.assertIn("[SKIP] API 8765", out)
-                self.assertIn("[SKIP] FE 8766", out)
-                self.assertNotIn("应启动 `-m checkin_core.web", out)
-                self.assertEqual(code, 0)
-                # 未迁移(Windows 节点仍跑本地 web): 保持原 FAIL 语义
-                buf = io.StringIO()
-                with contextlib.redirect_stdout(buf):
-                    code = self.m.run_doctor()
-                out = buf.getvalue()
-                self.assertIn("[FAIL] API 8765", out)
-                self.assertEqual(code, 2)
+                # darwin 分支的 cron 入口/launchd 检查在 CI runner 的真实 home
+                # 上必然 WARN（~/.hermes 入口不存在、launchd 任务未注册），
+                # 会把 exit 推到 1——与本测试关注的 8765/8766 SKIP 语义无关，
+                # 指向临时目录并注册空的 launchctl 出参隔离机器状态。
+                with mock.patch("pathlib.Path.home", return_value=P(td)), \
+                     mock.patch("subprocess.run",
+                                return_value=mock.Mock(returncode=0,
+                                                       stdout="daily-checkin")):
+                    self._run_doctor_migration_assertions()
+
+    def _run_doctor_migration_assertions(self):
+        import io
+        # 迁移模式: 8765/8766 → SKIP, 不产生 FAIL
+        os.environ["DAILY_CHECKIN_WEB_MIGRATED_REMOTE"] = "1"
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = self.m.run_doctor()
+            out = buf.getvalue()
+        finally:
+            os.environ.pop("DAILY_CHECKIN_WEB_MIGRATED_REMOTE", None)
+        self.assertIn("[SKIP] API 8765", out)
+        self.assertIn("[SKIP] FE 8766", out)
+        self.assertNotIn("应启动 `-m checkin_core.web", out)
+        self.assertEqual(code, 0)
+        # 未迁移(Windows 节点仍跑本地 web): 保持原 FAIL 语义
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = self.m.run_doctor()
+        out = buf.getvalue()
+        self.assertIn("[FAIL] API 8765", out)
+        self.assertEqual(code, 2)
 
     def test_doctor_log_dir_resolves_staging_env(self):
         """doctor 必须按 env > staging env.sh > 默认解析日志目录,不 source 任意 shell."""

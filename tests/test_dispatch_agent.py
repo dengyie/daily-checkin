@@ -473,7 +473,10 @@ class RunnerInvocationTests(AgentTestBase):
         self.assertEqual((status, code), ("done", 0))
         # Runner runs in its own session/process group so the tree is killable:
         # start_new_session on POSIX, CREATE_NEW_PROCESS_GROUP on Windows.
-        if agent_module.subprocess.CREATE_NEW_PROCESS_GROUP and agent_module.sys.platform == "win32":
+        # CREATE_NEW_PROCESS_GROUP 是 Windows-only 常量，POSIX 的 subprocess
+        # 模块上不存在，直接引用会 AttributeError——先按属性探测。
+        if getattr(agent_module.subprocess, "CREATE_NEW_PROCESS_GROUP", None) \
+                and agent_module.sys.platform == "win32":
             self.assertEqual(
                 captured["kwargs"]["creationflags"],
                 agent_module.subprocess.CREATE_NEW_PROCESS_GROUP,
