@@ -483,7 +483,7 @@ TERMS_CLICK_SELECTORS = [
 ]
 
 Status = Literal["OK", "ALREADY", "FAIL"]
-AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool", "sub2api", "xmiaom", "glados", "yunzhi", "ilovecat", "jianzhile", "nailao", "pmcat"]
+AdapterKind = Literal["browser", "bohe", "newapi_profile", "arkengine", "agentrouter", "tabitoken", "justwoker", "gorouter", "mzlone", "ultrarouter", "nexa", "abnt", "relayfor", "darkforger", "pool", "sub2api", "xmiaom", "glados", "yunzhi", "ilovecat", "jianzhile", "nailao", "pmcat", "howtofix"]
 
 
 @dataclass
@@ -1718,6 +1718,24 @@ _BUILTIN_SITE_ADAPTERS: list[SiteAdapter] = [
     # 91token(91token.com)—— 2026-11-13 接入。标准 New API(v1.0.0-rc.40),
     # LinuxDO/GitHub OAuth 登录,签到 /profile「立即签到」+ 确认门。通用 newapi_profile 通道。
     _N("91token", "https://91token.com/profile", prefer_catalog_url=True),
+    # howtofix(howtofix.id)—— 2026-11-14 接入。New API 外壳但网页签到被服务端
+    # 禁用(CLI only),专用 howtofix_checkin:POST api.howtofix.id/v1/cli/checkin
+    # (Bearer sk- key + hwid 设备头),浏览器上下文 fetch 过 CF 1010。sk- key 在
+    # accounts 文件第二行;英文 UI 无通用中文选择器。
+    _B(
+        "howtofix",
+        "https://howtofix.id/profile",
+        signs=[
+            'button:has-text("Check in now")',
+            'button:has-text("Check-in now")',
+        ],
+        already=[
+            'button:has-text("Checked in")',
+            'text=Check-in successful',
+        ],
+        prefer_catalog_url=True,
+        kind="howtofix",
+    ),
 ]
 
 
@@ -1991,6 +2009,19 @@ def _adapter_from_yaml_entry(
             prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
             login_url=str(entry.get("login_url", "") or ""),
             kind="nailao",
+        )
+    if kind == "howtofix":
+        # howtofix.id 2026-11-14:网页签到被服务端禁用(CLI only),专用
+        # howtofix_checkin 流程(kind 必须透传,否则落 browser 默认永远 no_confirm。
+        # kind 透传是 nailao 同款坑,2026-10-29 实证。
+        return _B(
+            name, url,
+            signs=list(signs) if signs is not None else None,
+            already=list(already) if already is not None else None,
+            ready_rounds=rr,
+            prefer_catalog_url=bool(entry.get("prefer_catalog_url", True)),
+            login_url=str(entry.get("login_url", "") or ""),
+            kind="howtofix",
         )
     if kind == "xmiaom":
         return _B(
@@ -10133,6 +10164,159 @@ async def nailao_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinRes
     return fail_result("no_grant", detail=f"nailao checkin api: {message}", adapter=kind, stage="confirm")
 
 
+def is_howtofix_site(site_url: str) -> bool:
+    """howtofix.id HowToFix 站判定."""
+    return "howtofix.id" in (site_url or "").lower()
+
+
+def is_howtofix_name(name: str) -> bool:
+    """howtofix 站点名称判定."""
+    return "howtofix" in (name or "").lower()
+
+
+def _howtofix_device_id() -> str:
+    """Reproduce howtofixcli's device fingerprint (chunk-ZDRKAGKM hwid v1):
+    darwin → IOPlatformUUID; fallback hostname. device_id = HMAC-SHA256
+    (key='howtofix-cli-hwid-v1', msg=UUID) hex[:32]. 服务端按 device 去重
+    「device already claimed」。
+    """
+    import hashlib as _hashlib
+    import platform as _platform
+    import subprocess as _subprocess
+    value = ""
+    try:
+        if _platform.system() == "Darwin":
+            out = _subprocess.run(
+                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+            m = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', out)
+            value = m.group(1) if m else ""
+    except Exception:
+        value = ""
+    if not value:
+        value = _platform.node() or "unknown-host"
+    import hmac as _hmac
+    return _hmac.new(
+        "howtofix-cli-hwid-v1".encode(), value.encode(), _hashlib.sha256
+    ).hexdigest()[:32]
+
+
+async def howtofix_checkin(page, adapter: SiteAdapter, browser=None) -> CheckinResult:
+    """howtofix (howtofix.id / HowToFix) 签到 — 2026-11-14 接入的专用 CLI 协议流程。
+
+    站点把网页签到在服务端禁用了:POST /api/user/checkin(网页 Bearer)恒回
+    200 + {"success":false,"message":"Daily check-in is available in the
+    HowToFix CLI only"}。真签到入口是 CLI 网关(逆向 howtofixcli@0.7.46):
+      POST https://api.howtofix.id/v1/cli/checkin
+      Headers: Authorization: Bearer <sk- API key>
+               X-HowToFix-Device: <hwid 指纹, HMAC-SHA256('howtofix-cli-hwid-v1', IOPlatformUUID)[:32]>
+               X-HowToFix-Client: CLI (0.7.46)
+    - GET 同路径 → {"data":{"checked_in_today":bool, "enabled":bool,...}}
+    - POST success:true → {"data":{"checkin_date","quota_awarded"}} (quota/500000 = USD)
+    - 已签再 POST → message 带 already/claimed 语义; blocked → device/account 拦截
+    api.howtofix.id 有 Cloudflare 1010 TLS 指纹拦截(裸 urllib/python-requests 全被拒),
+    所以必须借 9222 浏览器上下文发 fetch(真实 Chrome TLS 指纹)。
+
+    sk- key 来自账密文件 get_account_credential('howtofix')[1](第二行),经
+    /keys UI「复制」取得;token 不出页面、不落日志。
+    """
+    kind = adapter.kind or "howtofix"
+    print(f"  howtofix CLI flow: {adapter.name}", flush=True)
+
+    creds = get_account_credential(adapter.name)
+    api_key = creds[1].strip() if creds else ""
+    if not api_key.startswith("sk-"):
+        return fail_result(
+            "auth_required",
+            detail="howtofix: no sk- API key registered in accounts file",
+            adapter=kind, stage="auth",
+        )
+
+    device_id = _howtofix_device_id()
+    try:
+        # 打开站点页(借会话环境;fetch 是跨域 CORS-open 的 API 域,不受站点同源限制)
+        # 用 adapter.url 而非硬编码,URL 漂移时 yaml/DB 改了即生效。
+        try:
+            await page.goto(adapter.url or "https://howtofix.id/profile", wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+            await asyncio.sleep(3)
+        except Exception:
+            pass
+
+        js = """async ([key, did]) => {
+            const H = {'Authorization': 'Bearer ' + key,
+                       'X-HowToFix-Device': did,
+                       'X-HowToFix-Client': 'CLI (0.7.46)'};
+            try {
+                const g = await fetch('https://api.howtofix.id/v1/cli/checkin', {method:'GET', headers:H});
+                const gj = await g.json().catch(() => ({}));
+                if (g.status === 401 || g.status === 403) {
+                    return {stage:'auth', status:g.status, body:JSON.stringify(gj).slice(0,160)};
+                }
+                const d = (gj && gj.data) || {};
+                if (gj.success && d.checked_in_today) {
+                    return {stage:'already', quota_today:Number(d.quota_today ?? 0) || 0};
+                }
+                if (gj.success && d.enabled === false) {
+                    return {stage:'disabled'};
+                }
+                // 未签 → POST
+                const p = await fetch('https://api.howtofix.id/v1/cli/checkin', {method:'POST', headers:H});
+                const pj = await p.json().catch(() => ({}));
+                if (pj.success === true) {
+                    return {stage:'claimed', quota_awarded:Number((pj.data||{}).quota_awarded ?? 0) || 0};
+                }
+                const msg = typeof pj.message === 'string' ? pj.message : `gateway answered ${p.status}`;
+                // 只认实测到的已签语义(already/claimed/once per day);「签到|今日」等
+                // 宽匹配会把「签到失败/维护中」误判 ALREADY(zerocat/huaweicloud 同款假阳性)。
+                if (/already|claimed|once per day/i.test(msg)) {
+                    return {stage:'already', message:msg.slice(0,120)};
+                }
+                return {stage:'error', status:p.status, message:msg.slice(0,160)};
+            } catch (e) {
+                return {stage:'exception', message:String(e && e.message || e).slice(0,120)};
+            }
+        }"""
+        res = await page.evaluate(js, [api_key, device_id])
+    except Exception as exc:
+        # evaluate 挂了(页面被 CF 整页拦/浏览器侧网络异常)属网关链路问题,
+        # 归 upstream_unavailable,不落 no_confirm(那是「点击后无确认」语义)。
+        return fail_result("upstream_unavailable", detail=f"howtofix fetch failed: {str(exc)[:100]}", adapter=kind, stage="gateway")
+
+    stage = res.get("stage")
+    if stage == "claimed":
+        quota = res.get("quota_awarded", 0)
+        dollars = round(quota / 500000.0, 4)
+        detail = f"howtofix CLI 签到成功 (+${dollars:.2f})"
+        action = ActionEvidence(
+            kind="api_post",
+            target="/v1/cli/checkin",
+            attempted_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        return ok_result(
+            "OK", adapter=kind, detail=detail, action=action,
+            confirmation=dom_confirmation(f"check-in successful +${dollars:.2f}", done_state=True),
+            pre_state="PENDING", post_state="DONE", transition="PENDING_TO_DONE", attribution="runner",
+        )
+    if stage == "already":
+        quota = res.get("quota_today", 0)
+        dollars = round(quota / 500000.0, 4)
+        msg = res.get("message") or (f"今日已签到 (+${dollars:.2f})" if quota else "今日已签到")
+        return ok_result(
+            "ALREADY", adapter=kind, detail=f"howtofix {msg}",
+            action=ActionEvidence(kind="none"),
+            confirmation=dom_confirmation(msg, done_state=True),
+            pre_state="DONE", post_state="DONE", transition="NONE", attribution="site",
+        )
+    if stage == "auth":
+        return fail_result("auth_required", detail=f"howtofix gateway rejected key ({res.get('status')})", adapter=kind, stage="auth")
+    if stage == "disabled":
+        return fail_result("no_grant", detail="howtofix checkin disabled for this account", adapter=kind, stage="confirm")
+    if stage == "exception":
+        return fail_result("upstream_unavailable", detail=f"howtofix gateway unreachable: {res.get('message','')}", adapter=kind)
+    return fail_result("no_grant", detail=f"howtofix: {res.get('message') or res}", adapter=kind, stage="confirm")
+
+
 def is_huaweicloud_site(site_url: str) -> bool:
     """developer.huaweicloud.com 华为云开发者成长中心判定."""
     u = (site_url or "").lower()
@@ -13834,6 +14018,10 @@ async def legacy_checkin_on_page(
         # 专用拦截器(只盯 /api/user/*)抓不到 Bearer → 恒 auth_required。
         if kind == "nailao":
             return await nailao_checkin(page, adapter, browser=browser)
+        # howtofix 2026-11-14:网页签到被服务端禁用(CLI only),唯一通道是
+        # CLI 网关 POST /v1/cli/checkin(浏览器上下文 fetch 过 CF 1010)。
+        if kind == "howtofix" or is_howtofix_site(site_url) or is_howtofix_name(adapter.name):
+            return await howtofix_checkin(page, adapter, browser=browser)
         if kind == "xmiaom" or is_xmiaom_site(site_url) or is_xmiaom_name(adapter.name):
             return await xmiaom_checkin(page, adapter, browser=browser)
         if kind == "jianzhile" or is_jianzhile_site(site_url) or is_jianzhile_name(adapter.name):

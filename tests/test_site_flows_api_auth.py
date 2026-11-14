@@ -1105,6 +1105,172 @@ class TestNailaoCheckin(unittest.TestCase):
         self.assertEqual(res.reason, "no_grant")
 
 
+class TestHowtofixCheckin(unittest.TestCase):
+    """howtofix (howtofix.id) 2026-11-14 接入的专用 CLI 协议流程.
+
+    网页签到被服务端禁用(CLI only),唯一通道是浏览器上下文内
+    POST api.howtofix.id/v1/cli/checkin(Bearer sk- key + hwid 设备头)。
+    关键红线:sk- key 只经 evaluate 参数通道,不落日志/结果。
+    """
+
+    def setUp(self):
+        self.m = load_mod(force=True)
+        import asyncio as _aio
+        self.asyncio = _aio
+        stub = mock.patch.object(
+            self.m, "get_account_credential",
+            lambda name: ("ci-account-howtofix", "sk-ci-key-howtofix-000000000000"),
+        )
+        stub.start()
+        self.addCleanup(stub.stop)
+
+    def _adapter(self):
+        return self.m.SiteAdapter(
+            name="howtofix",
+            url="https://howtofix.id/profile",
+            kind="howtofix",
+            prefer_catalog_url=True,
+        )
+
+    def _page(self, evaluate_return=None, evaluate_exc=None):
+        """假页:evaluate 直接回放 JS 桥返回值(模拟网关各 stage)。"""
+        got = {"args": None, "goto_urls": []}
+
+        class FakePage:
+            async def goto(self, url, *a, **k):
+                got["goto_urls"].append(url)
+
+            async def evaluate(self, expr, *args):
+                got["args"] = args
+                if evaluate_exc is not None:
+                    raise evaluate_exc
+                return evaluate_return
+
+        return FakePage(), got
+
+    def _device(self):
+        stub = mock.patch.object(
+            self.m, "_howtofix_device_id", return_value="dev-fp-32chars-ok"
+        )
+        stub.start()
+        self.addCleanup(stub.stop)
+        return "dev-fp-32chars-ok"
+
+    def test_no_sk_key_fails_closed(self):
+        """凭据缺失/非 sk- 前缀 → auth_required,不发任何网关请求。"""
+        with mock.patch.object(self.m, "get_account_credential", lambda name: None):
+            page, got = self._page({"stage": "claimed"})
+            res = self.asyncio.run(self.m.howtofix_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "auth_required")
+        self.assertEqual(res.stage, "auth")
+        self.assertIsNone(got["args"])
+
+    def test_success_maps_ok_with_reward(self):
+        did = self._device()
+        page, got = self._page({"stage": "claimed", "quota_awarded": 2500000})
+        res = self.asyncio.run(self.m.howtofix_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "OK")
+        self.assertIn("+$5.00", res.detail)
+        self.assertEqual(res.action.kind, "api_post")
+        self.assertEqual(res.action.target, "/v1/cli/checkin")
+        self.assertEqual(res.transition, "PENDING_TO_DONE")
+        # key/device 只经 evaluate 参数通道
+        self.assertEqual(got["args"][0][0], "sk-ci-key-howtofix-000000000000")
+        self.assertEqual(got["args"][0][1], did)
+        self.assertNotIn("sk-ci-key-howtofix", res.detail)
+        self.assertNotIn("sk-ci-key-howtofix", res.msg())
+
+    def test_already_checked_in_maps_already(self):
+        self._device()
+        page, _got = self._page(
+            {"stage": "already", "quota_today": 2500000}
+        )
+        res = self.asyncio.run(self.m.howtofix_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "ALREADY")
+        self.assertIn("+$5.00", res.detail)
+        self.assertNotIn("sk-ci-key-howtofix", res.detail)
+
+    def test_gateway_rejects_key_maps_auth_required(self):
+        self._device()
+        page, _got = self._page({"stage": "auth", "status": 401})
+        res = self.asyncio.run(self.m.howtofix_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "auth_required")
+        self.assertNotIn("sk-ci-key-howtofix", res.detail)
+
+    def test_disabled_maps_no_grant(self):
+        self._device()
+        page, _got = self._page({"stage": "disabled"})
+        res = self.asyncio.run(self.m.howtofix_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_grant")
+
+    def test_gateway_error_message_is_not_already(self):
+        """P1 根修回归:维护类报错(含「签到」字样)不得误判 ALREADY。"""
+        self._device()
+        page, _got = self._page(
+            {"stage": "error", "status": 503, "message": "checkin temporarily under maintenance"}
+        )
+        res = self.asyncio.run(self.m.howtofix_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "no_grant")
+
+    def test_js_exception_maps_upstream_unavailable(self):
+        self._device()
+        page, _got = self._page(evaluate_exc=RuntimeError("evaluate failed"))
+        res = self.asyncio.run(self.m.howtofix_checkin(page, self._adapter()))
+        self.assertEqual(res.status, "FAIL")
+        self.assertEqual(res.reason, "upstream_unavailable")
+
+    def test_already_regexp_is_strict(self):
+        """源码守卫:POST 失败兜底正则只认实测已签语义,禁止宽中文匹配。"""
+        import inspect
+        src = inspect.getsource(self.m.howtofix_checkin)
+        self.assertIn("once per day", src)
+        # 已移除「签到|今日」宽匹配(zerocat/huaweicloud 假 ALREADY 同款坑)
+        self.assertNotIn("/already|claimed|签到|今日|once per day/i", src)
+        # goto 必须用 adapter.url(非硬编码,防 URL 漂移失效)
+        self.assertIn("adapter.url", src)
+        self.assertNotIn('goto("https://howtofix.id/profile"', src)
+
+    def test_p0_no_cookie_clear_and_key_not_logged(self):
+        import inspect
+        import re
+        src = inspect.getsource(self.m.howtofix_checkin)
+        code = re.sub(r'"""[\s\S]*?"""', "", src)
+        code = "\n".join(
+            line for line in code.splitlines() if not line.lstrip().startswith("#")
+        ).lower()
+        for banned in (
+            "clear_cookies(",
+            "clear_localstorage",
+            "clear_all(",
+            "localstorage.clear",
+            "document.cookie",
+            "deleteallcookies",
+        ):
+            self.assertNotIn(banned, code)
+        for line in src.splitlines():
+            if "print(" in line:
+                self.assertNotIn("api_key", line)
+                self.assertNotIn("{key", line)
+
+    def test_dispatch_routes_howtofix(self):
+        import inspect
+        src = inspect.getsource(self.m.legacy_checkin_on_page)
+        self.assertIn('kind == "howtofix"', src)
+        self.assertIn("howtofix_checkin", src)
+
+    def test_device_id_shape_and_stability(self):
+        """指纹是 32 hex 且同机两次调用一致(服务端按 device 去重)。"""
+        d1 = self.m._howtofix_device_id()
+        d2 = self.m._howtofix_device_id()
+        self.assertEqual(d1, d2)
+        self.assertEqual(len(d1), 32)
+        int(d1, 16)  # 纯 hex
+
+
 class TestHuaweicloud(unittest.TestCase):
     """华为云开发者成长中心 (developer.huaweicloud.com/grow) 测试集."""
 

@@ -177,6 +177,10 @@ class TestSitesYaml(unittest.TestCase):
             "leileihog（https://fapi.leileihog.top）\n"
             "ci-account-leileihog\n"
             "ci-password-leileihog\n"
+            "\n"
+            "howtofix（howtofix.id, sk- key 即 CLI 网关 Bearer）\n"
+            "ci-account-howtofix\n"
+            "ci-sk-key-howtofix\n"
         )
         fd, path = tempfile.mkstemp(suffix=".md")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -1186,6 +1190,37 @@ class TestSitesYaml(unittest.TestCase):
         self.assertEqual(builtin_entry.url, "https://91token.com/profile")
         # LinuxDO/GitHub OAuth 站:不应登记账密(依赖共享 9222 会话)
         self.assertIsNone(get_account_credential("91token"))
+
+    def test_yaml_registers_howtofix_entry(self):
+        """howtofix(howtofix.id) 2026-11-14 接入:New API 外壳但网页签到被服务端
+        禁用(CLI only),kind=howtofix 专用通道(POST /v1/cli/checkin),
+        prefer_catalog_url,选择器钉英文文案(Check in now / Checked in)。"""
+        import yaml
+        yaml_path = ROOT / "sites.yaml"
+        self.assertTrue(yaml_path.exists())
+        with open(yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        entry = next((e for e in data.get("sites", []) if e.get("name") == "howtofix"), None)
+        self.assertIsNotNone(entry, "sites.yaml 应有 howtofix 条目")
+        self._patch_accounts_fixture()
+        from stealth_checkin_runner import (
+            _adapter_from_yaml_entry, resolve_site, _BUILTIN_SITE_ADAPTERS, get_account_credential,
+        )
+        a = _adapter_from_yaml_entry(entry)
+        self.assertEqual(a.kind, "howtofix", "kind 必须透传专用通道(nailao 同款坑)")
+        self.assertEqual(a.url, "https://howtofix.id/profile")
+        self.assertTrue(a.prefer_catalog_url)
+        resolved = resolve_site("howtofix", "https://howtofix.id/profile")
+        self.assertEqual(resolved.url, "https://howtofix.id/profile")
+        self.assertEqual(resolved.kind, "howtofix")
+        builtin_entry = next((b for b in _BUILTIN_SITE_ADAPTERS if b.name == "howtofix"), None)
+        self.assertIsNotNone(builtin_entry, "内置 adapter 应包含 howtofix")
+        self.assertEqual(builtin_entry.kind, "howtofix")
+        self.assertEqual(builtin_entry.url, "https://howtofix.id/profile")
+        self.assertEqual(builtin_entry.sign_selectors, a.sign_selectors)
+        self.assertEqual(builtin_entry.already_selectors, a.already_selectors)
+        # 专用通道按 sk- API key 鉴权,账密文件必须登记(key 在第二行)
+        self.assertIsNotNone(get_account_credential("howtofix"))
 
     def test_yaml_registers_fuli_entry(self):
         """伏枥(dash.free-ai.de5.net) 2026-11-05 接入:标准 LinuxDO + New API 站,

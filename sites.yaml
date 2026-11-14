@@ -1684,3 +1684,26 @@ sites:
     url: https://91token.com/profile
     kind: newapi_profile
     prefer_catalog_url: true
+
+  # howtofix(howtofix.id / HowToFix)—— 2026-11-14 接入。
+  # 标准 New API 外壳(version=v0.0.0, checkin_enabled=true, password_login_enabled=true,
+  # discord_oauth=true, linuxdo_oauth=false, turnstile_check=false, quota_per_unit=500000 USD),
+  # 但网页签到被服务端禁用:POST /api/user/checkin 恒回
+  # {"success":false,"message":"Daily check-in is available in the HowToFix CLI only"}。
+  # 真签到入口 = CLI 网关(逆向 howtofixcli@0.7.46):
+  #   POST https://api.howtofix.id/v1/cli/checkin
+  #   Authorization: Bearer <sk- key> + X-HowToFix-Device(hwid HMAC) + X-HowToFix-Client
+  # api.howtofix.id 有 CF 1010 TLS 指纹拦截,裸 HTTP 客户端全被拒 → runner 在 9222
+  # 浏览器上下文内 fetch(真实 Chrome 指纹)。sk- key 登记在 accounts 文件第二行,
+  # 经 /keys UI「复制」取得(列表 API 恒掩码)。奖励固定 $5(2500000 quota)。
+  # 8765/8766 面板与会话复用同 9222;无 LinuxDO OAuth。
+  - name: 'howtofix'
+    url: https://howtofix.id/profile
+    kind: howtofix
+    prefer_catalog_url: true
+    signs:
+      - 'button:has-text("Check in now")'
+      - 'button:has-text("Check-in now")'
+    already:
+      - 'button:has-text("Checked in")'
+      - 'text=Check-in successful'
