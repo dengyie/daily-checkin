@@ -239,22 +239,23 @@ class AcceptExecuteReportFlowTests(AgentTestBase):
                 self.wait_for(lambda: any(r["path"] == "/api/dispatch/result" for r in self.panel.received)),
                 "result callback not observed",
             )
-        # Mutex released after execution so the next job can be accepted.
-        # report-then-release-sync 三段全在 executor 线程：回调先于 finally 的
-        # release，release 之后还有 _sync_db——每段之间都是线程调度窗口，
-        # CI 慢核上观察到前一段时下一段可能尚未执行（实测红点逐级后移：
-        # locked() → sync called 0 times）。release 与 sync 都是产品不变量
-        # （fault-isolated），断言同步的最外层事件 sync 被调用（蕴含
-        # release 已发生），语义不变只放宽时点。
-        self.assertTrue(
-            self.wait_for(lambda: sync.call_count >= 1),
-            "post-job db sync not observed (job teardown incomplete)",
-        )
-        self.assertFalse(self.agent._job_mutex.locked())
-        result = next(r for r in self.panel.received if r["path"] == "/api/dispatch/result")
-        self.assertEqual(result["token"], TOKEN)
-        self.assertEqual(result["body"], {"job_id": 9, "status": "done", "exit_code": 0, "message": "[伏枥] OK"})
-        sync.assert_called_once()
+            # Mutex released after execution so the next job can be accepted.
+            # report-then-release-sync 三段全在 executor 线程：回调先于 finally
+            # 的 release，release 之后还有 _sync_db——每段之间都是线程调度
+            # 窗口，CI 慢核上观察到前一段时下一段可能尚未执行（实测红点逐级
+            # 后移：locked() → sync called 0 times）。mock 的 with 块必须在
+            # teardown 完成后才能退出（否则 executor 线程在撤销后调用真
+            # _sync_db，call_count 冻结在 0），因此两个不变量断言都在块内
+            # 轮询：sync 是终结序列最外层事件（蕴含 release 已发生）。
+            self.assertTrue(
+                self.wait_for(lambda: sync.call_count >= 1),
+                "post-job db sync not observed (job teardown incomplete)",
+            )
+            self.assertFalse(self.agent._job_mutex.locked())
+            result = next(r for r in self.panel.received if r["path"] == "/api/dispatch/result")
+            self.assertEqual(result["token"], TOKEN)
+            self.assertEqual(result["body"], {"job_id": 9, "status": "done", "exit_code": 0, "message": "[伏枥] OK"})
+            sync.assert_called_once()
 
     def test_execute_job_reports_failure_when_runner_raises(self):
         self.assertTrue(self.agent._job_mutex.acquire(blocking=False))
