@@ -75,8 +75,14 @@ class TestDoctorHelpers(unittest.TestCase):
                                               "DAILY_CHECKIN_LOG_DIR": td}):
                 # darwin 分支的 cron 入口/launchd 检查在 CI runner 的真实 home
                 # 上必然 WARN（~/.hermes 入口不存在、launchd 任务未注册），
-                # 会把 exit 推到 1——与本测试关注的 8765/8766 SKIP 语义无关，
-                # 指向临时目录并注册空的 launchctl 出参隔离机器状态。
+                # 会把 exit 推到 1——与本测试关注的 8765/8766 SKIP 语义无关。
+                # home 指向临时目录后预置与仓库一致的 ~/.hermes 入口（顺带验证
+                # "一致"判定路径），launchctl 出参 mock 成已注册，隔离机器状态。
+                hermes_sh = P(td) / ".hermes" / "scripts" / "daily-checkin-cdp.sh"
+                hermes_sh.parent.mkdir(parents=True, exist_ok=True)
+                hermes_sh.write_bytes(
+                    (P(__file__).resolve().parent.parent / "scripts"
+                     / "daily-checkin-cdp.sh").read_bytes())
                 with mock.patch("pathlib.Path.home", return_value=P(td)), \
                      mock.patch("subprocess.run",
                                 return_value=mock.Mock(returncode=0,

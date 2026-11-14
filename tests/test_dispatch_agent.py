@@ -240,7 +240,14 @@ class AcceptExecuteReportFlowTests(AgentTestBase):
                 "result callback not observed",
             )
         # Mutex released after execution so the next job can be accepted.
-        self.assertFalse(self.agent._job_mutex.locked())
+        # report-then-release：回调先于 finally 的 release，两者之间是线程
+        # 调度窗口——CI 慢核上观察到回调时 release 可能尚未执行（本机单跑
+        # 复现 stash 对照）。release 是产品不变量（fault-isolated），用
+        # wait_for 轮询其发生，语义不变。
+        self.assertTrue(
+            self.wait_for(lambda: not self.agent._job_mutex.locked()),
+            "job mutex not released after result callback",
+        )
         result = next(r for r in self.panel.received if r["path"] == "/api/dispatch/result")
         self.assertEqual(result["token"], TOKEN)
         self.assertEqual(result["body"], {"job_id": 9, "status": "done", "exit_code": 0, "message": "[伏枥] OK"})
